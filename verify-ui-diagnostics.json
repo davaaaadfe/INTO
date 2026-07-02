@@ -1,0 +1,31 @@
+{
+  "diagnostics": {
+    "links": [
+      {
+        "rel": "stylesheet",
+        "href": "/app/globals.css"
+      },
+      {
+        "rel": "shortcut icon",
+        "href": "/favicon.svg"
+      },
+      {
+        "rel": "icon",
+        "href": "/favicon.svg"
+      },
+      {
+        "rel": "modulepreload",
+        "href": "/@id/__x00__virtual:vite-rsc/entry-browser"
+      }
+    ],
+    "sheets": [
+      {
+        "href": "http://localhost:3001/app/globals.css",
+        "ruleCount": 49
+      }
+    ],
+    "mainBackground": "rgb(246, 247, 244)",
+    "bodyText": "INTO\n\nInvoice booking automation\n\nBulk upload invoices, review extracted fields, validate every total, and book approved purchases into Exact Online.\n\n2\nTotal\n0\nReady\n2\nNeed check\n0\nBooked\nBulk upload\n\nDrop multiple invoices here or browse from your computer.\n\nAccepted file types: PDF, JPG, PNG, XML, UBL\n\nBrowse files\nExact Online\n\nNot connected\n\nExact master data is read-only in INTO. Suppliers, journals, G/L accounts, VAT codes, cost centers, cost units, and payment conditions are only read an"
+  },
+  "failedRequests": []
+}

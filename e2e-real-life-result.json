@@ -1,0 +1,23 @@
+{
+  "uploadedFiles": [
+    "google-reverse-subscription.pdf",
+    "ambiguous-acme.pdf",
+    "payment-immediate.pdf",
+    "inbody-internal.pdf",
+    "klm-flight-david.pdf"
+  ],
+  "checkedSignals": [
+    "Supplier Review Required",
+    "Payment Condition Review Required",
+    "Ready to Book",
+    "Purchase Journal intelligence",
+    "VAT code",
+    "Attachment",
+    "Booked",
+    "Journal",
+    "Confidence",
+    "Ready to upload with booking"
+  ],
+  "bookedInvoice": true,
+  "screenshot": "C:\\Users\\inbod\\Documents\\Codex\\2026-06-15\\build-a-web-application-called-into\\outputs\\into-real-life-e2e.png"
+}

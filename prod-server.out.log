@@ -1,0 +1,8 @@
+
+> into-invoice-automation@0.1.0 start
+> vinext start --host 127.0.0.1
+
+
+  vinext start  (port 3000)
+
+[vinext] Production server running at http://0.0.0.0:3000

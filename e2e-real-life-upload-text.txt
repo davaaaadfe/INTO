@@ -1,0 +1,145 @@
+INTO
+
+Invoice booking automation
+
+Bulk upload invoices, review extracted fields, validate every total, and book approved purchases into Exact Online.
+
+7
+Total
+5
+Ready
+2
+Need check
+0
+Booked
+Bulk upload
+
+PDF, JPG, PNG, XML, and UBL files are accepted.
+
+Upload
+Exact Online
+
+Connected to division 123456
+
+Reconnect
+Outlook ingestion
+
+Not connected
+
+Connect
+Process inbox
+Processed 5 invoice file(s).
+Invoice queue
+
+Uploaded and Outlook-detected invoices move through reading, validation, and booking.
+
+Book all ready invoices
+File	Supplier	Invoice	Amount	Journal	Confidence	Status	Issues	Action
+klm-flight-david.pdf
+manual - 50 B
+	KLM Royal Dutch Airlines	INV-KLM-FLIGHT-DAV	€352.00	60	88%	Ready to Book	0	Book invoice
+inbody-internal.pdf
+manual - 49 B
+	InBody Co Ltd	INV-INBODY-INTERNA	€331.00	61	88%	Ready to Book	0	Book invoice
+payment-mismatch.pdf
+manual - 50 B
+	Noordzee Office Supplies	INV-PAYMENT-MISMAT	€538.46	60	52%	Need check	4	Book invoice
+ambiguous-acme.pdf
+manual - 48 B
+	US Cloud Inc	INV-AMBIGUOUS-ACME	€203.00	60	88%	Ready to Book	0	Book invoice
+google-reverse-subscription.pdf
+manual - 61 B
+	Google Ireland Limited	INV-GOOGLE-REVERSE	€748.00	60	88%	Ready to Book	0	Book invoice
+missing-due-date-invoice.png
+manual - 117 KB
+	Delta IT Services	INV-CHECK-104	€254.10	60	88%	Need check	1	Book invoice
+seed-invoice.pdf
+manual - 117 KB
+	Noordzee Office Supplies	INV-SEED-001	€580.80	60	88%	Ready to Book	0	Book invoice
+Review invoice
+
+Fix fields here, then save to rerun validation.
+
+Ready to Book
+Confidence 94%
+All required fields are valid.
+Purchase Journal intelligence
+
+Threshold 86%
+
+Approve intelligence
+Supplier
+99%
+G/L account
+90%
+VAT code
+95%
+Cost centre
+88%
+Cost unit
+88%
+Payment
+94%
+Overall
+88%
+Attachment
+Ready to upload with booking
+invoices/file_c8d0fe56-c8b6-441f-9b0c-bd822df59614/google-reverse-subscription.pdf
+Supplier
+Google Ireland Limited
+VAT number - 99%
+Entry data
+Journal
+60 - Default purchase journal.
+Year / period
+2026 / 6
+Entry no.
+MOCK-80EADF94
+Invoice data
+Description
+2026.06.Google Workspace
+Payment
+30 - 30 days
+Your ref.
+INV-GOOGLE-REVERSE
+Total
+EUR 748.00
+G/L account	Description	From / To	Cost	VAT	Amount
+
+4420
+Software subscriptions
+	2026.06 Google Workspace	2026-06-01 / 2026-06-30
+Service period spans 6 months.
+	AMS / IT	
+7 - EU acquisition VAT
+95%
+	
+748.00
+VAT 0.00
+
+Difference	0.00
+Supplier name
+Supplier VAT number
+Chamber of Commerce
+Supplier address
+Supplier country
+Invoice number
+Reference code
+Invoice date
+Due date
+Payment terms
+Currency
+Net amount
+VAT amount
+Gross amount
+IBAN
+Expense description
+Beneficiary
+Benefit start date
+Benefit end date
+Company VAT number
+Line items
+Google Workspace
+748.00
+Save changes
+Book invoice

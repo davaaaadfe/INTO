@@ -1,119 +1,53 @@
-# INTO
+# npm - a JavaScript package manager
 
-INTO is an invoice booking automation tool for bulk invoice intake, validation,
-review, and Exact Online booking. The current implementation uses mock OCR and
-mock Outlook ingestion while keeping those integration points isolated behind
-service modules. Exact Online can run in mock mode or real OAuth/master-data sync
-mode.
+### Requirements
 
-## Structure
+You should be running a currently supported version of [Node.js](https://nodejs.org/en/download/) to run **`npm`**.  For a list of which versions of Node.js are currently supported, please see the [Node.js releases](https://nodejs.org/en/about/previous-releases) page.
 
-- `app/api/invoices` handles bulk upload, extraction, validation, review saves,
-  single booking, and bulk booking.
-- `app/api/exact` contains the Exact Online OAuth and connection surface.
-- `app/api/outlook` contains Outlook connection and invoice email ingestion.
-- `components/into-workbench.tsx` is the product workbench UI.
-- `lib/services` separates extraction, validation, storage, Exact Online, and
-  Outlook logic.
-- `lib/repository/invoice-store.ts` is an in-memory mock repository for local
-  development.
-- `db/schema.ts` defines the Sites/D1 schema, and `db/postgres-schema.sql`
-  mirrors a production PostgreSQL schema.
+### Installation
 
-## Environment
+**`npm`** comes bundled with [**`node`**](https://nodejs.org/), & most third-party distributions, by default. Officially supported downloads/distributions can be found at: [nodejs.org/en/download](https://nodejs.org/en/download)
 
-Copy `.env.example` to `.env` for local development and fill in real values
-when replacing the mock adapters. Exact Online and Microsoft credentials are
-read from environment variables and are not hard-coded.
+#### Direct Download
 
-INTO includes a first-time setup wizard backed by `/api/setup/status`. When
-OAuth or storage configuration is incomplete, the UI shows clear green/red
-status indicators and lists the missing environment variable names without
-exposing any secret values. `DATABASE_URL` is optional; in database-free mode,
-INTO treats Exact Online as the durable booking record and checks Exact for
-duplicate invoice reference plus amount before booking.
-
-### Real Exact Online connection
-
-1. Create or open your Exact Online app registration.
-2. Add this redirect URI:
-
-```text
-http://localhost:3000/api/exact/callback
-```
-
-3. Put the credentials in `.env`:
+You can download & install **`npm`** directly from [**npmjs**.com](https://npmjs.com/) using our custom `install.sh` script:
 
 ```bash
-EXACT_ONLINE_MODE=real
-EXACT_ONLINE_CLIENT_ID=your_exact_client_id
-EXACT_ONLINE_CLIENT_SECRET=your_exact_client_secret
-EXACT_ONLINE_REDIRECT_URI=http://localhost:3000/api/exact/callback
-EXACT_ONLINE_BASE_URL=https://start.exactonline.nl
-EXACT_TOKEN_ENCRYPTION_KEY=use-a-long-random-secret
-EXACT_OAUTH_STATE_SECRET=use-another-long-random-secret
-EXACT_ONLINE_ENABLE_REAL_BOOKING=false
+curl -qL https://www.npmjs.com/install.sh | sh
 ```
 
-4. Restart the dev server, sign in as the system owner, and click `Connect Company Exact`.
+#### Node Version Managers
 
-In real mode, INTO exchanges the OAuth code, encrypts the access and refresh
-tokens for the company Exact account, discovers the current division, and syncs suppliers, payment
-conditions, journals, G/L accounts, cost centers, cost units, VAT codes, and
-available historical purchase data from Exact. Exact remains the source of
-truth.
+If you're looking to manage multiple versions of **`Node.js`** &/or **`npm`**, consider using a [node version manager](https://github.com/search?q=node+version+manager+archived%3Afalse&type=repositories&ref=advsearch)
 
-INTO is read-only for Exact master data. It may fetch and cache suppliers,
-payment conditions, journals, G/L accounts, cost centers, cost units, and VAT
-codes, but it must never create, update, patch, merge, or delete those records
-in Exact. The Exact API client includes a hard guard that blocks non-read
-requests to those master-data resources before a network request can be sent.
-
-Real purchase-entry posting is intentionally guarded. Keep
-`EXACT_ONLINE_ENABLE_REAL_BOOKING=false` until the Exact purchase-entry payload
-has been validated against your Exact division.
-
-## Development
+### Usage
 
 ```bash
-npm install
-npm run dev
+npm <command>
 ```
 
-Run validation tests:
+### Links & Resources
 
-```bash
-npm test
-```
+* [**Documentation**](https://docs.npmjs.com/) - Official docs & how-tos for all things **npm**
+    * Note: you can also search docs locally with `npm help-search <query>`
+* [**Bug Tracker**](https://github.com/npm/cli/issues) - Search or submit bugs against the CLI
+* [**Community Feedback and Discussions**](https://github.com/orgs/community/discussions/categories/npm) - Contribute ideas & discussion around the npm registry, website & CLI
+* [**RFCs**](https://github.com/npm/rfcs) - Contribute ideas & specifications for the API/design of the npm CLI
+* [**Service Status**](https://status.npmjs.org/) - Monitor the current status & see incident reports for the website & registry
+* [**Project Status**](https://npm.github.io/statusboard/) - See the health of all our maintained OSS projects in one view
+* [**Support**](https://www.npmjs.com/support) - Experiencing problems with the **npm** [website](https://npmjs.com) or [registry](https://registry.npmjs.org)? [File a ticket](https://www.npmjs.com/support)
 
-Generate D1 migrations after schema changes:
+### Acknowledgments
 
-```bash
-npm run db:generate
-```
+* `npm` is configured to use the **npm Public Registry** at [https://registry.npmjs.org](https://registry.npmjs.org) by default; Usage of this registry is subject to **Terms of Use** available at [https://npmjs.com/policies/terms](https://npmjs.com/policies/terms)
+* You can configure `npm` to use any other compatible registry you prefer. You can read more about [configuring third-party registries](https://docs.npmjs.com/cli/v7/using-npm/registry)
 
-## Vercel Deployment
+### FAQ on Branding
 
-Vercel is the default deployment target for OAuth integrations because it gives
-the app a stable HTTPS domain without ngrok. The repository includes:
+#### Is it "npm" or "NPM" or "Npm"?
 
-- `vercel.json`
-- `.vercelignore`
-- `npm run build:vercel`
+**`npm`** should never be capitalized unless it is being displayed in a location that is customarily all-capitals (ex. titles on `man` pages).
 
-Deploy the project in Vercel and set environment variables in Vercel Project
-Settings. Register these callback paths with the OAuth providers:
+#### Is "npm" an acronym for "Node Package Manager"?
 
-```text
-https://your-vercel-domain/api/exact/callback
-https://your-vercel-domain/api/outlook/callback
-```
-
-See `docs/VERCEL_DEPLOYMENT.md` and `docs/OAUTH_SETUP.md` for the full setup.
-
-## Sites Deployment
-
-This project keeps `.openai/hosting.json` configured with logical `DB` and
-`INVOICE_FILES` bindings so Sites can attach database and file storage resources
-when the source is saved and deployed. The database binding is optional for the
-Vercel database-free setup.
+Contrary to popular belief, **`npm`** **is not** an acronym for "Node Package Manager." It is a recursive backronymic abbreviation for **"npm is not an acronym"** (if the project were named "ninaa," then it would be an acronym). The precursor to **`npm`** was actually a bash utility named **"pm"**, which was the shortform name of **"pkgmakeinst"** - a bash function that installed various things on various platforms. If **`npm`** were ever considered an acronym, it would be as "node pm" or, potentially, "new pm".

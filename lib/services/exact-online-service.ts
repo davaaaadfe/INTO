@@ -7,7 +7,9 @@ import { isExactMasterDataStale } from "./exact-master-data-service";
 import { getStoredInvoiceFile } from "./storage-service";
 import { createId } from "../utils/id";
 import {
+  type ExactDuplicatePurchaseBooking,
   createRealExactPurchaseBooking,
+  findRealExactPurchaseBookingDuplicate,
   isMockExactConnection,
   isRealExactMode,
   refreshRealExactConnection,
@@ -68,6 +70,63 @@ export async function refreshExactTokenIfNeeded(
     expiresAt: new Date(Date.now() + 55 * 60 * 1000).toISOString(),
     updatedAt: new Date().toISOString(),
   };
+}
+
+function moneyCents(value: number | undefined | null) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.round(Math.abs(value) * 100)
+    : null;
+}
+
+function duplicateReferenceForInvoice(invoice: UploadedInvoice) {
+  return (
+    invoice.purchaseJournal?.yourRef ||
+    invoice.extractedData.referenceCode ||
+    invoice.extractedData.invoiceNumber ||
+    ""
+  ).trim();
+}
+
+function findMockExactDuplicatePurchaseBooking(
+  invoice: UploadedInvoice,
+  masterData: ExactMasterDataCache
+): ExactDuplicatePurchaseBooking | null {
+  const yourRef = duplicateReferenceForInvoice(invoice);
+  const totalAmount = invoice.extractedData.grossAmount || invoice.purchaseJournal?.totals.grossAmount || 0;
+  const expectedSupplier = invoice.purchaseJournal?.supplierResolution.selectedAccountId;
+
+  if (!yourRef || moneyCents(totalAmount) === null) {
+    return null;
+  }
+
+  const match = masterData.historicalPurchaseBookings.find((booking) => {
+    const bookingRef = booking.yourRef || booking.invoiceNumber || "";
+    if (bookingRef.trim().toLowerCase() !== yourRef.toLowerCase()) {
+      return false;
+    }
+    if (moneyCents(booking.totalAmount) !== moneyCents(totalAmount)) {
+      return false;
+    }
+    return !expectedSupplier || booking.supplierAccountId === expectedSupplier;
+  });
+
+  return match
+    ? {
+        exactBookingId: match.id,
+        yourRef,
+        totalAmount,
+        supplierAccountId: match.supplierAccountId,
+      }
+    : null;
+}
+
+function duplicateBookingMessage(duplicate: ExactDuplicatePurchaseBooking) {
+  return [
+    "Duplicate invoice blocked.",
+    `Exact Online already has a purchase booking with reference ${duplicate.yourRef}`,
+    `and amount ${duplicate.totalAmount.toFixed(2)}.`,
+    `Existing Exact reference: ${duplicate.exactBookingId}.`,
+  ].join(" ");
 }
 
 export async function bookInvoiceInExact(
@@ -168,7 +227,16 @@ export async function bookInvoiceInExact(
   }
 
   if (isRealExactMode() && !isMockExactConnection(connection)) {
+    const duplicate = await findRealExactPurchaseBookingDuplicate(connection, invoice);
+    if (duplicate) {
+      throw new Error(duplicateBookingMessage(duplicate));
+    }
     return createRealExactPurchaseBooking(connection, invoice, syncedMasterData);
+  }
+
+  const duplicate = findMockExactDuplicatePurchaseBooking(invoice, syncedMasterData);
+  if (duplicate) {
+    throw new Error(duplicateBookingMessage(duplicate));
   }
 
   if (/fail/i.test(invoice.extractedData.supplierName)) {

@@ -27,7 +27,6 @@ MICROSOFT_REDIRECT_URI=https://your-vercel-domain.vercel.app/api/outlook/callbac
 
 OAUTH_TOKEN_ENCRYPTION_KEY=
 OAUTH_STATE_SECRET=
-DATABASE_URL=
 STORAGE_PROVIDER=s3
 S3_ENDPOINT=
 S3_BUCKET=
@@ -39,6 +38,11 @@ S3_SECRET_ACCESS_KEY=
 Vercel provides `VERCEL_PROJECT_PRODUCTION_URL` or `VERCEL_URL`; INTO will derive
 the callback URLs automatically. Setting them explicitly is still recommended
 when using a custom domain.
+
+`DATABASE_URL` is optional. In database-free mode, INTO uses Exact Online as the
+long-term booking record and checks Exact for duplicate invoice references and
+amounts before booking. Without a database, INTO does not keep a durable
+application-side invoice archive or audit history across server restarts.
 
 ## 3. Callback URLs
 
@@ -81,7 +85,7 @@ when configuration is incomplete. The wizard shows:
 - Connect Company Exact Setup
 - Connect Company Outlook Setup
 - Environment Configuration Status
-- Database Status
+- Database-Free Mode or Database Status
 - Storage Status
 
 It returns only status information and missing environment variable names. It
@@ -89,6 +93,7 @@ never returns client secrets, tokens, encryption keys, or passwords.
 
 ## 5. Production Storage Notes
 
-Use a durable PostgreSQL database for invoice metadata and an S3-compatible
-storage provider for original invoice files. Local filesystem storage is only
-for development because Vercel serverless files are not durable.
+Use an S3-compatible storage provider for original invoice files. Local
+filesystem storage is only for development because Vercel serverless files are
+not durable. A PostgreSQL database is optional if you later want a durable INTO
+invoice archive and audit history in addition to Exact Online.

@@ -27,9 +27,11 @@ when replacing the mock adapters. Exact Online and Microsoft credentials are
 read from environment variables and are not hard-coded.
 
 INTO includes a first-time setup wizard backed by `/api/setup/status`. When
-OAuth, database, or storage configuration is incomplete, the UI shows clear
-green/red status indicators and lists the missing environment variable names
-without exposing any secret values.
+OAuth or storage configuration is incomplete, the UI shows clear green/red
+status indicators and lists the missing environment variable names without
+exposing any secret values. `DATABASE_URL` is optional; in database-free mode,
+INTO treats Exact Online as the durable booking record and checks Exact for
+duplicate invoice reference plus amount before booking.
 
 ### Real Exact Online connection
 
@@ -113,4 +115,5 @@ See `docs/VERCEL_DEPLOYMENT.md` and `docs/OAUTH_SETUP.md` for the full setup.
 
 This project keeps `.openai/hosting.json` configured with logical `DB` and
 `INVOICE_FILES` bindings so Sites can attach database and file storage resources
-when the source is saved and deployed.
+when the source is saved and deployed. The database binding is optional for the
+Vercel database-free setup.

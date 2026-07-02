@@ -1068,6 +1068,42 @@ export function markInvoiceBookingFailed(invoiceId: string, message: string) {
   return invoice;
 }
 
+export function markInvoiceNeedsReview(
+  invoiceId: string,
+  reason = "Marked as needs review by user."
+) {
+  const invoice = getInvoice(invoiceId);
+  if (!invoice || invoice.status === "Booked") {
+    return null;
+  }
+
+  const previousStatus = invoice.status;
+  invoice.status = "Validation Failed";
+  invoice.lastError = reason;
+  invoice.validationErrors = uniqueValidationErrors([
+    ...invoice.validationErrors,
+    {
+      id: createId("val"),
+      field: "purchaseJournal",
+      message: reason,
+      severity: "warning",
+    },
+  ]);
+  invoice.updatedAt = now();
+  addAuditEvent({
+    invoiceId,
+    type: "invoice_field_edited",
+    field: "status",
+    oldValue: previousStatus,
+    newValue: "Validation Failed",
+    message: reason,
+    metadata: {
+      action: "needs_review",
+    },
+  });
+  return invoice;
+}
+
 export function approveInvoiceIntelligence(invoiceId: string) {
   const invoice = getInvoice(invoiceId);
   if (!invoice) {

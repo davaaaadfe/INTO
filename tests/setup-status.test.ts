@@ -83,3 +83,14 @@ test("setup status reports missing variable names without exposing secret values
     }
   );
 });
+
+test("setup status allows database-free mode", () => {
+  withEnv({ APP_URL: "https://into.example.com" }, () => {
+    const database = getSetupStatus().checks.find((check) => check.id === "database");
+
+    assert.equal(database?.status, "ok");
+    assert.equal(database?.label, "Database-Free Mode");
+    assert.equal(database?.missingEnv.includes("DATABASE_URL"), false);
+    assert.match(database?.message ?? "", /No database is required/);
+  });
+});

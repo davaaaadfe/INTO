@@ -192,6 +192,9 @@ export type ExactVatCode = {
 export type ExactHistoricalPurchaseBooking = {
   id: string;
   supplierAccountId: string;
+  yourRef?: string;
+  invoiceNumber?: string;
+  totalAmount?: number;
   descriptionKey: string;
   glAccount: string;
   vatCode: "4" | "5" | "6" | "7" | "8" | string;

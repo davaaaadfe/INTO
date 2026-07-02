@@ -52,6 +52,13 @@ type ExactBookingResult = {
   bookedAt: string;
 };
 
+export type ExactDuplicatePurchaseBooking = {
+  exactBookingId: string;
+  yourRef: string;
+  totalAmount: number;
+  supplierAccountId?: string;
+};
+
 const exactDefaultBaseUrl = "https://start.exactonline.nl";
 const exactMasterDataResourcePatterns = [
   /\/crm\/accounts(?:[/?(]|$)/i,
@@ -372,6 +379,30 @@ async function fetchFirstAvailable<T>(
   throw new Error(failures[0] ?? "Exact API resource could not be loaded.");
 }
 
+async function fetchAllAvailable<T>(
+  connection: ExactConnection,
+  divisionCode: string,
+  paths: string[],
+  options: { optional?: boolean; maxPages?: number } = {}
+) {
+  const failures: string[] = [];
+  const results: T[] = [];
+
+  for (const path of paths) {
+    try {
+      results.push(...(await fetchExactOData<T>(connection, divisionCode, path, options)));
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  if (!results.length && failures.length === paths.length && !options.optional) {
+    throw new Error(failures[0] ?? "Exact API resource could not be loaded.");
+  }
+
+  return results;
+}
+
 function valueOf(record: Record<string, unknown>, keys: string[]) {
   for (const key of keys) {
     const value = record[key];
@@ -415,6 +446,12 @@ function numberValueOf(record: Record<string, unknown>, keys: string[]) {
   }
 
   return undefined;
+}
+
+function exactMoneyCents(value: number | undefined | null) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.round(Math.abs(value) * 100)
+    : null;
 }
 
 function normalizeRecord(value: unknown) {
@@ -563,6 +600,16 @@ function mapHistory(value: unknown): ExactHistoricalPurchaseBooking | null {
   return {
     id: valueOf(record, ["ID", "EntryID", "EntryNumber"]) || createId("exact_hist"),
     supplierAccountId,
+    yourRef: valueOf(record, ["YourRef", "Reference", "InvoiceNumber"]),
+    invoiceNumber: valueOf(record, ["InvoiceNumber", "YourRef", "Reference"]),
+    totalAmount: numberValueOf(record, [
+      "AmountDC",
+      "AmountFC",
+      "Amount",
+      "TotalAmount",
+      "InvoiceAmount",
+      "AmountVATIncl",
+    ]),
     descriptionKey: valueOf(record, ["Description", "YourRef", "InvoiceNumber"])
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-"),
@@ -573,6 +620,105 @@ function mapHistory(value: unknown): ExactHistoricalPurchaseBooking | null {
     accrualFrom: valueOf(record, ["From", "DateFrom", "AccrualFrom"]),
     accrualTo: valueOf(record, ["To", "DateTo", "AccrualTo"]),
   };
+}
+
+function odataString(value: string) {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function duplicateReferenceForInvoice(invoice: UploadedInvoice) {
+  return (
+    invoice.purchaseJournal?.yourRef ||
+    invoice.extractedData.referenceCode ||
+    invoice.extractedData.invoiceNumber ||
+    ""
+  ).trim();
+}
+
+function duplicateAmountForInvoice(invoice: UploadedInvoice) {
+  return invoice.extractedData.grossAmount || invoice.purchaseJournal?.totals.grossAmount || 0;
+}
+
+function mapDuplicateCandidate(
+  value: unknown,
+  expectedRef: string,
+  expectedAmount: number,
+  expectedSupplier?: string
+): ExactDuplicatePurchaseBooking | null {
+  const record = normalizeRecord(value);
+  const yourRef = valueOf(record, ["YourRef", "Reference", "InvoiceNumber"]);
+  const supplierAccountId = valueOf(record, [
+    "Supplier",
+    "SupplierID",
+    "Account",
+    "AccountID",
+  ]);
+  const totalAmount = numberValueOf(record, [
+    "AmountDC",
+    "AmountFC",
+    "Amount",
+    "TotalAmount",
+    "InvoiceAmount",
+    "AmountVATIncl",
+  ]);
+
+  if (yourRef.trim().toLowerCase() !== expectedRef.trim().toLowerCase()) {
+    return null;
+  }
+  if (exactMoneyCents(totalAmount) !== exactMoneyCents(expectedAmount)) {
+    return null;
+  }
+  if (expectedSupplier && supplierAccountId && supplierAccountId !== expectedSupplier) {
+    return null;
+  }
+
+  return {
+    exactBookingId:
+      valueOf(record, ["ID", "EntryID", "EntryNumber", "EntryNumberString"]) ||
+      createId("exact_duplicate"),
+    yourRef,
+    totalAmount: totalAmount ?? expectedAmount,
+    supplierAccountId: supplierAccountId || expectedSupplier,
+  };
+}
+
+export async function findRealExactPurchaseBookingDuplicate(
+  connection: ExactConnection,
+  invoice: UploadedInvoice
+): Promise<ExactDuplicatePurchaseBooking | null> {
+  const yourRef = duplicateReferenceForInvoice(invoice);
+  const totalAmount = duplicateAmountForInvoice(invoice);
+  const expectedAmountCents = exactMoneyCents(totalAmount);
+  if (!yourRef || expectedAmountCents === null) {
+    return null;
+  }
+
+  const divisionCode = connection.divisionCode || (await fetchExactCurrentDivision(connection));
+  const expectedSupplier = invoice.purchaseJournal?.supplierResolution.selectedAccountId;
+  const filter = encodeURIComponent(`YourRef eq ${odataString(yourRef)}`);
+  const candidates = await fetchAllAvailable<Record<string, unknown>>(
+    connection,
+    divisionCode,
+    [
+      `/purchaseentry/PurchaseEntries?$filter=${filter}&$top=25`,
+      `/purchaseentry/PurchaseEntryLines?$filter=${filter}&$top=25`,
+    ],
+    { optional: true, maxPages: 1 }
+  );
+
+  for (const candidate of candidates) {
+    const duplicate = mapDuplicateCandidate(
+      candidate,
+      yourRef,
+      totalAmount,
+      expectedSupplier
+    );
+    if (duplicate) {
+      return duplicate;
+    }
+  }
+
+  return null;
 }
 
 export async function fetchExactCurrentDivision(connection: ExactConnection) {

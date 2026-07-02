@@ -12,6 +12,11 @@ import {
   statusFromPurchaseJournal,
 } from "../lib/services/purchase-journal-intelligence";
 import { createMockExactMasterData } from "../lib/services/exact-master-data-service";
+import {
+  bookInvoiceInExact,
+  createMockExactConnection,
+} from "../lib/services/exact-online-service";
+import { storeMockInvoiceFile } from "../lib/services/storage-service";
 
 const exactMasterData = createMockExactMasterData();
 
@@ -289,4 +294,66 @@ test("moves closed invoice periods to the first available open period", () => {
   assert.equal(booking.financialYear, 2026);
   assert.equal(booking.period, 6);
   assert.equal(booking.periodAdjusted, true);
+});
+
+test("blocks booking when Exact already has the same reference and amount", async () => {
+  const invoice = uploadedInvoice(
+    {
+      fileName: "google-duplicate.pdf",
+      storageKey: "tests/google-duplicate.pdf",
+      status: "Ready to Book",
+    },
+    {
+      supplierName: "Google Ireland Limited",
+      supplierVatNumber: "IE6388047V",
+      supplierChamberOfCommerceNumber: "368047",
+      supplierAddress: "Gordon House, Dublin",
+      supplierCountry: "IE",
+      invoiceNumber: "GOOGLE-2026-06",
+      paymentTerms: "30 days",
+      netAmount: 121,
+      vatAmount: 0,
+      grossAmount: 121,
+      iban: "IE29AIBK93115212345678",
+      expenseDescription: "Google Workspace",
+      companyVatNumber: "NL857017263B01",
+      reverseChargeMentioned: true,
+      intraCommunityMentioned: true,
+      lineItems: [
+        {
+          id: "line_google",
+          description: "Google Workspace",
+          quantity: 1,
+          unitPrice: 121,
+          netAmount: 121,
+          vatRate: 0,
+          vatAmount: 0,
+          grossAmount: 121,
+        },
+      ],
+    }
+  );
+  storeMockInvoiceFile({
+    storageKey: invoice.storageKey,
+    fileName: invoice.fileName,
+    fileType: invoice.fileType,
+    content: "Google duplicate invoice",
+  });
+  const booking = buildBooking(invoice);
+  invoice.purchaseJournal = {
+    ...booking,
+    autoBookAllowed: true,
+    reviewRequired: false,
+    reviewReasons: [],
+  };
+
+  await assert.rejects(
+    () =>
+      bookInvoiceInExact(
+        createMockExactConnection("company_connection"),
+        invoice,
+        exactMasterData
+      ),
+    /Duplicate invoice blocked.*GOOGLE-2026-06.*121\.00/
+  );
 });

@@ -12,6 +12,13 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    "components/work/**",
+    "github-upload-ready/**",
+    "github-upload-ready-dbfree/**",
+    "node_modules/**",
+    "dist/**",
+    ".vite/**",
+    ".wrangler/**",
   ]),
 ]);
 

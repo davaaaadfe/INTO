@@ -164,14 +164,16 @@ function checkDatabase(): SetupCheck {
 
   return {
     id: "database",
-    label: "Database Status",
-    status: hasDatabase ? "ok" : "warning",
+    label: hasDatabase ? "Database Status" : "Database-Free Mode",
+    status: "ok",
     message: hasDatabase
       ? "Database configuration is present."
-      : "No production database URL is configured; INTO will use the mock in-memory repository.",
-    missingEnv: hasDatabase ? [] : ["DATABASE_URL"],
+      : "No database is required. INTO will use Exact Online as the long-term booking record.",
+    missingEnv: [],
     details: [
-      "Use Vercel Postgres, Neon, Supabase, or another PostgreSQL database for durable production records.",
+      hasDatabase
+        ? "Database records can be used for durable INTO archive and audit history."
+        : "Database-free mode keeps only temporary runtime state in INTO; duplicate booking is checked against Exact Online before booking.",
     ],
   };
 }

@@ -34,6 +34,8 @@
     "node_modules",
     "work",
     "components/work",
+    "github-upload-ready",
+    "github-upload-ready-dbfree",
     "outputs",
     "dist",
     "build",

@@ -274,6 +274,9 @@ export function createMockExactMasterData(
       {
         id: "hist_google_workspace",
         supplierAccountId: "supplier_google_ireland",
+        yourRef: "GOOGLE-2026-06",
+        invoiceNumber: "GOOGLE-2026-06",
+        totalAmount: 121,
         descriptionKey: "google-workspace",
         glAccount: glAccounts.software.code,
         vatCode: "7",
@@ -285,6 +288,9 @@ export function createMockExactMasterData(
       {
         id: "hist_klm_flight",
         supplierAccountId: "supplier_klm",
+        yourRef: "KLM-AMS-SEL-2026",
+        invoiceNumber: "KLM-AMS-SEL-2026",
+        totalAmount: 890,
         descriptionKey: "flight-amsterdam-seoul",
         glAccount: glAccounts.airTravel.code,
         vatCode: "6",

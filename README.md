@@ -26,12 +26,13 @@ Copy `.env.example` to `.env` for local development and fill in real values
 when replacing the mock adapters. Exact Online and Microsoft credentials are
 read from environment variables and are not hard-coded.
 
-INTO includes a first-time setup wizard backed by `/api/setup/status`. When
-OAuth or storage configuration is incomplete, the UI shows clear green/red
-status indicators and lists the missing environment variable names without
-exposing any secret values. `DATABASE_URL` is optional; in database-free mode,
-INTO treats Exact Online as the durable booking record and checks Exact for
-duplicate invoice reference plus amount before booking.
+INTO includes a readiness panel backed by `/api/setup/status`. The UI shows
+simple user-facing readiness items for the shared Exact connection, shared
+Outlook mailbox, invoice upload, review queue, Exact master data sync, and
+booking. It does not show normal users database, storage, migration, internal
+API, or raw environment variable checklist items. `DATABASE_URL` is optional; in
+database-free mode, INTO treats Exact Online as the durable booking record and
+checks Exact for duplicate invoice reference plus amount before booking.
 
 ### Real Exact Online connection
 

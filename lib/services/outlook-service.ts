@@ -257,6 +257,20 @@ export async function refreshOutlookTokenIfNeeded(
   };
 }
 
+export async function verifyOutlookMailboxAccess(connection: OutlookConnection | null) {
+  if (!connection || connection.status !== "connected") {
+    return false;
+  }
+
+  if (isMockOutlookConnection(connection)) {
+    return Boolean(connection.mailboxAddress);
+  }
+
+  const accessToken = await decryptOAuthSecret(connection.accessTokenCiphertext);
+  const profile = await fetchMicrosoftProfile(accessToken);
+  return Boolean(profile.mail || profile.userPrincipalName || profile.displayName);
+}
+
 export function createMockOutlookConnection(userId: string): OutlookConnection {
   const now = new Date();
   return {

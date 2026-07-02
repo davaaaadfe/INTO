@@ -202,7 +202,7 @@ const setupTone: Record<SetupStatusLevel, string> = {
 };
 
 function setupLabel(status: SetupStatusLevel) {
-  return status === "ok" ? "Ready" : status === "warning" ? "Needs attention" : "Missing";
+  return status === "ok" ? "Ready" : status === "warning" ? "Needs attention" : "Needs setup";
 }
 
 const reviewStatuses = new Set<UploadedInvoice["status"]>([
@@ -880,38 +880,69 @@ function PreviewDocument({
 function SetupWizard({
   setupStatus,
   onRefresh,
+  isSystemOwner,
 }: {
   setupStatus: SetupStatus;
   onRefresh: () => void;
+  isSystemOwner: boolean;
 }) {
   const hasAttention = setupStatus.checks.some((check) => check.status !== "ok");
+  const firstAttentionCheck = setupStatus.checks.find(
+    (check) => check.status !== "ok"
+  );
 
   if (!hasAttention) {
-    return null;
+    return (
+      <section className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-emerald-900">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold">INTO is ready.</h2>
+            <p className="mt-1 text-sm">
+              You can upload invoices, review them, and book them to Exact Online.
+            </p>
+          </div>
+          <ActionButton variant="ghost" onClick={onRefresh}>
+            Refresh status
+          </ActionButton>
+        </div>
+      </section>
+    );
+  }
+
+  if (!isSystemOwner) {
+    return (
+      <section className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-amber-950">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold">INTO needs system setup</h2>
+            <p className="mt-1 max-w-3xl text-sm">
+              {firstAttentionCheck?.message ??
+                "Some company setup is not complete yet. Ask the system owner to check INTO setup."}
+            </p>
+          </div>
+          <ActionButton variant="ghost" onClick={onRefresh}>
+            Refresh status
+          </ActionButton>
+        </div>
+      </section>
+    );
   }
 
   return (
     <section className="rounded-lg border border-stone-300 bg-white p-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
-          <h2 className="text-lg font-semibold">First-time setup</h2>
+          <h2 className="text-lg font-semibold">System setup</h2>
           <p className="mt-1 max-w-3xl text-sm text-stone-600">
-            INTO can run locally without tunneling. For real Exact Online and
-            Microsoft Outlook OAuth, configure the environment variables below and
-            register the callback URLs shown here.
+            Company-level connections and safe server settings for INTO.
           </p>
-          <div className="mt-2 grid gap-1 text-xs text-stone-500">
-            <div>App URL: {setupStatus.appUrl}</div>
-            <div>Exact callback: {setupStatus.exactCallbackUrl}</div>
-            <div>Microsoft callback: {setupStatus.outlookCallbackUrl}</div>
-          </div>
         </div>
         <ActionButton variant="ghost" onClick={onRefresh}>
-          Refresh setup status
+          Refresh status
         </ActionButton>
       </div>
 
-      <div className="mt-4 grid gap-3 xl:grid-cols-5">
+      <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
         {setupStatus.checks.map((check) => (
           <div
             key={check.id}
@@ -924,10 +955,16 @@ function SetupWizard({
               </span>
             </div>
             <p className="mt-2 text-sm">{check.message}</p>
-            {check.missingEnv.length ? (
+            {isSystemOwner && check.missingEnv.length ? (
               <div className="mt-2 rounded-md bg-white/70 p-2 text-xs">
-                <div className="font-semibold">Missing</div>
-                <div className="mt-1 break-words">{check.missingEnv.join(", ")}</div>
+                <div className="font-semibold">System owner setup</div>
+                <div className="mt-1">
+                  The following server settings are missing:{" "}
+                  <span className="break-words font-semibold">
+                    {check.missingEnv.join(", ")}
+                  </span>
+                  . Add them in Vercel Environment Variables, then redeploy.
+                </div>
               </div>
             ) : null}
             <ul className="mt-2 space-y-1 text-xs">
@@ -2522,7 +2559,11 @@ export function IntoWorkbench() {
         </header>
 
         {setupStatus ? (
-          <SetupWizard setupStatus={setupStatus} onRefresh={refreshAll} />
+          <SetupWizard
+            setupStatus={setupStatus}
+            onRefresh={refreshAll}
+            isSystemOwner={Boolean(state.currentUser?.isSystemOwner)}
+          />
         ) : null}
 
         <section className="grid gap-4 xl:grid-cols-[1.45fr_0.55fr]">
@@ -2589,150 +2630,192 @@ export function IntoWorkbench() {
           </div>
 
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-1">
-            <div className="rounded-lg border border-stone-300 bg-white p-4">
-              <h2 className="text-lg font-semibold">Company Exact Online</h2>
-              <p className="mt-1 text-sm text-stone-500">
-                {state.exactConnection
-                  ? `Company connection active for division ${state.exactConnection.divisionCode}`
-                  : "No company Exact account connected"}
-              </p>
-              {state.exactMasterDataReadOnly ? (
-                <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-xs font-semibold text-emerald-900">
-                  Exact master data is read-only in INTO. Suppliers, journals, G/L
-                  accounts, VAT codes, cost centers, cost units, and payment
-                  conditions are only read and cached.
-                </div>
-              ) : null}
-              {state.exactMasterData ? (
-                <div className="mt-3 rounded-md border border-stone-200 bg-stone-50 p-3 text-xs text-stone-600">
-                  <div className="font-semibold text-stone-800">
-                    Exact data cache {state.exactMasterDataStale ? "stale" : "fresh"}
+            {isSystemOwner ? (
+              <>
+                <div className="rounded-lg border border-stone-300 bg-white p-4">
+                  <h2 className="text-lg font-semibold">Company Exact Online</h2>
+                  <p className="mt-1 text-sm text-stone-500">
+                    {state.exactConnection
+                      ? `Company connection active for division ${state.exactConnection.divisionCode}`
+                      : "No company Exact account connected"}
+                  </p>
+                  {state.exactMasterDataReadOnly ? (
+                    <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-xs font-semibold text-emerald-900">
+                      Exact master data is read-only in INTO. Suppliers, journals, G/L
+                      accounts, VAT codes, cost centers, cost units, and payment
+                      conditions are only read and cached.
+                    </div>
+                  ) : null}
+                  {state.exactMasterData ? (
+                    <div className="mt-3 rounded-md border border-stone-200 bg-stone-50 p-3 text-xs text-stone-600">
+                      <div className="font-semibold text-stone-800">
+                        Exact data cache{" "}
+                        {state.exactMasterDataStale ? "stale" : "fresh"}
+                      </div>
+                      <div className="mt-1">
+                        Last synced{" "}
+                        {formatTimestamp(state.exactMasterData.lastSyncedAt)}
+                      </div>
+                      <div className="mt-1">
+                        {state.exactMasterData.suppliers.length} suppliers,{" "}
+                        {state.exactMasterData.glAccounts.length} G/L accounts,{" "}
+                        {state.exactMasterData.vatCodes.length} VAT codes
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                      Exact master data has not been synced yet.
+                    </div>
+                  )}
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <ActionButton
+                      variant="outline"
+                      onClick={connectExact}
+                      loading={busy === "exact"}
+                      feedback={buttonFeedbackFor("exact", "exact")}
+                      disabled={busy === "exact"}
+                      disabledReason="Company Exact Online connection is in progress."
+                    >
+                      {state.exactConnection
+                        ? "Reconnect Company Exact"
+                        : "Connect Company Exact"}
+                    </ActionButton>
+                    <ActionButton
+                      variant="secondary"
+                      onClick={() => syncExactData()}
+                      loading={busy === "exact-sync"}
+                      feedback={buttonFeedbackFor("exact-sync", "exact-sync")}
+                      disabled={
+                        !state.exactConnection ||
+                        busy === "exact-sync" ||
+                        busy === "exact"
+                      }
+                      disabledReason="Connect the company Exact account before syncing Exact data."
+                    >
+                      Sync Exact Data Now
+                    </ActionButton>
+                    <ActionButton
+                      variant="danger"
+                      onClick={disconnectExact}
+                      loading={busy === "exact-disconnect"}
+                      feedback={buttonFeedbackFor(
+                        "exact-disconnect",
+                        "exact-disconnect"
+                      )}
+                      disabled={!state.exactConnection || busy === "exact-disconnect"}
+                      disabledReason="Company Exact Online is not connected."
+                    >
+                      Disconnect Company Exact
+                    </ActionButton>
                   </div>
-                  <div className="mt-1">
-                    Last synced {formatTimestamp(state.exactMasterData.lastSyncedAt)}
+                </div>
+
+                <div className="rounded-lg border border-stone-300 bg-white p-4">
+                  <h2 className="text-lg font-semibold">Company Outlook ingestion</h2>
+                  <p className="mt-1 text-sm text-stone-500">
+                    {state.outlookConnection
+                      ? `Reading invoices from ${state.outlookConnection.mailboxAddress}`
+                      : "No company Outlook mailbox connected"}
+                  </p>
+                  <div className="mt-3 rounded-md border border-stone-200 bg-stone-50 p-3 text-xs text-stone-600">
+                    <div className="font-semibold text-stone-800">
+                      Last Outlook scan
+                    </div>
+                    <div className="mt-1">
+                      {state.outlookLogs[0]
+                        ? formatTimestamp(state.outlookLogs[0].createdAt)
+                        : "Not scanned yet"}
+                    </div>
                   </div>
-                  <div className="mt-1">
-                    {state.exactMasterData.suppliers.length} suppliers,{" "}
-                    {state.exactMasterData.glAccounts.length} G/L accounts,{" "}
-                    {state.exactMasterData.vatCodes.length} VAT codes
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <ActionButton
+                      variant="outline"
+                      onClick={connectOutlook}
+                      loading={busy === "outlook-connect"}
+                      feedback={buttonFeedbackFor(
+                        "outlook-connect",
+                        "outlook-connect"
+                      )}
+                      disabled={busy === "outlook-connect"}
+                      disabledReason="Company Outlook connection is in progress."
+                    >
+                      {state.outlookConnection
+                        ? "Reconnect Company Outlook"
+                        : "Connect Company Outlook"}
+                    </ActionButton>
+                    <ActionButton
+                      variant="secondary"
+                      onClick={ingestOutlook}
+                      loading={busy === "outlook-ingest"}
+                      feedback={buttonFeedbackFor(
+                        "outlook-ingest",
+                        "outlook-ingest"
+                      )}
+                      disabled={
+                        !state.outlookConnection ||
+                        busy === "outlook-ingest" ||
+                        !hasPermission("upload")
+                      }
+                      disabledReason={
+                        !hasPermission("upload")
+                          ? "Your INTO account is not verified to import invoices from the company Outlook mailbox."
+                          : "Scan Outlook Now is disabled until the company Outlook mailbox is connected."
+                      }
+                    >
+                      Scan Outlook Now
+                    </ActionButton>
+                    <ActionButton
+                      variant="danger"
+                      onClick={disconnectOutlook}
+                      loading={busy === "outlook-disconnect"}
+                      feedback={buttonFeedbackFor(
+                        "outlook-disconnect",
+                        "outlook-disconnect"
+                      )}
+                      disabled={
+                        !state.outlookConnection || busy === "outlook-disconnect"
+                      }
+                      disabledReason="Company Outlook is not connected."
+                    >
+                      Disconnect Company Outlook
+                    </ActionButton>
                   </div>
                 </div>
-              ) : (
-                <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
-                  Exact master data has not been synced yet.
-                </div>
-              )}
-              {isSystemOwner ? (
+              </>
+            ) : (
+              <div className="rounded-lg border border-stone-300 bg-white p-4">
+                <h2 className="text-lg font-semibold">Outlook invoice scan</h2>
+                <p className="mt-1 text-sm text-stone-500">
+                  Scan the shared invoice mailbox for new invoice attachments.
+                </p>
+                {!state.outlookConnection ? (
+                  <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                    INTO is not connected to the invoice mailbox yet. Ask the
+                    system owner to connect the shared Outlook mailbox.
+                  </div>
+                ) : null}
                 <div className="mt-4 flex flex-wrap gap-2">
                   <ActionButton
-                    variant="outline"
-                    onClick={connectExact}
-                    loading={busy === "exact"}
-                    feedback={buttonFeedbackFor("exact", "exact")}
-                    disabled={busy === "exact"}
-                    disabledReason="Company Exact Online connection is in progress."
-                  >
-                    {state.exactConnection
-                      ? "Reconnect Company Exact"
-                      : "Connect Company Exact"}
-                  </ActionButton>
-                  <ActionButton
                     variant="secondary"
-                    onClick={() => syncExactData()}
-                    loading={busy === "exact-sync"}
-                    feedback={buttonFeedbackFor("exact-sync", "exact-sync")}
+                    onClick={ingestOutlook}
+                    loading={busy === "outlook-ingest"}
+                    feedback={buttonFeedbackFor("outlook-ingest", "outlook-ingest")}
                     disabled={
-                      !state.exactConnection ||
-                      busy === "exact-sync" ||
-                      busy === "exact"
+                      !state.outlookConnection ||
+                      busy === "outlook-ingest" ||
+                      !hasPermission("upload")
                     }
-                    disabledReason="Connect the company Exact account before syncing Exact data."
+                    disabledReason={
+                      !hasPermission("upload")
+                        ? "Your INTO account is not verified to import invoices from the company Outlook mailbox."
+                        : "Scan Outlook Now is disabled until the shared Outlook mailbox is connected by the system owner."
+                    }
                   >
-                    Sync Exact Data Now
-                  </ActionButton>
-                  <ActionButton
-                    variant="danger"
-                    onClick={disconnectExact}
-                    loading={busy === "exact-disconnect"}
-                    feedback={buttonFeedbackFor(
-                      "exact-disconnect",
-                      "exact-disconnect"
-                    )}
-                    disabled={!state.exactConnection || busy === "exact-disconnect"}
-                    disabledReason="Company Exact Online is not connected."
-                  >
-                    Disconnect Company Exact
+                    Scan Outlook Now
                   </ActionButton>
                 </div>
-              ) : (
-                <div className="mt-4 rounded-md border border-stone-200 bg-stone-50 p-3 text-xs text-stone-600">
-                  Shared Exact connection settings are managed by the system owner.
-                </div>
-              )}
-            </div>
-
-            <div className="rounded-lg border border-stone-300 bg-white p-4">
-              <h2 className="text-lg font-semibold">Company Outlook ingestion</h2>
-              <p className="mt-1 text-sm text-stone-500">
-                {state.outlookConnection
-                  ? `Reading invoices from ${state.outlookConnection.mailboxAddress}`
-                  : "No company Outlook mailbox connected"}
-              </p>
-              <div className="mt-4 flex flex-wrap gap-2">
-                {isSystemOwner ? (
-                  <ActionButton
-                    variant="outline"
-                    onClick={connectOutlook}
-                    loading={busy === "outlook-connect"}
-                    feedback={buttonFeedbackFor(
-                      "outlook-connect",
-                      "outlook-connect"
-                    )}
-                    disabled={busy === "outlook-connect"}
-                    disabledReason="Company Outlook connection is in progress."
-                  >
-                    {state.outlookConnection
-                      ? "Reconnect Company Outlook"
-                      : "Connect Company Outlook"}
-                  </ActionButton>
-                ) : null}
-                <ActionButton
-                  variant="secondary"
-                  onClick={ingestOutlook}
-                  loading={busy === "outlook-ingest"}
-                  feedback={buttonFeedbackFor("outlook-ingest", "outlook-ingest")}
-                  disabled={
-                    !state.outlookConnection ||
-                    busy === "outlook-ingest" ||
-                    !hasPermission("upload")
-                  }
-                  disabledReason={
-                    !hasPermission("upload")
-                      ? "Your INTO account is not verified to import invoices from the company Outlook mailbox."
-                      : "Scan Outlook Now is disabled until the company Outlook mailbox is connected."
-                  }
-                >
-                  Scan Outlook Now
-                </ActionButton>
-                {isSystemOwner ? (
-                  <ActionButton
-                    variant="danger"
-                    onClick={disconnectOutlook}
-                    loading={busy === "outlook-disconnect"}
-                    feedback={buttonFeedbackFor(
-                      "outlook-disconnect",
-                      "outlook-disconnect"
-                    )}
-                    disabled={
-                      !state.outlookConnection || busy === "outlook-disconnect"
-                    }
-                    disabledReason="Company Outlook is not connected."
-                  >
-                    Disconnect Company Outlook
-                  </ActionButton>
-                ) : null}
               </div>
-            </div>
+            )}
           </div>
         </section>
 

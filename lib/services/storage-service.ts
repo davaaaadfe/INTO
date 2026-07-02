@@ -33,6 +33,10 @@ export function isSupportedInvoiceFile(fileName: string) {
   return supportedExtensions.has(getFileExtension(fileName));
 }
 
+export function supportedInvoiceFileExtensions() {
+  return [...supportedExtensions];
+}
+
 function contentTypeFor(fileName: string, fileType = "") {
   if (fileType && fileType !== "application/octet-stream") {
     return fileType;
@@ -94,4 +98,23 @@ export function storeMockInvoiceFile(input: {
 
 export function getStoredInvoiceFile(storageKey: string) {
   return fileStore().get(storageKey) ?? null;
+}
+
+export function verifyInvoiceStorageWorks() {
+  const storageKey = `health/${createId("file")}/storage-check.txt`;
+  const content = "INTO storage readiness check";
+  const storedFile = storeMockInvoiceFile({
+    storageKey,
+    fileName: "storage-check.txt",
+    fileType: "text/plain",
+    content,
+  });
+  const storedAgain = getStoredInvoiceFile(storageKey);
+  fileStore().delete(storageKey);
+
+  return Boolean(
+    storedAgain &&
+      storedAgain.fileSize === storedFile.fileSize &&
+      new TextDecoder().decode(storedAgain.bytes) === content
+  );
 }

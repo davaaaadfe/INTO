@@ -27,11 +27,6 @@ MICROSOFT_REDIRECT_URI=https://your-vercel-domain.vercel.app/api/outlook/callbac
 
 OAUTH_TOKEN_ENCRYPTION_KEY=
 OAUTH_STATE_SECRET=
-STORAGE_PROVIDER=s3
-S3_ENDPOINT=
-S3_BUCKET=
-S3_ACCESS_KEY_ID=
-S3_SECRET_ACCESS_KEY=
 ```
 
 `EXACT_ONLINE_REDIRECT_URI` and `MICROSOFT_REDIRECT_URI` can be omitted when
@@ -79,17 +74,20 @@ provider-specific redirect URI environment variable to that external host.
 
 ## 4. Startup Validation
 
-INTO exposes `/api/setup/status` and shows a first-time setup wizard in the UI
-when configuration is incomplete. The wizard shows:
+INTO exposes `/api/setup/status` and shows a simple readiness panel in the UI
+when something needed for invoice processing is not ready. The panel uses
+runtime checks where possible and shows user-facing items only:
 
-- Connect Company Exact Setup
-- Connect Company Outlook Setup
-- Environment Configuration Status
-- Database-Free Mode or Database Status
-- Storage Status
+- Shared Exact Online connection
+- Shared Outlook invoice mailbox
+- Invoice upload
+- Invoice review queue
+- Exact master data sync
+- Invoice booking
 
-It returns only status information and missing environment variable names. It
-never returns client secrets, tokens, encryption keys, or passwords.
+It does not show database, storage, migration, internal API, or raw environment
+variable checklist items to normal users. It never returns client secrets,
+tokens, encryption keys, or passwords.
 
 ## 5. Production Storage Notes
 

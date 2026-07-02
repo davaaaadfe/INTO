@@ -1,5 +1,5 @@
-import { getSetupStatus } from "../../../../lib/services/app-config-service";
+import { getSetupStatus } from "../../../../lib/services/setup-status-service";
 
 export async function GET() {
-  return Response.json(getSetupStatus());
+  return Response.json(await getSetupStatus());
 }

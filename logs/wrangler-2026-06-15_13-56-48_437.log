@@ -1,0 +1,16 @@
+
+--- 2026-06-15T13:56:49.011Z debug
+🪵  Writing logs to "C:\Users\inbod\Documents\Codex\2026-06-15\build-a-web-application-called-into\work\xdg-config\.wrangler\logs\wrangler-2026-06-15_13-56-48_437.log"
+---
+
+--- 2026-06-15T13:56:49.010Z debug
+local dev variables file not found at ".dev.vars". Continuing... For more details, refer to https://developers.cloudflare.com/workers/wrangler/system-environment-variables/
+---
+
+--- 2026-06-15T13:56:49.012Z debug
+.env file not found at "C:\Users\inbod\Documents\Codex\2026-06-15\build-a-web-application-called-into\.env". Continuing... For more details, refer to https://developers.cloudflare.com/workers/wrangler/system-environment-variables/
+---
+
+--- 2026-06-15T13:56:49.013Z debug
+.env file not found at "C:\Users\inbod\Documents\Codex\2026-06-15\build-a-web-application-called-into\.env.local". Continuing... For more details, refer to https://developers.cloudflare.com/workers/wrangler/system-environment-variables/
+---

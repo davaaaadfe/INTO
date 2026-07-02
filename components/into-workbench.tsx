@@ -21,6 +21,7 @@ import type {
   PublicExactConnection,
   PublicOutlookConnection,
   UploadedInvoice,
+  ValidationError,
 } from "../lib/domain/invoice";
 
 type ApiState = {
@@ -58,6 +59,28 @@ type UploadItem = {
 type ButtonFeedback = "success" | "error";
 type PreviewFitMode = "auto" | "width" | "height" | "manual";
 type ActiveView = "queue" | "archive";
+type FieldTone = "neutral" | "warning" | "error";
+
+type SelectOption = {
+  value: string;
+  label?: string;
+};
+
+type FieldIssue = {
+  tone: FieldTone;
+  message?: string;
+};
+
+type ReviewActionDefinition = {
+  key: string;
+  label: string;
+  variant: "primary" | "secondary" | "outline" | "danger" | "ghost";
+  onClick: () => void;
+  loading: boolean;
+  disabled: boolean;
+  disabledReason: string;
+  feedback?: ButtonFeedback;
+};
 
 type ArchiveFilterState = {
   keyword: string;
@@ -215,6 +238,21 @@ const fieldLabels: Partial<Record<keyof ExtractedInvoiceData, string>> = {
   companyVatNumber: "Company VAT number",
 };
 
+const additionalDetailFields: (keyof ExtractedInvoiceData)[] = [
+  "currency",
+  "beneficiary",
+  "serviceStartDate",
+  "serviceEndDate",
+  "supplierCountry",
+];
+
+const technicalSupplierFields: (keyof ExtractedInvoiceData)[] = [
+  "supplierVatNumber",
+  "supplierAddress",
+  "companyVatNumber",
+  "supplierChamberOfCommerceNumber",
+];
+
 const confidenceLabels: Record<string, string> = {
   supplierMatch: "Supplier",
   glAccount: "G/L account",
@@ -368,7 +406,7 @@ function ActionButton({
     ? "loading"
     : feedback ?? (disabled ? "disabled" : "enabled");
   const base =
-    "inline-flex min-h-10 items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-70";
+    "inline-flex min-h-10 items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-semibold shadow-sm transition disabled:cursor-not-allowed disabled:opacity-70";
   const pointer = blocked ? "cursor-not-allowed" : "cursor-pointer";
   const variants: Record<string, string> = {
     primary: "bg-[#12674f] text-white hover:bg-[#0d503d]",
@@ -393,6 +431,7 @@ function ActionButton({
         onClick={onClick}
         disabled={blocked}
         aria-disabled={blocked}
+        aria-busy={loading}
         className={`${base} ${pointer} ${stateClasses[visualState]} ${className}`}
       >
         {loading ? (
@@ -401,6 +440,317 @@ function ActionButton({
         {children}
       </button>
     </span>
+  );
+}
+
+function ReviewActionBar({ actions }: { actions: ReviewActionDefinition[] }) {
+  const firstHelpfulReason =
+    actions.find(
+      (action) =>
+        action.disabled &&
+        action.disabledReason &&
+        action.label !== "Save changes"
+    )?.disabledReason ??
+    actions.find((action) => action.disabled && action.disabledReason)
+      ?.disabledReason;
+
+  return (
+    <div className="mt-4 rounded-xl border border-stone-200 bg-white p-3 shadow-sm">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-5">
+        {actions.map((action) => (
+          <ActionButton
+            key={action.key}
+            variant={action.variant}
+            onClick={action.onClick}
+            loading={action.loading}
+            feedback={action.feedback}
+            disabled={action.disabled}
+            disabledReason={action.disabledReason}
+            className="w-full whitespace-nowrap"
+          >
+            {action.label}
+          </ActionButton>
+        ))}
+      </div>
+      {firstHelpfulReason ? (
+        <p className="mt-3 rounded-md bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600">
+          {firstHelpfulReason}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function ValidationMessage({ issue }: { issue?: FieldIssue }) {
+  if (!issue?.message) {
+    return null;
+  }
+
+  const tone =
+    issue.tone === "error"
+      ? "text-rose-700"
+      : issue.tone === "warning"
+        ? "text-amber-700"
+        : "text-stone-500";
+
+  return <p className={`text-xs leading-5 ${tone}`}>{issue.message}</p>;
+}
+
+function ConfidenceBadge({
+  value,
+  threshold,
+}: {
+  value?: number;
+  threshold?: number;
+}) {
+  if (typeof value !== "number") {
+    return null;
+  }
+
+  const isLow = typeof threshold === "number" && value < threshold;
+  return (
+    <span
+      className={`inline-flex w-fit rounded-md border px-2 py-0.5 text-xs font-semibold ${
+        isLow
+          ? "border-amber-300 bg-amber-50 text-amber-800"
+          : "border-emerald-300 bg-emerald-50 text-emerald-800"
+      }`}
+    >
+      {percentScore(value)}
+    </span>
+  );
+}
+
+function ReviewSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="rounded-xl border border-stone-200 bg-white p-4 shadow-sm">
+      <h3 className="text-base font-semibold text-stone-950">{title}</h3>
+      <div className="mt-4 grid gap-4">{children}</div>
+    </section>
+  );
+}
+
+function ReviewField({
+  label,
+  children,
+  issue,
+  helper,
+  confidence,
+  threshold,
+  emphasized = false,
+}: {
+  label: string;
+  children: ReactNode;
+  issue?: FieldIssue;
+  helper?: string;
+  confidence?: number;
+  threshold?: number;
+  emphasized?: boolean;
+}) {
+  const borderTone =
+    issue?.tone === "error"
+      ? "border-rose-400"
+      : issue?.tone === "warning"
+        ? "border-amber-400"
+        : emphasized
+          ? "border-emerald-500"
+          : "border-stone-300";
+
+  return (
+    <label className="flex flex-col gap-2 text-sm">
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-medium text-stone-700">{label}</span>
+        <ConfidenceBadge value={confidence} threshold={threshold} />
+      </div>
+      <div
+        className={`rounded-lg border bg-white shadow-sm transition focus-within:border-emerald-600 focus-within:ring-2 focus-within:ring-emerald-100 ${borderTone} ${
+          emphasized ? "bg-emerald-50" : ""
+        }`}
+      >
+        {children}
+      </div>
+      <ValidationMessage issue={issue} />
+      {helper && !issue?.message ? (
+        <p className="text-xs leading-5 text-stone-500">{helper}</p>
+      ) : null}
+    </label>
+  );
+}
+
+function inputBaseClass(emphasized = false) {
+  return `w-full rounded-lg border-0 bg-transparent px-3 py-2.5 outline-none disabled:cursor-not-allowed disabled:bg-stone-50 disabled:text-stone-500 ${
+    emphasized ? "text-lg font-semibold text-emerald-950" : "text-stone-900"
+  }`;
+}
+
+function SelectField({
+  label,
+  value,
+  options,
+  listId,
+  onChange,
+  readOnly = false,
+  disabled = false,
+  issue,
+  helper,
+  confidence,
+  threshold,
+}: {
+  label: string;
+  value: string;
+  options: SelectOption[];
+  listId: string;
+  onChange?: (value: string) => void;
+  readOnly?: boolean;
+  disabled?: boolean;
+  issue?: FieldIssue;
+  helper?: string;
+  confidence?: number;
+  threshold?: number;
+}) {
+  return (
+    <ReviewField
+      label={label}
+      issue={issue}
+      helper={helper}
+      confidence={confidence}
+      threshold={threshold}
+    >
+      <input
+        className={inputBaseClass()}
+        list={readOnly ? undefined : listId}
+        value={value}
+        onChange={(event) => onChange?.(event.target.value)}
+        readOnly={readOnly}
+        disabled={disabled}
+      />
+      {!readOnly ? (
+        <datalist id={listId}>
+          {options.map((option) => (
+            <option key={`${listId}-${option.value}`} value={option.value}>
+              {option.label ?? option.value}
+            </option>
+          ))}
+        </datalist>
+      ) : null}
+    </ReviewField>
+  );
+}
+
+function DateField({
+  label,
+  value,
+  onChange,
+  disabled,
+  issue,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  disabled: boolean;
+  issue?: FieldIssue;
+}) {
+  return (
+    <ReviewField label={label} issue={issue}>
+      <input
+        className={inputBaseClass()}
+        type="date"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        disabled={disabled}
+      />
+    </ReviewField>
+  );
+}
+
+function AmountField({
+  label,
+  value,
+  currency,
+  onChange,
+  disabled,
+  issue,
+  emphasized = false,
+}: {
+  label: string;
+  value: number | null;
+  currency: string;
+  onChange: (value: string) => void;
+  disabled: boolean;
+  issue?: FieldIssue;
+  emphasized?: boolean;
+}) {
+  return (
+    <ReviewField
+      label={label}
+      issue={issue}
+      helper={typeof value === "number" ? formatMoney(value, currency) : undefined}
+      emphasized={emphasized}
+    >
+      <input
+        className={inputBaseClass(emphasized)}
+        type="number"
+        step="0.01"
+        value={numberValue(value)}
+        onChange={(event) => onChange(event.target.value)}
+        disabled={disabled}
+      />
+    </ReviewField>
+  );
+}
+
+function TextField({
+  label,
+  value,
+  onChange,
+  disabled,
+  issue,
+  helper,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  disabled: boolean;
+  issue?: FieldIssue;
+  helper?: string;
+}) {
+  return (
+    <ReviewField label={label} issue={issue} helper={helper}>
+      <input
+        className={inputBaseClass()}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        disabled={disabled}
+      />
+    </ReviewField>
+  );
+}
+
+function CollapsibleSection({
+  title,
+  open,
+  children,
+}: {
+  title: string;
+  open: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <details
+      open={open || undefined}
+      className="rounded-xl border border-stone-200 bg-white/80 p-4 text-stone-700 shadow-sm"
+    >
+      <summary className="cursor-pointer text-sm font-semibold text-stone-700">
+        {title}
+      </summary>
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">{children}</div>
+    </details>
   );
 }
 
@@ -637,6 +987,51 @@ export function IntoWorkbench() {
   );
   const selectedPurchaseJournal = selectedInvoice?.purchaseJournal ?? null;
   const firstBookingLine = selectedPurchaseJournal?.lines[0] ?? null;
+  const currentCurrency =
+    draft?.currency || selectedPurchaseJournal?.currency || "EUR";
+  const confidenceThreshold = selectedPurchaseJournal?.confidenceThreshold;
+  const supplierOptions: SelectOption[] = (state.exactMasterData?.suppliers ?? [])
+    .filter((supplier) => supplier.name)
+    .map((supplier) => ({
+      value: supplier.name,
+      label: `${supplier.code} - ${supplier.name}`,
+    }));
+  const paymentConditionOptions: SelectOption[] = (
+    state.exactMasterData?.paymentConditions ?? []
+  )
+    .filter((condition) => condition.isActive)
+    .map((condition) => ({
+      value: condition.label,
+      label: `${condition.code} - ${condition.label}`,
+    }));
+  const glAccountOptions: SelectOption[] = (
+    state.exactMasterData?.glAccounts ?? []
+  )
+    .filter((account) => account.isActive)
+    .map((account) => ({
+      value: `${account.code} - ${account.name}`,
+      label: `${account.code} - ${account.name}`,
+    }));
+  const costCenterOptions: SelectOption[] = (
+    state.exactMasterData?.costCenters ?? []
+  )
+    .filter((costCenter) => costCenter.isActive)
+    .map((costCenter) => ({
+      value: costCenter.code,
+      label: `${costCenter.code} - ${costCenter.description}`,
+    }));
+  const costUnitOptions: SelectOption[] = (state.exactMasterData?.costUnits ?? [])
+    .filter((costUnit) => costUnit.isActive)
+    .map((costUnit) => ({
+      value: costUnit.code,
+      label: `${costUnit.code} - ${costUnit.description}`,
+    }));
+  const vatCodeOptions: SelectOption[] = (state.exactMasterData?.vatCodes ?? [])
+    .filter((vatCode) => vatCode.type === "purchase" && vatCode.isActive)
+    .map((vatCode) => ({
+      value: `${vatCode.code} - ${vatCode.description}`,
+      label: `${vatCode.code} - ${vatCode.description}`,
+    }));
   const pageCount = selectedInvoice?.fileName.toLowerCase().endsWith(".pdf") ? 3 : 1;
   const hasUnsavedChanges = Boolean(
     selectedInvoice &&
@@ -646,6 +1041,102 @@ export function IntoWorkbench() {
   const hasPermission = (permission: PermissionAction) =>
     state.permissions.includes(permission);
   const isSystemOwner = Boolean(state.currentUser?.isSystemOwner);
+  const hasFieldValidationWarning = (fields: (keyof ExtractedInvoiceData)[]) =>
+    Boolean(
+      selectedInvoice?.validationErrors.some((error) =>
+        fields.includes(error.field as keyof ExtractedInvoiceData)
+      )
+    );
+  const validationIssueFor = (
+    fields: ValidationError["field"][],
+    extraMessages: Array<string | undefined | false> = []
+  ): FieldIssue | undefined => {
+    const validationIssue = selectedInvoice?.validationErrors.find((error) =>
+      fields.includes(error.field)
+    );
+    const extraMessage = extraMessages.find(Boolean);
+    const message = extraMessage || validationIssue?.message;
+    if (!message) {
+      return undefined;
+    }
+
+    return {
+      tone: validationIssue?.severity === "error" ? "error" : "warning",
+      message,
+    };
+  };
+  const additionalDetailsOpen = hasFieldValidationWarning(additionalDetailFields);
+  const technicalSupplierDetailsOpen =
+    hasFieldValidationWarning(technicalSupplierFields);
+  const supplierIssue = validationIssueFor(
+    ["supplier", "supplierName"],
+    [
+      selectedPurchaseJournal?.supplierResolution.reviewRequired
+        ? "Supplier has multiple possible Exact matches. Please select one."
+        : undefined,
+    ]
+  );
+  const paymentConditionIssue = validationIssueFor(
+    ["paymentCondition", "paymentTerms"],
+    [
+      selectedPurchaseJournal?.paymentConditionMismatch
+        ? "Payment condition does not match Exact supplier default."
+        : undefined,
+    ]
+  );
+  const yourRefIssue = validationIssueFor(["yourRef", "referenceCode"]);
+  const glAccountIssue = validationIssueFor(
+    [],
+    [
+      firstBookingLine &&
+      confidenceThreshold &&
+      firstBookingLine.glConfidence < confidenceThreshold
+        ? "G/L account confidence is low. Review the suggested Exact account."
+        : undefined,
+    ]
+  );
+  const costCenterIssue = validationIssueFor(
+    [],
+    [
+      firstBookingLine &&
+      confidenceThreshold &&
+      firstBookingLine.costCentreConfidence < confidenceThreshold
+        ? "Cost center confidence is low. Review the suggested value."
+        : undefined,
+    ]
+  );
+  const costUnitIssue = validationIssueFor(
+    [],
+    [
+      firstBookingLine &&
+      confidenceThreshold &&
+      firstBookingLine.costUnitConfidence < confidenceThreshold
+        ? "Cost unit confidence is low. Review the suggested value."
+        : undefined,
+    ]
+  );
+  const vatCodeIssue = validationIssueFor(
+    [],
+    [
+      firstBookingLine?.vatCode === "6" &&
+      confidenceThreshold &&
+      firstBookingLine.vatConfidence < confidenceThreshold
+        ? "VAT code confidence is low. VAT code 6 was selected as safe fallback."
+        : firstBookingLine &&
+            confidenceThreshold &&
+            firstBookingLine.vatConfidence < confidenceThreshold
+          ? "VAT code confidence is low. Review the selected Exact VAT code."
+          : undefined,
+    ]
+  );
+  const totalAmountIssue = validationIssueFor(
+    ["grossAmount"],
+    [
+      selectedPurchaseJournal?.totals.difference
+        ? "Total amount does not match invoice total."
+        : undefined,
+    ]
+  );
 
   const stats = useMemo(() => {
     const ready = state.invoices.filter(
@@ -674,6 +1165,72 @@ export function IntoWorkbench() {
       selectedPurchaseJournal.yourRef &&
       selectedPurchaseJournal.yourRefUnique
   );
+  const reviewActions: ReviewActionDefinition[] = selectedInvoice
+    ? [
+        {
+          key: "save",
+          label: "Save changes",
+          variant: "primary",
+          onClick: saveDraft,
+          loading: busy === "save",
+          feedback: buttonFeedbackFor("save", "save"),
+          disabled: Boolean(saveChangesDisabledReason()),
+          disabledReason: saveChangesDisabledReason(),
+        },
+        {
+          key: `reread-${selectedInvoice.id}`,
+          label: "Re-read invoice",
+          variant: "ghost",
+          onClick: rereadSelectedInvoice,
+          loading: busy === `reread-${selectedInvoice.id}`,
+          feedback: buttonFeedbackFor(
+            `reread-${selectedInvoice.id}`,
+            `reread-${selectedInvoice.id}`
+          ),
+          disabled: Boolean(reReadDisabledReason(selectedInvoice)),
+          disabledReason: reReadDisabledReason(selectedInvoice),
+        },
+        {
+          key: "approve-intelligence",
+          label: "Mark as reviewed",
+          variant: "secondary",
+          onClick: () => applyIntelligenceAction("approve"),
+          loading: busy === "approve-intelligence",
+          feedback: buttonFeedbackFor(
+            "approve-intelligence",
+            "approve-intelligence"
+          ),
+          disabled: Boolean(markReviewedDisabledReason(selectedInvoice)),
+          disabledReason: markReviewedDisabledReason(selectedInvoice),
+        },
+        {
+          key: `book-${selectedInvoice.id}`,
+          label: "Book invoice",
+          variant: "outline",
+          onClick: () => bookInvoice(selectedInvoice.id),
+          loading: busy === `book-${selectedInvoice.id}`,
+          feedback: buttonFeedbackFor(
+            `book-${selectedInvoice.id}`,
+            `book-${selectedInvoice.id}`
+          ),
+          disabled: Boolean(bookReviewDisabledReason(selectedInvoice)),
+          disabledReason: bookReviewDisabledReason(selectedInvoice),
+        },
+        {
+          key: `needs-review-${selectedInvoice.id}`,
+          label: "Reject / Needs review",
+          variant: "danger",
+          onClick: markSelectedNeedsReview,
+          loading: busy === `needs-review-${selectedInvoice.id}`,
+          feedback: buttonFeedbackFor(
+            `needs-review-${selectedInvoice.id}`,
+            `needs-review-${selectedInvoice.id}`
+          ),
+          disabled: Boolean(needsReviewDisabledReason(selectedInvoice)),
+          disabledReason: needsReviewDisabledReason(selectedInvoice),
+        },
+      ]
+    : [];
 
   function setUploadItem(id: string, patch: Partial<UploadItem>) {
     setUploadItems((current) =>
@@ -1529,6 +2086,92 @@ export function IntoWorkbench() {
     }
   }
 
+  async function rereadSelectedInvoice() {
+    if (!selectedInvoice) {
+      return;
+    }
+
+    const key = `reread-${selectedInvoice.id}`;
+    setBusy(key);
+    try {
+      const response = await fetch(
+        `/api/invoices/${selectedInvoice.id}/duplicate-resolution`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            decision: "re_read",
+            detectionOutcome:
+              selectedInvoice.duplicateDetection?.outcome ?? "processed_unbooked",
+            message: "User requested a fresh read from the original invoice.",
+          }),
+        }
+      );
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "Re-read failed.");
+      }
+
+      setState((current) => ({
+        ...current,
+        invoices: data.invoices ?? current.invoices,
+      }));
+      setSelectedInvoiceId(data.invoice?.id ?? selectedInvoice.id);
+      setMessage("Invoice re-read from the original file and validation reran.");
+      flashButton(key, "success");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Re-read failed.");
+      flashButton(key, "error");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function markSelectedNeedsReview() {
+    if (!selectedInvoice) {
+      return;
+    }
+
+    const key = `needs-review-${selectedInvoice.id}`;
+    setBusy(key);
+    try {
+      const response = await fetch(
+        `/api/invoices/${selectedInvoice.id}/review-action`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "needs_review",
+            reason: "Marked as needs review by user.",
+          }),
+        }
+      );
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "Could not mark invoice for review.");
+      }
+
+      setState((current) => ({
+        ...current,
+        invoices: data.invoices ?? current.invoices,
+      }));
+      setSelectedInvoiceId(data.invoice?.id ?? selectedInvoice.id);
+      setMessage("Invoice marked as needing review.");
+      flashButton(key, "success");
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Could not mark invoice for review."
+      );
+      flashButton(key, "error");
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function bookInvoice(invoiceId: string) {
     const key = `book-${invoiceId}`;
     setBusy(key);
@@ -1607,9 +2250,105 @@ export function IntoWorkbench() {
     link.remove();
   }
 
+  function busyDisabledReason(actionKey: string) {
+    return busy && busy !== actionKey ? "Another invoice action is already running." : "";
+  }
+
+  function saveChangesDisabledReason() {
+    const busyReason = busyDisabledReason("save");
+    if (busyReason) {
+      return busyReason;
+    }
+
+    if (!hasPermission("edit")) {
+      return "Your INTO account is not verified for invoice edits.";
+    }
+
+    if (!hasUnsavedChanges) {
+      return "Save changes is disabled because there are no unsaved changes.";
+    }
+
+    return "";
+  }
+
+  function reReadDisabledReason(invoice: UploadedInvoice) {
+    const actionKey = `reread-${invoice.id}`;
+    const busyReason = busyDisabledReason(actionKey);
+    if (busyReason) {
+      return busyReason;
+    }
+
+    if (!hasPermission("edit")) {
+      return "Your INTO account is not verified to re-read invoices.";
+    }
+
+    if (invoice.status === "Reading") {
+      return "Re-read invoice is disabled while extraction is already running.";
+    }
+
+    if (invoice.status === "Booked") {
+      return "Booked invoices cannot be re-read.";
+    }
+
+    if (!invoice.storageKey) {
+      return "Re-read invoice is disabled because the original invoice attachment is missing.";
+    }
+
+    return "";
+  }
+
+  function markReviewedDisabledReason(invoice: UploadedInvoice) {
+    const busyReason = busyDisabledReason("approve-intelligence");
+    if (busyReason) {
+      return busyReason;
+    }
+
+    if (!hasPermission("approve")) {
+      return "Your INTO account is not verified for review approval.";
+    }
+
+    if (hasUnsavedChanges) {
+      return "Save changes before marking this invoice as reviewed.";
+    }
+
+    if (invoice.status === "Booked") {
+      return "This invoice is already booked.";
+    }
+
+    if (invoice.status === "Ready to Book") {
+      return "This invoice is already reviewed and ready to book.";
+    }
+
+    if (!selectedPurchaseJournal) {
+      return "Invoice must be read before it can be marked as reviewed.";
+    }
+
+    if (selectedPurchaseJournal.supplierResolution.reviewRequired) {
+      return "Supplier has multiple possible Exact matches. Please select one.";
+    }
+
+    if (!selectedPurchaseJournal.attachmentPresent) {
+      return "Mark as reviewed is disabled because the invoice attachment is missing.";
+    }
+
+    if (!selectedPurchaseJournal.yourRef || !selectedPurchaseJournal.yourRefUnique) {
+      return "Mark as reviewed is disabled until Your ref. is present and unique.";
+    }
+
+    if (!canApproveSelectedIntelligence) {
+      return "Fix validation warnings before marking this invoice as reviewed.";
+    }
+
+    return "";
+  }
+
   function bookDisabledReason(invoice: UploadedInvoice) {
     if (!hasPermission("book")) {
       return "Your INTO account is not verified for invoice booking.";
+    }
+
+    if (hasUnsavedChanges) {
+      return "Save changes before booking so validation uses your latest values.";
     }
 
     if (!state.exactConnection) {
@@ -1620,11 +2359,116 @@ export function IntoWorkbench() {
       return "Sync Exact data before booking so INTO can validate Exact master records.";
     }
 
+    if (!invoice.purchaseJournal?.attachmentPresent) {
+      return "Book invoice is disabled because the original invoice attachment is missing.";
+    }
+
+    if (invoice.purchaseJournal?.supplierResolution.reviewRequired) {
+      return "Book invoice is disabled because the supplier is unresolved.";
+    }
+
     if (invoice.status !== "Ready to Book") {
       return "Book Invoice is disabled because this invoice still needs validation or review.";
     }
 
     return "";
+  }
+
+  function bookReviewDisabledReason(invoice: UploadedInvoice) {
+    const actionKey = `book-${invoice.id}`;
+    const busyReason = busyDisabledReason(actionKey);
+    return busyReason || bookDisabledReason(invoice);
+  }
+
+  function needsReviewDisabledReason(invoice: UploadedInvoice) {
+    const actionKey = `needs-review-${invoice.id}`;
+    const busyReason = busyDisabledReason(actionKey);
+    if (busyReason) {
+      return busyReason;
+    }
+
+    if (!hasPermission("review")) {
+      return "Your INTO account is not verified to mark invoices as needing review.";
+    }
+
+    if (invoice.status === "Booked") {
+      return "Booked invoices cannot be rejected or moved back to review.";
+    }
+
+    if (reviewStatuses.has(invoice.status)) {
+      return "This invoice is already marked as needing review.";
+    }
+
+    return "";
+  }
+
+  function reviewInputType(field: keyof ExtractedInvoiceData) {
+    const fieldName = String(field);
+    if (fieldName.includes("Date")) {
+      return "date";
+    }
+    if (fieldName.includes("Amount")) {
+      return "number";
+    }
+    return "text";
+  }
+
+  function reviewInputValue(field: keyof ExtractedInvoiceData) {
+    if (!draft) {
+      return "";
+    }
+
+    const value = draft[field];
+    return String(field).includes("Amount")
+      ? numberValue(value as number | null)
+      : String(value ?? "");
+  }
+
+  function renderEditableReviewField(
+    label: string,
+    field: keyof ExtractedInvoiceData,
+    options: { helper?: string; emphasized?: boolean } = {}
+  ) {
+    const issue = validationIssueFor([field]);
+    if (reviewInputType(field) === "date") {
+      return (
+        <DateField
+          key={String(field)}
+          label={label}
+          value={reviewInputValue(field)}
+          onChange={(value) => updateDraft(field, value)}
+          disabled={!hasPermission("edit")}
+          issue={issue}
+        />
+      );
+    }
+
+    if (reviewInputType(field) === "number") {
+      return (
+        <AmountField
+          key={String(field)}
+          label={label}
+          value={draft?.[field] as number | null}
+          currency={currentCurrency}
+          onChange={(value) => updateDraft(field, value)}
+          disabled={!hasPermission("edit")}
+          issue={issue}
+          emphasized={options.emphasized}
+        />
+      );
+    }
+
+    return (
+      <TextField
+        key={String(field)}
+        label={label}
+        value={reviewInputValue(field)}
+        onChange={(value) => updateDraft(field, value)}
+        disabled={!hasPermission("edit")}
+        issue={issue}
+        helper={options.helper}
+      />
+    );
   }
 
   return (
@@ -2573,22 +3417,24 @@ export function IntoWorkbench() {
         ) : null}
 
         {selectedInvoice && draft ? (
-          <section className="grid gap-4 xl:grid-cols-[0.95fr_1.05fr]">
+          <section className="grid items-start gap-5 lg:grid-cols-[minmax(0,1.35fr)_minmax(380px,0.95fr)]">
             <section
               className={
                 previewFullscreen
-                  ? "fixed inset-4 z-50 flex flex-col overflow-hidden rounded-lg border border-stone-300 bg-white shadow-2xl"
-                  : "rounded-lg border border-stone-300 bg-white"
+                  ? "fixed inset-4 z-50 flex flex-col overflow-hidden rounded-xl border border-stone-200 bg-white shadow-2xl"
+                  : "min-w-0 overflow-hidden rounded-xl border border-stone-200 bg-white shadow-sm lg:sticky lg:top-4 lg:self-start"
               }
             >
-              <div className="flex flex-col gap-3 border-b border-stone-200 p-4 lg:flex-row lg:items-center lg:justify-between">
+              <div className="flex flex-col gap-3 border-b border-stone-200 bg-white p-4 lg:flex-row lg:items-start lg:justify-between">
                 <div>
-                  <h2 className="text-lg font-semibold">Invoice preview</h2>
-                  <p className="text-sm text-stone-500">
+                  <h2 className="text-xl font-semibold text-stone-950">
+                    Invoice preview
+                  </h2>
+                  <p className="mt-1 break-all text-sm leading-5 text-stone-500">
                     {selectedInvoice.fileName} - {formatFileSize(selectedInvoice.fileSize)}
                   </p>
                 </div>
-                <div className="flex flex-wrap gap-2">
+                <div className="flex flex-wrap gap-2 lg:justify-end">
                   {(["auto", "width", "height"] as PreviewFitMode[]).map((fitMode) => (
                     <ActionButton
                       key={fitMode}
@@ -2662,7 +3508,7 @@ export function IntoWorkbench() {
                   </ActionButton>
                 </div>
               </div>
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200 px-4 py-2 text-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200 bg-stone-50/70 px-4 py-2 text-sm">
                 <div className="text-stone-600">
                   Page {previewPage} of {pageCount} - {previewFitModeLabels[previewFitMode]} - Zoom {Math.round(previewZoom * 100)}%
                   {previewRotation ? ` - Rotated ${previewRotation}deg` : ""}
@@ -2691,8 +3537,10 @@ export function IntoWorkbench() {
                 </div>
               </div>
               <div
-                className={`overflow-auto bg-stone-100 p-4 ${
-                  previewFullscreen ? "flex-1" : "max-h-[900px]"
+                className={`overflow-auto bg-[#f7f8f5] p-4 sm:p-5 ${
+                  previewFullscreen
+                    ? "flex-1"
+                    : "max-h-[900px] lg:max-h-[calc(100vh-220px)]"
                 }`}
               >
                 <PreviewDocument
@@ -2706,15 +3554,25 @@ export function IntoWorkbench() {
               </div>
             </section>
 
-            <aside className="rounded-lg border border-stone-300 bg-white">
-              <div className="border-b border-stone-200 p-4">
-                <h2 className="text-lg font-semibold">Review invoice</h2>
-                <p className="text-sm text-stone-500">
-                  Fix fields here, then save to rerun validation.
-                </p>
+            <aside className="min-w-0 overflow-hidden rounded-xl border border-stone-200 bg-white shadow-sm lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
+              <div className="sticky top-0 z-20 border-b border-stone-200 bg-white/95 p-4 shadow-sm backdrop-blur">
+                <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
+                  <div>
+                    <h2 className="text-xl font-semibold text-stone-950">
+                      Review invoice
+                    </h2>
+                    <p className="mt-1 text-sm leading-5 text-stone-500">
+                      Fix fields here, then save to rerun validation.
+                    </p>
+                  </div>
+                  <span className="rounded-md border border-stone-200 bg-stone-50 px-2 py-1 text-xs font-semibold text-stone-500">
+                    Actions
+                  </span>
+                </div>
+                <ReviewActionBar actions={reviewActions} />
               </div>
 
-              <div className="flex flex-col gap-4 p-4">
+              <div className="flex flex-col gap-5 bg-stone-50/40 p-4 sm:p-5">
                 <div className="flex flex-wrap items-center gap-2">
                   <span
                     className={`rounded-md border px-2 py-1 text-xs font-semibold ${
@@ -2740,7 +3598,7 @@ export function IntoWorkbench() {
                 </div>
 
                 {selectedInvoice.validationErrors.length ? (
-                  <div className="rounded-lg border border-amber-300 bg-amber-50 p-3">
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 shadow-sm">
                     <h3 className="text-sm font-semibold text-amber-950">
                       Validation warnings
                     </h3>
@@ -2751,14 +3609,14 @@ export function IntoWorkbench() {
                     </ul>
                   </div>
                 ) : (
-                  <div className="rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm font-semibold text-emerald-900">
+                  <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-semibold text-emerald-900 shadow-sm">
                     All required fields are valid.
                   </div>
                 )}
 
                 {selectedInvoice.duplicateDetection?.outcome ===
                 "possible_duplicate" ? (
-                  <div className="rounded-lg border border-fuchsia-300 bg-fuchsia-50 p-3">
+                  <div className="rounded-xl border border-fuchsia-200 bg-fuchsia-50 p-4 shadow-sm">
                     <h3 className="text-sm font-semibold text-fuchsia-950">
                       Possible duplicate
                     </h3>
@@ -2824,11 +3682,189 @@ export function IntoWorkbench() {
                   </div>
                 ) : null}
 
+                <section className="grid gap-4">
+                  <ReviewSection title="Supplier & invoice identity">
+                    <SelectField
+                      label="Supplier"
+                      value={draft.supplierName}
+                      options={supplierOptions}
+                      listId={`supplier-options-${selectedInvoice.id}`}
+                      onChange={(value) => updateDraft("supplierName", value)}
+                      disabled={!hasPermission("edit")}
+                      issue={supplierIssue}
+                      helper={
+                        selectedPurchaseJournal?.supplierResolution.selectedAccountName
+                          ? `Exact account: ${selectedPurchaseJournal.supplierResolution.selectedAccountName}`
+                          : "Search synced Exact supplier accounts."
+                      }
+                      confidence={
+                        selectedPurchaseJournal?.supplierResolution.matchConfidence
+                      }
+                      threshold={confidenceThreshold}
+                    />
+                    <TextField
+                      label="Description"
+                      value={draft.expenseDescription}
+                      onChange={(value) => updateDraft("expenseDescription", value)}
+                      disabled={!hasPermission("edit")}
+                      issue={validationIssueFor(["expenseDescription"])}
+                      helper={
+                        selectedPurchaseJournal?.description
+                          ? `Booking description: ${selectedPurchaseJournal.description}`
+                          : undefined
+                      }
+                    />
+                    <SelectField
+                      label="Payment condition"
+                      value={draft.paymentTerms}
+                      options={paymentConditionOptions}
+                      listId={`payment-options-${selectedInvoice.id}`}
+                      onChange={(value) => updateDraft("paymentTerms", value)}
+                      disabled={!hasPermission("edit")}
+                      issue={paymentConditionIssue}
+                      helper={
+                        selectedPurchaseJournal
+                          ? `Exact default: ${selectedPurchaseJournal.paymentConditionCode || "-"} - ${selectedPurchaseJournal.paymentConditionLabel || "-"}`
+                          : "Search synced Exact payment conditions."
+                      }
+                      confidence={selectedPurchaseJournal?.confidenceScores.paymentCondition}
+                      threshold={confidenceThreshold}
+                    />
+                    <TextField
+                      label="Your ref."
+                      value={draft.referenceCode}
+                      onChange={(value) => updateDraft("referenceCode", value)}
+                      disabled={!hasPermission("edit")}
+                      issue={yourRefIssue}
+                      helper={
+                        selectedPurchaseJournal?.yourRef
+                          ? `Booking reference: ${selectedPurchaseJournal.yourRef}`
+                          : undefined
+                      }
+                    />
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <DateField
+                        label="Invoice date"
+                        value={draft.invoiceDate}
+                        onChange={(value) => updateDraft("invoiceDate", value)}
+                        disabled={!hasPermission("edit")}
+                        issue={validationIssueFor(["invoiceDate"])}
+                      />
+                      <DateField
+                        label="Due date"
+                        value={draft.dueDate}
+                        onChange={(value) => updateDraft("dueDate", value)}
+                        disabled={!hasPermission("edit")}
+                        issue={validationIssueFor(["dueDate"])}
+                      />
+                    </div>
+                  </ReviewSection>
+
+                  <ReviewSection title="Booking allocation">
+                    <SelectField
+                      label="G/L Account"
+                      value={
+                        firstBookingLine
+                          ? `${firstBookingLine.glAccount} - ${firstBookingLine.glAccountName}`
+                          : ""
+                      }
+                      options={glAccountOptions}
+                      listId={`gl-options-${selectedInvoice.id}`}
+                      readOnly
+                      issue={glAccountIssue}
+                      helper="Selected from synced Exact G/L accounts."
+                      confidence={firstBookingLine?.glConfidence}
+                      threshold={confidenceThreshold}
+                    />
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <DateField
+                        label="From"
+                        value={firstBookingLine?.from ?? ""}
+                        onChange={() => undefined}
+                        disabled
+                      />
+                      <DateField
+                        label="To"
+                        value={firstBookingLine?.to ?? ""}
+                        onChange={() => undefined}
+                        disabled
+                      />
+                    </div>
+                    <SelectField
+                      label="Cost center"
+                      value={firstBookingLine?.costCentre ?? ""}
+                      options={costCenterOptions}
+                      listId={`cost-center-options-${selectedInvoice.id}`}
+                      readOnly
+                      issue={costCenterIssue}
+                      helper="Optional value from synced Exact cost centers."
+                      confidence={firstBookingLine?.costCentreConfidence}
+                      threshold={confidenceThreshold}
+                    />
+                    <SelectField
+                      label="Cost unit"
+                      value={firstBookingLine?.costUnit ?? ""}
+                      options={costUnitOptions}
+                      listId={`cost-unit-options-${selectedInvoice.id}`}
+                      readOnly
+                      issue={costUnitIssue}
+                      helper="Optional value from synced Exact cost units."
+                      confidence={firstBookingLine?.costUnitConfidence}
+                      threshold={confidenceThreshold}
+                    />
+                  </ReviewSection>
+
+                  <ReviewSection title="VAT & amounts">
+                    <SelectField
+                      label="VAT code"
+                      value={
+                        firstBookingLine
+                          ? `${firstBookingLine.vatCode} - ${firstBookingLine.vatCodeName}`
+                          : ""
+                      }
+                      options={vatCodeOptions}
+                      listId={`vat-options-${selectedInvoice.id}`}
+                      readOnly
+                      issue={vatCodeIssue}
+                      helper="Selected from synced Exact purchase VAT codes."
+                      confidence={firstBookingLine?.vatConfidence}
+                      threshold={confidenceThreshold}
+                    />
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <AmountField
+                        label="Amount"
+                        value={draft.netAmount}
+                        currency={currentCurrency}
+                        onChange={(value) => updateDraft("netAmount", value)}
+                        disabled={!hasPermission("edit")}
+                        issue={validationIssueFor(["netAmount"])}
+                      />
+                      <AmountField
+                        label="VAT amount"
+                        value={draft.vatAmount}
+                        currency={currentCurrency}
+                        onChange={(value) => updateDraft("vatAmount", value)}
+                        disabled={!hasPermission("edit")}
+                        issue={validationIssueFor(["vatAmount"])}
+                      />
+                    </div>
+                    <AmountField
+                      label="Total amount"
+                      value={draft.grossAmount}
+                      currency={currentCurrency}
+                      onChange={(value) => updateDraft("grossAmount", value)}
+                      disabled={!hasPermission("edit")}
+                      issue={totalAmountIssue}
+                      emphasized
+                    />
+                  </ReviewSection>
+                </section>
+
                 {selectedPurchaseJournal ? (
-                  <section className="space-y-4 border-y border-stone-200 py-4">
+                  <section className="space-y-4 rounded-xl border border-stone-200 bg-white p-4 shadow-sm">
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                       <div>
-                        <h3 className="text-sm font-semibold">
+                        <h3 className="text-base font-semibold text-stone-950">
                           Purchase Journal intelligence
                         </h3>
                         <p className="mt-1 text-xs text-stone-500">
@@ -2863,7 +3899,7 @@ export function IntoWorkbench() {
                         ([key, value]) => (
                           <div
                             key={key}
-                            className={`rounded-md border px-3 py-2 text-sm ${confidenceTone(
+                            className={`rounded-lg border px-3 py-2 text-sm ${confidenceTone(
                               value,
                               selectedPurchaseJournal.confidenceThreshold
                             )}`}
@@ -2880,7 +3916,7 @@ export function IntoWorkbench() {
                     </div>
 
                     <div className="grid gap-3 text-sm md:grid-cols-2">
-                      <div className="rounded-md border border-stone-200 p-3">
+                      <div className="rounded-lg border border-stone-200 bg-stone-50/60 p-3">
                         <div className="text-xs font-semibold text-stone-500">
                           Attachment
                         </div>
@@ -2894,7 +3930,7 @@ export function IntoWorkbench() {
                         </div>
                       </div>
 
-                      <div className="rounded-md border border-stone-200 p-3">
+                      <div className="rounded-lg border border-stone-200 bg-stone-50/60 p-3">
                         <div className="text-xs font-semibold text-stone-500">
                           Supplier
                         </div>
@@ -2913,7 +3949,7 @@ export function IntoWorkbench() {
                     </div>
 
                     {selectedPurchaseJournal.supplierResolution.reviewRequired ? (
-                      <div className="rounded-md border border-orange-300 bg-orange-50 p-3">
+                      <div className="rounded-lg border border-orange-200 bg-orange-50 p-3">
                         <div className="text-sm font-semibold text-orange-950">
                           Supplier Review Required
                         </div>
@@ -2953,7 +3989,7 @@ export function IntoWorkbench() {
                     ) : null}
 
                     <div className="grid gap-3 text-sm md:grid-cols-2">
-                      <div className="rounded-md border border-stone-200 p-3">
+                      <div className="rounded-lg border border-stone-200 bg-stone-50/60 p-3">
                         <div className="text-xs font-semibold text-stone-500">
                           Entry data
                         </div>
@@ -2978,7 +4014,7 @@ export function IntoWorkbench() {
                         ) : null}
                       </div>
 
-                      <div className="rounded-md border border-stone-200 p-3">
+                      <div className="rounded-lg border border-stone-200 bg-stone-50/60 p-3">
                         <div className="text-xs font-semibold text-stone-500">
                           Suggested corrections
                         </div>
@@ -2993,34 +4029,7 @@ export function IntoWorkbench() {
                       </div>
                     </div>
 
-                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                      {[
-                        ["VAT code", firstBookingLine?.vatCode ?? ""],
-                        [
-                          "G/L account",
-                          firstBookingLine
-                            ? `${firstBookingLine.glAccount} ${firstBookingLine.glAccountName}`
-                            : "",
-                        ],
-                        ["Cost center", firstBookingLine?.costCentre ?? ""],
-                        ["Cost unit", firstBookingLine?.costUnit ?? ""],
-                        ["Accrual From", firstBookingLine?.from ?? ""],
-                        ["Accrual To", firstBookingLine?.to ?? ""],
-                      ].map(([label, value]) => (
-                        <label key={label} className="flex flex-col gap-1 text-sm">
-                          <span className="font-semibold text-stone-700">
-                            {label}
-                          </span>
-                          <input
-                            readOnly
-                            className="rounded-md border border-stone-300 bg-stone-50 px-3 py-2"
-                            value={value}
-                          />
-                        </label>
-                      ))}
-                    </div>
-
-                    <div className="overflow-x-auto rounded-md border border-stone-200">
+                    <div className="overflow-x-auto rounded-lg border border-stone-200">
                       <table className="w-full min-w-[760px] border-collapse text-left text-xs">
                         <thead className="bg-stone-100 text-stone-600">
                           <tr>
@@ -3087,38 +4096,10 @@ export function IntoWorkbench() {
                   </section>
                 ) : null}
 
-                <div className="grid gap-3 sm:grid-cols-2">
-                  {(Object.keys(fieldLabels) as (keyof ExtractedInvoiceData)[]).map(
-                    (field) => (
-                      <label key={field} className="flex flex-col gap-1 text-sm">
-                        <span className="font-semibold text-stone-700">
-                          {fieldLabels[field]}
-                        </span>
-                        <input
-                          className="rounded-md border border-stone-300 px-3 py-2 disabled:cursor-not-allowed disabled:bg-stone-100 disabled:text-stone-500"
-                          type={
-                            field.includes("Date")
-                              ? "date"
-                              : field.includes("Amount")
-                                ? "number"
-                                : "text"
-                          }
-                          step={field.includes("Amount") ? "0.01" : undefined}
-                          value={
-                            field.includes("Amount")
-                              ? numberValue(draft[field] as number | null)
-                              : String(draft[field] ?? "")
-                          }
-                          onChange={(event) => updateDraft(field, event.target.value)}
-                          disabled={!hasPermission("edit")}
-                        />
-                      </label>
-                    )
-                  )}
-                </div>
-
-                <div className="rounded-lg border border-stone-200 p-3">
-                  <h3 className="text-sm font-semibold">Line items</h3>
+                <div className="rounded-xl border border-stone-200 bg-white p-4 shadow-sm">
+                  <h3 className="text-base font-semibold text-stone-950">
+                    Line items
+                  </h3>
                   <div className="mt-2 space-y-2 text-sm">
                     {selectedInvoice.extractedData.lineItems.length ? (
                       selectedInvoice.extractedData.lineItems.map((item) => (
@@ -3136,9 +4117,29 @@ export function IntoWorkbench() {
                   </div>
                 </div>
 
-                <div className="rounded-lg border border-stone-200 p-3">
+                <CollapsibleSection
+                  title="Additional details"
+                  open={additionalDetailsOpen}
+                >
+                  {additionalDetailFields.map((field) =>
+                    renderEditableReviewField(fieldLabels[field] ?? String(field), field)
+                  )}
+                </CollapsibleSection>
+
+                <CollapsibleSection
+                  title="Technical supplier details"
+                  open={technicalSupplierDetailsOpen}
+                >
+                  {technicalSupplierFields.map((field) =>
+                    renderEditableReviewField(fieldLabels[field] ?? String(field), field)
+                  )}
+                </CollapsibleSection>
+
+                <div className="rounded-xl border border-stone-200 bg-white p-4 shadow-sm">
                   <div className="flex items-center justify-between gap-3">
-                    <h3 className="text-sm font-semibold">Processing timeline</h3>
+                    <h3 className="text-base font-semibold text-stone-950">
+                      Processing timeline
+                    </h3>
                     <span className="text-xs text-stone-500">
                       {auditEvents.length} event(s)
                     </span>
@@ -3169,44 +4170,6 @@ export function IntoWorkbench() {
                       <p className="text-stone-500">No audit events recorded yet.</p>
                     )}
                   </div>
-                </div>
-
-                <div className="flex flex-wrap gap-2">
-                  <ActionButton
-                    onClick={saveDraft}
-                    loading={busy === "save"}
-                    feedback={buttonFeedbackFor("save", "save")}
-                    disabled={
-                      busy === "save" || !hasUnsavedChanges || !hasPermission("edit")
-                    }
-                    disabledReason={
-                      !hasPermission("edit")
-                        ? "Your INTO account is not verified for invoice edits."
-                        : "There are no unsaved review changes."
-                    }
-                  >
-                    Save changes
-                  </ActionButton>
-                  <ActionButton
-                    variant="outline"
-                    onClick={() => bookInvoice(selectedInvoice.id)}
-                    loading={busy === `book-${selectedInvoice.id}`}
-                    feedback={buttonFeedbackFor(
-                      `book-${selectedInvoice.id}`,
-                      `book-${selectedInvoice.id}`
-                    )}
-                    disabled={
-                      selectedInvoice.status !== "Ready to Book" ||
-                      !hasPermission("book") ||
-                      !state.exactConnection ||
-                      !state.exactMasterData ||
-                      state.exactMasterDataStale ||
-                      busy === `book-${selectedInvoice.id}`
-                    }
-                    disabledReason={bookDisabledReason(selectedInvoice)}
-                  >
-                    Book invoice
-                  </ActionButton>
                 </div>
 
                 {selectedInvoice.lastError ? (

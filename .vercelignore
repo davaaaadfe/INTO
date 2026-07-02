@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+work
+components/work
+outputs
+dist
+build
+.next
+.vite
+.wrangler
+node_modules
+.agents
+.codex
+*.log

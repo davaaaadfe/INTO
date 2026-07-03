@@ -23,6 +23,10 @@ import type {
   UploadedInvoice,
   ValidationError,
 } from "../lib/domain/invoice";
+import {
+  REQUIRED_BOOKING_DISABLED_REASON,
+  getRequiredBookingDataIssues,
+} from "../lib/services/required-booking-data";
 
 type ApiState = {
   users: IntoUser[];
@@ -216,10 +220,8 @@ const reviewStatuses = new Set<UploadedInvoice["status"]>([
 ]);
 
 const fieldLabels: Partial<Record<keyof ExtractedInvoiceData, string>> = {
-  supplierName: "Extracted supplier",
+  supplierName: "Supplier",
   supplierVatNumber: "Supplier VAT number",
-  supplierChamberOfCommerceNumber: "Chamber of Commerce",
-  supplierAddress: "Supplier address",
   supplierCountry: "Supplier country",
   invoiceNumber: "Invoice number",
   referenceCode: "Your ref.",
@@ -230,27 +232,15 @@ const fieldLabels: Partial<Record<keyof ExtractedInvoiceData, string>> = {
   netAmount: "Net amount",
   vatAmount: "VAT amount",
   grossAmount: "Total amount",
-  iban: "IBAN",
   expenseDescription: "Expense description",
-  beneficiary: "Beneficiary",
-  serviceStartDate: "Benefit start date",
-  serviceEndDate: "Benefit end date",
-  companyVatNumber: "Company VAT number",
 };
 
-const additionalDetailFields: (keyof ExtractedInvoiceData)[] = [
+const additionalDataFields: (keyof ExtractedInvoiceData)[] = [
+  "dueDate",
+  "invoiceNumber",
   "currency",
-  "beneficiary",
-  "serviceStartDate",
-  "serviceEndDate",
   "supplierCountry",
-];
-
-const technicalSupplierFields: (keyof ExtractedInvoiceData)[] = [
   "supplierVatNumber",
-  "supplierAddress",
-  "companyVatNumber",
-  "supplierChamberOfCommerceNumber",
 ];
 
 const confidenceLabels: Record<string, string> = {
@@ -544,6 +534,7 @@ function ReviewField({
   confidence,
   threshold,
   emphasized = false,
+  required = false,
 }: {
   label: string;
   children: ReactNode;
@@ -552,6 +543,7 @@ function ReviewField({
   confidence?: number;
   threshold?: number;
   emphasized?: boolean;
+  required?: boolean;
 }) {
   const borderTone =
     issue?.tone === "error"
@@ -565,7 +557,17 @@ function ReviewField({
   return (
     <label className="flex flex-col gap-2 text-sm">
       <div className="flex items-center justify-between gap-2">
-        <span className="font-medium text-stone-700">{label}</span>
+        <span className="font-medium text-stone-700">
+          {label}
+          {required ? (
+            <>
+              <span className="ml-1 text-rose-600" aria-hidden="true">
+                *
+              </span>
+              <span className="sr-only"> required</span>
+            </>
+          ) : null}
+        </span>
         <ConfidenceBadge value={confidence} threshold={threshold} />
       </div>
       <div
@@ -601,6 +603,7 @@ function SelectField({
   helper,
   confidence,
   threshold,
+  required = false,
 }: {
   label: string;
   value: string;
@@ -613,6 +616,7 @@ function SelectField({
   helper?: string;
   confidence?: number;
   threshold?: number;
+  required?: boolean;
 }) {
   return (
     <ReviewField
@@ -621,6 +625,7 @@ function SelectField({
       helper={helper}
       confidence={confidence}
       threshold={threshold}
+      required={required}
     >
       <input
         className={inputBaseClass()}
@@ -649,15 +654,17 @@ function DateField({
   onChange,
   disabled,
   issue,
+  required = false,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   disabled: boolean;
   issue?: FieldIssue;
+  required?: boolean;
 }) {
   return (
-    <ReviewField label={label} issue={issue}>
+    <ReviewField label={label} issue={issue} required={required}>
       <input
         className={inputBaseClass()}
         type="date"
@@ -677,6 +684,7 @@ function AmountField({
   disabled,
   issue,
   emphasized = false,
+  required = false,
 }: {
   label: string;
   value: number | null;
@@ -685,6 +693,7 @@ function AmountField({
   disabled: boolean;
   issue?: FieldIssue;
   emphasized?: boolean;
+  required?: boolean;
 }) {
   return (
     <ReviewField
@@ -692,6 +701,7 @@ function AmountField({
       issue={issue}
       helper={typeof value === "number" ? formatMoney(value, currency) : undefined}
       emphasized={emphasized}
+      required={required}
     >
       <input
         className={inputBaseClass(emphasized)}
@@ -712,6 +722,7 @@ function TextField({
   disabled,
   issue,
   helper,
+  required = false,
 }: {
   label: string;
   value: string;
@@ -719,9 +730,10 @@ function TextField({
   disabled: boolean;
   issue?: FieldIssue;
   helper?: string;
+  required?: boolean;
 }) {
   return (
-    <ReviewField label={label} issue={issue} helper={helper}>
+    <ReviewField label={label} issue={issue} helper={helper} required={required}>
       <input
         className={inputBaseClass()}
         value={value}
@@ -1049,20 +1061,6 @@ export function IntoWorkbench() {
       value: `${account.code} - ${account.name}`,
       label: `${account.code} - ${account.name}`,
     }));
-  const costCenterOptions: SelectOption[] = (
-    state.exactMasterData?.costCenters ?? []
-  )
-    .filter((costCenter) => costCenter.isActive)
-    .map((costCenter) => ({
-      value: costCenter.code,
-      label: `${costCenter.code} - ${costCenter.description}`,
-    }));
-  const costUnitOptions: SelectOption[] = (state.exactMasterData?.costUnits ?? [])
-    .filter((costUnit) => costUnit.isActive)
-    .map((costUnit) => ({
-      value: costUnit.code,
-      label: `${costUnit.code} - ${costUnit.description}`,
-    }));
   const vatCodeOptions: SelectOption[] = (state.exactMasterData?.vatCodes ?? [])
     .filter((vatCode) => vatCode.type === "purchase" && vatCode.isActive)
     .map((vatCode) => ({
@@ -1102,9 +1100,24 @@ export function IntoWorkbench() {
       message,
     };
   };
-  const additionalDetailsOpen = hasFieldValidationWarning(additionalDetailFields);
-  const technicalSupplierDetailsOpen =
-    hasFieldValidationWarning(technicalSupplierFields);
+  const additionalDataOpen = hasFieldValidationWarning(additionalDataFields);
+  const requiredBookingIssuesForInvoice = (invoice: UploadedInvoice) =>
+    getRequiredBookingDataIssues(
+      selectedInvoice?.id === invoice.id && draft ? draft : invoice.extractedData,
+      invoice.purchaseJournal
+    );
+  const selectedRequiredBookingIssues =
+    selectedInvoice && draft
+      ? getRequiredBookingDataIssues(draft, selectedPurchaseJournal)
+      : [];
+  const requiredIssueFor = (
+    fields: ValidationError["field"][]
+  ): FieldIssue | undefined => {
+    const issue = selectedRequiredBookingIssues.find((item) =>
+      fields.includes(item.field)
+    );
+    return issue ? { tone: "error", message: issue.message } : undefined;
+  };
   const supplierIssue = validationIssueFor(
     ["supplier", "supplierName"],
     [
@@ -1113,6 +1126,10 @@ export function IntoWorkbench() {
         : undefined,
     ]
   );
+  const supplierFieldIssue = requiredIssueFor(["supplierName"]) ?? supplierIssue;
+  const expenseDescriptionIssue =
+    requiredIssueFor(["expenseDescription"]) ??
+    validationIssueFor(["expenseDescription"]);
   const paymentConditionIssue = validationIssueFor(
     ["paymentCondition", "paymentTerms"],
     [
@@ -1121,7 +1138,13 @@ export function IntoWorkbench() {
         : undefined,
     ]
   );
-  const yourRefIssue = validationIssueFor(["yourRef", "referenceCode"]);
+  const paymentConditionFieldIssue =
+    requiredIssueFor(["paymentTerms"]) ?? paymentConditionIssue;
+  const yourRefIssue =
+    requiredIssueFor(["referenceCode"]) ??
+    validationIssueFor(["yourRef", "referenceCode"]);
+  const invoiceDateIssue =
+    requiredIssueFor(["invoiceDate"]) ?? validationIssueFor(["invoiceDate"]);
   const glAccountIssue = validationIssueFor(
     [],
     [
@@ -1132,26 +1155,9 @@ export function IntoWorkbench() {
         : undefined,
     ]
   );
-  const costCenterIssue = validationIssueFor(
-    [],
-    [
-      firstBookingLine &&
-      confidenceThreshold &&
-      firstBookingLine.costCentreConfidence < confidenceThreshold
-        ? "Cost center confidence is low. Review the suggested value."
-        : undefined,
-    ]
-  );
-  const costUnitIssue = validationIssueFor(
-    [],
-    [
-      firstBookingLine &&
-      confidenceThreshold &&
-      firstBookingLine.costUnitConfidence < confidenceThreshold
-        ? "Cost unit confidence is low. Review the suggested value."
-        : undefined,
-    ]
-  );
+  const glAccountFieldIssue = requiredIssueFor(["glAccount"]) ?? glAccountIssue;
+  const accrualFromIssue = requiredIssueFor(["accrualFrom"]);
+  const accrualToIssue = requiredIssueFor(["accrualTo"]);
   const vatCodeIssue = validationIssueFor(
     [],
     [
@@ -1166,6 +1172,7 @@ export function IntoWorkbench() {
           : undefined,
     ]
   );
+  const vatCodeFieldIssue = requiredIssueFor(["vatCode"]) ?? vatCodeIssue;
   const totalAmountIssue = validationIssueFor(
     ["grossAmount"],
     [
@@ -1174,6 +1181,27 @@ export function IntoWorkbench() {
         : undefined,
     ]
   );
+  const totalAmountFieldIssue =
+    requiredIssueFor(["grossAmount"]) ?? totalAmountIssue;
+  const visibleValidationMessages = selectedInvoice
+    ? [
+        ...selectedInvoice.validationErrors.map((item) => ({
+          id: item.id,
+          message: item.message,
+        })),
+        ...selectedRequiredBookingIssues
+          .filter(
+            (issue) =>
+              !selectedInvoice.validationErrors.some(
+                (error) => error.field === issue.field
+              )
+          )
+          .map((issue) => ({
+            id: `required-${String(issue.field)}`,
+            message: issue.message,
+          })),
+      ]
+    : [];
 
   const stats = useMemo(() => {
     const ready = state.invoices.filter(
@@ -2382,6 +2410,10 @@ export function IntoWorkbench() {
   function bookDisabledReason(invoice: UploadedInvoice) {
     if (!hasPermission("book")) {
       return "Your INTO account is not verified for invoice booking.";
+    }
+
+    if (requiredBookingIssuesForInvoice(invoice).length > 0) {
+      return REQUIRED_BOOKING_DISABLED_REASON;
     }
 
     if (hasUnsavedChanges) {
@@ -3680,13 +3712,13 @@ export function IntoWorkbench() {
                   ) : null}
                 </div>
 
-                {selectedInvoice.validationErrors.length ? (
+                {visibleValidationMessages.length ? (
                   <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 shadow-sm">
                     <h3 className="text-sm font-semibold text-amber-950">
                       Validation warnings
                     </h3>
                     <ul className="mt-2 space-y-1 text-sm text-amber-900">
-                      {selectedInvoice.validationErrors.map((item) => (
+                      {visibleValidationMessages.map((item) => (
                         <li key={item.id}>{item.message}</li>
                       ))}
                     </ul>
@@ -3766,15 +3798,16 @@ export function IntoWorkbench() {
                 ) : null}
 
                 <section className="grid gap-4">
-                  <ReviewSection title="Supplier & invoice identity">
+                  <ReviewSection title="Required data">
                     <SelectField
                       label="Supplier"
+                      required
                       value={draft.supplierName}
                       options={supplierOptions}
                       listId={`supplier-options-${selectedInvoice.id}`}
                       onChange={(value) => updateDraft("supplierName", value)}
                       disabled={!hasPermission("edit")}
-                      issue={supplierIssue}
+                      issue={supplierFieldIssue}
                       helper={
                         selectedPurchaseJournal?.supplierResolution.selectedAccountName
                           ? `Exact account: ${selectedPurchaseJournal.supplierResolution.selectedAccountName}`
@@ -3786,35 +3819,21 @@ export function IntoWorkbench() {
                       threshold={confidenceThreshold}
                     />
                     <TextField
-                      label="Description"
+                      label="Expense description"
+                      required
                       value={draft.expenseDescription}
                       onChange={(value) => updateDraft("expenseDescription", value)}
                       disabled={!hasPermission("edit")}
-                      issue={validationIssueFor(["expenseDescription"])}
+                      issue={expenseDescriptionIssue}
                       helper={
                         selectedPurchaseJournal?.description
                           ? `Booking description: ${selectedPurchaseJournal.description}`
                           : undefined
                       }
                     />
-                    <SelectField
-                      label="Payment condition"
-                      value={draft.paymentTerms}
-                      options={paymentConditionOptions}
-                      listId={`payment-options-${selectedInvoice.id}`}
-                      onChange={(value) => updateDraft("paymentTerms", value)}
-                      disabled={!hasPermission("edit")}
-                      issue={paymentConditionIssue}
-                      helper={
-                        selectedPurchaseJournal
-                          ? `Exact default: ${selectedPurchaseJournal.paymentConditionCode || "-"} - ${selectedPurchaseJournal.paymentConditionLabel || "-"}`
-                          : "Search synced Exact payment conditions."
-                      }
-                      confidence={selectedPurchaseJournal?.confidenceScores.paymentCondition}
-                      threshold={confidenceThreshold}
-                    />
                     <TextField
-                      label="Your ref."
+                      label="Your ref"
+                      required
                       value={draft.referenceCode}
                       onChange={(value) => updateDraft("referenceCode", value)}
                       disabled={!hasPermission("edit")}
@@ -3825,27 +3844,34 @@ export function IntoWorkbench() {
                           : undefined
                       }
                     />
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <DateField
-                        label="Invoice date"
-                        value={draft.invoiceDate}
-                        onChange={(value) => updateDraft("invoiceDate", value)}
-                        disabled={!hasPermission("edit")}
-                        issue={validationIssueFor(["invoiceDate"])}
-                      />
-                      <DateField
-                        label="Due date"
-                        value={draft.dueDate}
-                        onChange={(value) => updateDraft("dueDate", value)}
-                        disabled={!hasPermission("edit")}
-                        issue={validationIssueFor(["dueDate"])}
-                      />
-                    </div>
-                  </ReviewSection>
-
-                  <ReviewSection title="Booking allocation">
+                    <SelectField
+                      label="Payment condition"
+                      required
+                      value={draft.paymentTerms}
+                      options={paymentConditionOptions}
+                      listId={`payment-options-${selectedInvoice.id}`}
+                      onChange={(value) => updateDraft("paymentTerms", value)}
+                      disabled={!hasPermission("edit")}
+                      issue={paymentConditionFieldIssue}
+                      helper={
+                        selectedPurchaseJournal
+                          ? `Exact default: ${selectedPurchaseJournal.paymentConditionCode || "-"} - ${selectedPurchaseJournal.paymentConditionLabel || "-"}`
+                          : "Search synced Exact payment conditions."
+                      }
+                      confidence={selectedPurchaseJournal?.confidenceScores.paymentCondition}
+                      threshold={confidenceThreshold}
+                    />
+                    <DateField
+                      label="Invoice date"
+                      required
+                      value={draft.invoiceDate}
+                      onChange={(value) => updateDraft("invoiceDate", value)}
+                      disabled={!hasPermission("edit")}
+                      issue={invoiceDateIssue}
+                    />
                     <SelectField
                       label="G/L Account"
+                      required
                       value={
                         firstBookingLine
                           ? `${firstBookingLine.glAccount} - ${firstBookingLine.glAccountName}`
@@ -3854,52 +3880,32 @@ export function IntoWorkbench() {
                       options={glAccountOptions}
                       listId={`gl-options-${selectedInvoice.id}`}
                       readOnly
-                      issue={glAccountIssue}
+                      issue={glAccountFieldIssue}
                       helper="Selected from synced Exact G/L accounts."
                       confidence={firstBookingLine?.glConfidence}
                       threshold={confidenceThreshold}
                     />
                     <div className="grid gap-3 sm:grid-cols-2">
                       <DateField
-                        label="From"
+                        label="Accrual From"
+                        required
                         value={firstBookingLine?.from ?? ""}
                         onChange={() => undefined}
                         disabled
+                        issue={accrualFromIssue}
                       />
                       <DateField
-                        label="To"
+                        label="Accrual To"
+                        required
                         value={firstBookingLine?.to ?? ""}
                         onChange={() => undefined}
                         disabled
+                        issue={accrualToIssue}
                       />
                     </div>
                     <SelectField
-                      label="Cost center"
-                      value={firstBookingLine?.costCentre ?? ""}
-                      options={costCenterOptions}
-                      listId={`cost-center-options-${selectedInvoice.id}`}
-                      readOnly
-                      issue={costCenterIssue}
-                      helper="Optional value from synced Exact cost centers."
-                      confidence={firstBookingLine?.costCentreConfidence}
-                      threshold={confidenceThreshold}
-                    />
-                    <SelectField
-                      label="Cost unit"
-                      value={firstBookingLine?.costUnit ?? ""}
-                      options={costUnitOptions}
-                      listId={`cost-unit-options-${selectedInvoice.id}`}
-                      readOnly
-                      issue={costUnitIssue}
-                      helper="Optional value from synced Exact cost units."
-                      confidence={firstBookingLine?.costUnitConfidence}
-                      threshold={confidenceThreshold}
-                    />
-                  </ReviewSection>
-
-                  <ReviewSection title="VAT & amounts">
-                    <SelectField
                       label="VAT code"
+                      required
                       value={
                         firstBookingLine
                           ? `${firstBookingLine.vatCode} - ${firstBookingLine.vatCodeName}`
@@ -3908,39 +3914,115 @@ export function IntoWorkbench() {
                       options={vatCodeOptions}
                       listId={`vat-options-${selectedInvoice.id}`}
                       readOnly
-                      issue={vatCodeIssue}
+                      issue={vatCodeFieldIssue}
                       helper="Selected from synced Exact purchase VAT codes."
                       confidence={firstBookingLine?.vatConfidence}
                       threshold={confidenceThreshold}
                     />
                     <div className="grid gap-3 sm:grid-cols-2">
                       <AmountField
-                        label="Amount"
+                        label="Net amount"
+                        required
                         value={draft.netAmount}
                         currency={currentCurrency}
                         onChange={(value) => updateDraft("netAmount", value)}
                         disabled={!hasPermission("edit")}
-                        issue={validationIssueFor(["netAmount"])}
+                        issue={
+                          requiredIssueFor(["netAmount"]) ??
+                          validationIssueFor(["netAmount"])
+                        }
                       />
                       <AmountField
                         label="VAT amount"
+                        required
                         value={draft.vatAmount}
                         currency={currentCurrency}
                         onChange={(value) => updateDraft("vatAmount", value)}
                         disabled={!hasPermission("edit")}
-                        issue={validationIssueFor(["vatAmount"])}
+                        issue={
+                          requiredIssueFor(["vatAmount"]) ??
+                          validationIssueFor(["vatAmount"])
+                        }
                       />
                     </div>
                     <AmountField
-                      label="Total amount"
+                      label="Total Amount"
+                      required
                       value={draft.grossAmount}
                       currency={currentCurrency}
                       onChange={(value) => updateDraft("grossAmount", value)}
                       disabled={!hasPermission("edit")}
-                      issue={totalAmountIssue}
+                      issue={totalAmountFieldIssue}
                       emphasized
                     />
                   </ReviewSection>
+
+                  <CollapsibleSection
+                    title="Additional data"
+                    open={additionalDataOpen}
+                  >
+                    {additionalDataFields.map((field) =>
+                      renderEditableReviewField(fieldLabels[field] ?? String(field), field)
+                    )}
+
+                    <div className="rounded-lg border border-stone-200 bg-stone-50/70 p-3 text-sm sm:col-span-2">
+                      <h4 className="font-semibold text-stone-700">Line items</h4>
+                      <div className="mt-2 space-y-2">
+                        {selectedInvoice.extractedData.lineItems.length ? (
+                          selectedInvoice.extractedData.lineItems.map((item) => (
+                            <div
+                              key={item.id}
+                              className="grid grid-cols-[1fr_auto] gap-3 border-t border-stone-200 pt-2"
+                            >
+                              <span>{item.description}</span>
+                              <span>{item.netAmount.toFixed(2)}</span>
+                            </div>
+                          ))
+                        ) : (
+                          <p className="text-stone-500">No line items detected.</p>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="rounded-lg border border-stone-200 bg-stone-50/70 p-3 text-sm sm:col-span-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <h4 className="font-semibold text-stone-700">
+                          Processing timeline
+                        </h4>
+                        <span className="text-xs text-stone-500">
+                          {auditEvents.length} event(s)
+                        </span>
+                      </div>
+                      <div className="mt-3 space-y-3">
+                        {auditEvents.length ? (
+                          auditEvents.map((event) => (
+                            <div
+                              key={event.id}
+                              className="border-l-2 border-stone-300 pl-3"
+                            >
+                              <div className="font-semibold text-stone-700">
+                                {event.message}
+                              </div>
+                              <div className="mt-1 text-xs text-stone-500">
+                                {event.userName} - {formatTimestamp(event.createdAt)}
+                                {event.field ? ` - ${event.field}` : ""}
+                              </div>
+                              {event.field ? (
+                                <div className="mt-1 text-xs text-stone-600">
+                                  {String(event.oldValue ?? "-")} {"->"}{" "}
+                                  {String(event.newValue ?? "-")}
+                                </div>
+                              ) : null}
+                            </div>
+                          ))
+                        ) : (
+                          <p className="text-stone-500">
+                            No audit events recorded yet.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </CollapsibleSection>
                 </section>
 
                 {selectedPurchaseJournal ? (
@@ -4178,82 +4260,6 @@ export function IntoWorkbench() {
                     </div>
                   </section>
                 ) : null}
-
-                <div className="rounded-xl border border-stone-200 bg-white p-4 shadow-sm">
-                  <h3 className="text-base font-semibold text-stone-950">
-                    Line items
-                  </h3>
-                  <div className="mt-2 space-y-2 text-sm">
-                    {selectedInvoice.extractedData.lineItems.length ? (
-                      selectedInvoice.extractedData.lineItems.map((item) => (
-                        <div
-                          key={item.id}
-                          className="grid grid-cols-[1fr_auto] gap-3 border-t border-stone-200 pt-2"
-                        >
-                          <span>{item.description}</span>
-                          <span>{item.netAmount.toFixed(2)}</span>
-                        </div>
-                      ))
-                    ) : (
-                      <p className="text-stone-500">No line items detected.</p>
-                    )}
-                  </div>
-                </div>
-
-                <CollapsibleSection
-                  title="Additional details"
-                  open={additionalDetailsOpen}
-                >
-                  {additionalDetailFields.map((field) =>
-                    renderEditableReviewField(fieldLabels[field] ?? String(field), field)
-                  )}
-                </CollapsibleSection>
-
-                <CollapsibleSection
-                  title="Technical supplier details"
-                  open={technicalSupplierDetailsOpen}
-                >
-                  {technicalSupplierFields.map((field) =>
-                    renderEditableReviewField(fieldLabels[field] ?? String(field), field)
-                  )}
-                </CollapsibleSection>
-
-                <div className="rounded-xl border border-stone-200 bg-white p-4 shadow-sm">
-                  <div className="flex items-center justify-between gap-3">
-                    <h3 className="text-base font-semibold text-stone-950">
-                      Processing timeline
-                    </h3>
-                    <span className="text-xs text-stone-500">
-                      {auditEvents.length} event(s)
-                    </span>
-                  </div>
-                  <div className="mt-3 space-y-3 text-sm">
-                    {auditEvents.length ? (
-                      auditEvents.map((event) => (
-                        <div
-                          key={event.id}
-                          className="border-l-2 border-emerald-600 pl-3"
-                        >
-                          <div className="font-semibold text-stone-800">
-                            {event.message}
-                          </div>
-                          <div className="mt-1 text-xs text-stone-500">
-                            {event.userName} - {formatTimestamp(event.createdAt)}
-                            {event.field ? ` - ${event.field}` : ""}
-                          </div>
-                          {event.field ? (
-                            <div className="mt-1 text-xs text-stone-600">
-                              {String(event.oldValue ?? "-")} {"->"}{" "}
-                              {String(event.newValue ?? "-")}
-                            </div>
-                          ) : null}
-                        </div>
-                      ))
-                    ) : (
-                      <p className="text-stone-500">No audit events recorded yet.</p>
-                    )}
-                  </div>
-                </div>
 
                 {selectedInvoice.lastError ? (
                   <p className="text-sm text-rose-700">{selectedInvoice.lastError}</p>

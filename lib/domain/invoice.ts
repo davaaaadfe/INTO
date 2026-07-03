@@ -126,6 +126,10 @@ export type ValidationError = {
     | "paymentCondition"
     | "purchaseJournal"
     | "yourRef"
+    | "glAccount"
+    | "accrualFrom"
+    | "accrualTo"
+    | "vatCode"
     | "exactMasterData";
   message: string;
   severity: ValidationSeverity;

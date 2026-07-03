@@ -131,6 +131,86 @@ test("blocks booking when the original invoice attachment is missing", () => {
   );
 });
 
+test("requires booking data fields but ignores empty additional and removed fields", () => {
+  const invoice = uploadedInvoice(
+    {},
+    {
+      supplierName: "",
+      supplierVatNumber: "",
+      supplierChamberOfCommerceNumber: "",
+      supplierAddress: "",
+      supplierCountry: "",
+      invoiceNumber: "",
+      referenceCode: "",
+      invoiceDate: "",
+      dueDate: "",
+      paymentTerms: "",
+      currency: "",
+      netAmount: null,
+      vatAmount: null,
+      grossAmount: null,
+      iban: "",
+      expenseDescription: "",
+      beneficiary: "",
+      serviceStartDate: "",
+      serviceEndDate: "",
+      companyVatNumber: "",
+    }
+  );
+  const booking = buildBooking(invoice);
+  const firstLine = booking.lines[0];
+  firstLine.finalSelectedAccount = "";
+  firstLine.glAccount = "";
+  firstLine.from = "";
+  firstLine.to = "";
+  firstLine.vatCode = "" as never;
+
+  const errors = purchaseJournalValidationErrors(booking, invoice.extractedData);
+  const errorFields = new Set(errors.map((error) => String(error.field)));
+
+  for (const field of [
+    "supplierName",
+    "expenseDescription",
+    "referenceCode",
+    "paymentTerms",
+    "invoiceDate",
+    "glAccount",
+    "accrualFrom",
+    "accrualTo",
+    "vatCode",
+    "netAmount",
+    "vatAmount",
+    "grossAmount",
+  ]) {
+    assert.equal(
+      errorFields.has(field),
+      true,
+      `${field} should block booking when missing`
+    );
+  }
+
+  for (const field of [
+    "dueDate",
+    "invoiceNumber",
+    "currency",
+    "supplierVatNumber",
+    "supplierChamberOfCommerceNumber",
+    "supplierAddress",
+    "supplierCountry",
+    "iban",
+    "beneficiary",
+    "serviceStartDate",
+    "serviceEndDate",
+    "companyVatNumber",
+  ]) {
+    assert.equal(
+      errorFields.has(field),
+      false,
+      `${field} should not block booking when empty`
+    );
+  }
+});
+
 test("marks multiple matching suppliers for manual supplier review", () => {
   const invoice = uploadedInvoice({}, {
     supplierName: "Acme Supplies BV",
@@ -310,6 +390,7 @@ test("blocks booking when Exact already has the same reference and amount", asyn
       supplierAddress: "Gordon House, Dublin",
       supplierCountry: "IE",
       invoiceNumber: "GOOGLE-2026-06",
+      referenceCode: "GOOGLE-2026-06",
       paymentTerms: "30 days",
       netAmount: 121,
       vatAmount: 0,

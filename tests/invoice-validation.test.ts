@@ -46,15 +46,16 @@ test("rejects amounts that need rounding instead of exact cents", () => {
   assert.equal(amountToMinorUnits("10.005"), null);
 });
 
-test("requires due date and invoice number", () => {
+test("allows optional additional invoice data to be empty", () => {
   const errors = validateInvoiceData(
     "invoice_1",
-    validInvoice({ dueDate: "", invoiceNumber: "" }),
+    validInvoice({ dueDate: "", invoiceNumber: "", currency: "" }),
     []
   );
 
-  assert.equal(errors.some((error) => error.field === "dueDate"), true);
-  assert.equal(errors.some((error) => error.field === "invoiceNumber"), true);
+  assert.equal(errors.some((error) => error.field === "dueDate"), false);
+  assert.equal(errors.some((error) => error.field === "invoiceNumber"), false);
+  assert.equal(errors.some((error) => error.field === "currency"), false);
 });
 
 test("flags duplicate invoice numbers for the same supplier", () => {

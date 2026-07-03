@@ -12,6 +12,7 @@ import type {
 } from "../domain/invoice";
 import { createId } from "../utils/id";
 import { isValidIsoDate, normalizeText } from "./invoice-validation";
+import { requiredBookingDataValidationErrors } from "./required-booking-data";
 
 type VatCode = PurchaseJournalLine["vatCode"];
 
@@ -531,6 +532,16 @@ function firstDayOfPeriod(year: number, period: number) {
 
 function determineAccrual(data: ExtractedInvoiceData) {
   if (!isValidIsoDate(data.serviceStartDate) || !isValidIsoDate(data.serviceEndDate)) {
+    if (isValidIsoDate(data.invoiceDate)) {
+      return {
+        from: firstDayOfMonth(data.invoiceDate),
+        to: lastDayOfMonth(data.invoiceDate),
+        benefitStartDate: undefined,
+        benefitEndDate: undefined,
+        reason: undefined,
+      };
+    }
+
     return {
       from: "",
       to: "",
@@ -547,9 +558,19 @@ function determineAccrual(data: ExtractedInvoiceData) {
   );
 
   if (periodMonths <= 3 && !paidBeforeBenefit && !accrualKeyword) {
+    if (!isValidIsoDate(data.invoiceDate)) {
+      return {
+        from: "",
+        to: "",
+        benefitStartDate: undefined,
+        benefitEndDate: undefined,
+        reason: undefined,
+      };
+    }
+
     return {
-      from: "",
-      to: "",
+      from: firstDayOfMonth(data.invoiceDate),
+      to: lastDayOfMonth(data.invoiceDate),
       benefitStartDate: undefined,
       benefitEndDate: undefined,
       reason: undefined,
@@ -1331,7 +1352,8 @@ function isExactMasterDataReason(reason: string) {
 }
 
 export function purchaseJournalValidationErrors(
-  booking: PurchaseJournalBooking
+  booking: PurchaseJournalBooking,
+  data?: ExtractedInvoiceData
 ): ValidationError[] {
   const errors: ValidationError[] = [];
 
@@ -1391,12 +1413,16 @@ export function purchaseJournalValidationErrors(
     }
   }
 
-  return errors;
+  return [
+    ...errors,
+    ...(data ? requiredBookingDataValidationErrors(data, booking) : []),
+  ];
 }
 
 export function statusFromPurchaseJournal(
   baseValidationErrors: ValidationError[],
-  booking: PurchaseJournalBooking
+  booking: PurchaseJournalBooking,
+  data?: ExtractedInvoiceData
 ): InvoiceStatus {
   if (!booking.attachmentPresent) {
     return "Attachment Missing";
@@ -1416,6 +1442,10 @@ export function statusFromPurchaseJournal(
 
   if (booking.paymentConditionMismatch && !booking.userApproved) {
     return "Payment Condition Review Required";
+  }
+
+  if (data && requiredBookingDataValidationErrors(data, booking).length > 0) {
+    return "Validation Failed";
   }
 
   if (booking.reviewRequired) {

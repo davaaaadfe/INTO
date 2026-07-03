@@ -7,6 +7,10 @@ import { isExactMasterDataStale } from "./exact-master-data-service";
 import { getStoredInvoiceFile } from "./storage-service";
 import { createId } from "../utils/id";
 import {
+  REQUIRED_BOOKING_DISABLED_REASON,
+  getRequiredBookingDataIssues,
+} from "./required-booking-data";
+import {
   type ExactDuplicatePurchaseBooking,
   createRealExactPurchaseBooking,
   findRealExactPurchaseBookingDuplicate,
@@ -149,6 +153,13 @@ export async function bookInvoiceInExact(
 
   if (!invoice.purchaseJournal) {
     throw new Error("Purchase Journal booking data is missing.");
+  }
+
+  if (
+    getRequiredBookingDataIssues(invoice.extractedData, invoice.purchaseJournal)
+      .length > 0
+  ) {
+    throw new Error(REQUIRED_BOOKING_DISABLED_REASON);
   }
 
   if (

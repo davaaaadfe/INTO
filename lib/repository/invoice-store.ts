@@ -715,7 +715,10 @@ function recomputeInvoiceInStore(store: IntoStore, invoiceId: string) {
     store.learning,
     exactMasterDataForUser(store, COMPANY_CONNECTION_USER_ID)
   );
-  const purchaseErrors = purchaseJournalValidationErrors(purchaseJournal);
+  const purchaseErrors = purchaseJournalValidationErrors(
+    purchaseJournal,
+    invoice.extractedData
+  );
 
   invoice.purchaseJournal = purchaseJournal;
   invoice.validationErrors = uniqueValidationErrors([
@@ -726,7 +729,8 @@ function recomputeInvoiceInStore(store: IntoStore, invoiceId: string) {
   if (invoice.status !== "Booked" && invoice.status !== "Possible Duplicate") {
     invoice.status = statusFromPurchaseJournal(
       baseValidationErrors,
-      purchaseJournal
+      purchaseJournal,
+      invoice.extractedData
     );
   }
 

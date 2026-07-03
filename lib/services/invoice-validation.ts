@@ -99,10 +99,7 @@ export function validateInvoiceData(
   const errors: ValidationError[] = [];
 
   validateRequiredString(data, "supplierName", "Supplier name", errors);
-  validateRequiredString(data, "invoiceNumber", "Invoice number", errors);
   validateRequiredString(data, "invoiceDate", "Invoice date", errors);
-  validateRequiredString(data, "dueDate", "Due date", errors);
-  validateRequiredString(data, "currency", "Currency", errors);
 
   if (data.invoiceDate && !isValidIsoDate(data.invoiceDate)) {
     errors.push(

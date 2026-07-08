@@ -16,8 +16,11 @@ import {
 } from "../repository/invoice-store";
 import {
   applicationBaseUrl,
+  currentDeploymentUrl,
   exactRedirectUri,
+  isPreviewDeployment,
   microsoftRedirectUri,
+  previewDeploymentMessage,
   type SetupCheck,
   type SetupStatus,
   type SetupStatusLevel,
@@ -476,7 +479,10 @@ export async function getSetupStatus(): Promise<SetupStatus> {
 
   return {
     appUrl: applicationBaseUrl(),
+    deploymentUrl: currentDeploymentUrl(),
     environment: runtimeEnvironment(),
+    isPreviewDeployment: isPreviewDeployment(),
+    previewDeploymentMessage: previewDeploymentMessage(),
     exactCallbackUrl: exactRedirectUri(),
     outlookCallbackUrl: microsoftRedirectUri(),
     checks: [

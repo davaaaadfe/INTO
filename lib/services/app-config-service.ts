@@ -11,7 +11,10 @@ export type SetupCheck = {
 
 export type SetupStatus = {
   appUrl: string;
+  deploymentUrl: string;
   environment: "development" | "production" | "test";
+  isPreviewDeployment: boolean;
+  previewDeploymentMessage?: string;
   exactCallbackUrl: string;
   outlookCallbackUrl: string;
   checks: SetupCheck[];
@@ -37,10 +40,35 @@ function normalizeHost(value: string) {
 export function applicationBaseUrl() {
   return (
     normalizeHost(envValue("APP_URL")) ||
+    normalizeHost(envValue("NEXT_PUBLIC_APP_URL")) ||
     normalizeHost(envValue("VERCEL_PROJECT_PRODUCTION_URL")) ||
     normalizeHost(envValue("VERCEL_URL")) ||
     "http://localhost:3000"
   );
+}
+
+export function currentDeploymentUrl() {
+  return normalizeHost(envValue("VERCEL_URL")) || applicationBaseUrl();
+}
+
+export function isPreviewDeployment() {
+  if (envValue("VERCEL_ENV") === "preview") {
+    return true;
+  }
+
+  return Boolean(
+    envValue("VERCEL_URL") &&
+      currentDeploymentUrl() !== applicationBaseUrl() &&
+      envValue("VERCEL_ENV") !== "production"
+  );
+}
+
+export function previewDeploymentMessage() {
+  if (!isPreviewDeployment()) {
+    return undefined;
+  }
+
+  return "You are viewing a Vercel preview deployment. UI testing is okay here, but Exact Online and Outlook OAuth should use the stable production callback URL configured in the system settings.";
 }
 
 export function oauthCallbackUrl(provider: "exact" | "outlook") {

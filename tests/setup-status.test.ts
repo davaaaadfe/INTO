@@ -14,7 +14,9 @@ import { getSetupStatus } from "../lib/services/setup-status-service";
 
 const envKeys = [
   "APP_URL",
+  "NEXT_PUBLIC_APP_URL",
   "VERCEL_URL",
+  "VERCEL_ENV",
   "VERCEL_PROJECT_PRODUCTION_URL",
   "EXACT_ONLINE_MODE",
   "EXACT_ONLINE_CLIENT_ID",
@@ -75,6 +77,36 @@ test("derives OAuth callback URLs from Vercel deployment host", async () => {
       "https://into-example.vercel.app/api/outlook/callback"
     );
   });
+});
+
+test("setup status identifies preview deployments and keeps stable callback URLs", async () => {
+  await withEnv(
+    {
+      NEXT_PUBLIC_APP_URL: "https://into.example.com",
+      VERCEL_ENV: "preview",
+      VERCEL_URL: "into-git-feature-into1.vercel.app",
+    },
+    async () => {
+      resetSharedConnections();
+      const status = await getSetupStatus();
+
+      assert.equal(status.appUrl, "https://into.example.com");
+      assert.equal(
+        status.exactCallbackUrl,
+        "https://into.example.com/api/exact/callback"
+      );
+      assert.equal(
+        status.outlookCallbackUrl,
+        "https://into.example.com/api/outlook/callback"
+      );
+      assert.equal(status.isPreviewDeployment, true);
+      assert.match(
+        status.previewDeploymentMessage ?? "",
+        /Vercel preview deployment/
+      );
+      resetSharedConnections();
+    }
+  );
 });
 
 test("setup status reports friendly readiness without exposing secret values", async () => {

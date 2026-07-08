@@ -128,7 +128,10 @@ type SetupCheck = {
 
 type SetupStatus = {
   appUrl: string;
+  deploymentUrl: string;
   environment: "development" | "production" | "test";
+  isPreviewDeployment: boolean;
+  previewDeploymentMessage?: string;
   exactCallbackUrl: string;
   outlookCallbackUrl: string;
   checks: SetupCheck[];
@@ -204,6 +207,18 @@ const setupTone: Record<SetupStatusLevel, string> = {
   warning: "border-amber-300 bg-amber-50 text-amber-900",
   error: "border-rose-300 bg-rose-50 text-rose-900",
 };
+
+function PreviewDeploymentNotice({ message }: { message?: string }) {
+  if (!message) {
+    return null;
+  }
+
+  return (
+    <div className="mt-3 rounded-md border border-sky-200 bg-sky-50 p-3 text-sm text-sky-900">
+      {message}
+    </div>
+  );
+}
 
 function setupLabel(status: SetupStatusLevel) {
   return status === "ok" ? "Ready" : status === "warning" ? "Needs attention" : "Needs setup";
@@ -912,6 +927,9 @@ function SetupWizard({
             <p className="mt-1 text-sm">
               You can upload invoices, review them, and book them to Exact Online.
             </p>
+            <PreviewDeploymentNotice
+              message={setupStatus.previewDeploymentMessage}
+            />
           </div>
           <ActionButton variant="ghost" onClick={onRefresh}>
             Refresh status
@@ -931,6 +949,9 @@ function SetupWizard({
               {firstAttentionCheck?.message ??
                 "Some company setup is not complete yet. Ask the system owner to check INTO setup."}
             </p>
+            <PreviewDeploymentNotice
+              message={setupStatus.previewDeploymentMessage}
+            />
           </div>
           <ActionButton variant="ghost" onClick={onRefresh}>
             Refresh status
@@ -948,6 +969,9 @@ function SetupWizard({
           <p className="mt-1 max-w-3xl text-sm text-stone-600">
             Company-level connections and safe server settings for INTO.
           </p>
+          <PreviewDeploymentNotice
+            message={setupStatus.previewDeploymentMessage}
+          />
         </div>
         <ActionButton variant="ghost" onClick={onRefresh}>
           Refresh status
@@ -4291,6 +4315,9 @@ export function IntoWorkbench() {
             </div>
           </section>
         ) : null}
+        <p className="text-center text-[11px] text-stone-400">
+          UI version: review-form-required-data-v2
+        </p>
       </div>
     </main>
   );

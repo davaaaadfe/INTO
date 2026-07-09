@@ -17,10 +17,7 @@ import type {
   InvoiceArchiveFilters,
   InvoiceArchiveResult,
   PermissionAction,
-  OutlookConnection,
-  OutlookIngestionLog,
   PublicExactConnection,
-  PublicOutlookConnection,
   UploadedInvoice,
   ValidationError,
 } from "../domain/invoice";
@@ -29,7 +26,12 @@ import {
   isExactMasterDataStale,
   syncExactMasterData,
 } from "../services/exact-master-data-service";
-import { storeMockInvoiceFile } from "../services/storage-service";
+import {
+  deleteStoredInvoiceFile,
+  deleteStoredInvoiceFileSync,
+  storeMockInvoiceFile,
+  temporaryInvoiceRetentionDays,
+} from "../services/storage-service";
 import {
   createInitialLearningStore,
   generatePurchaseJournalBooking,
@@ -40,6 +42,11 @@ import {
 } from "../services/purchase-journal-intelligence";
 import { refreshExactTokenIfNeeded } from "../services/exact-online-service";
 import { createId } from "../utils/id";
+import {
+  isPostgresPersistenceEnabled,
+  loadStoreSnapshot,
+  saveStoreSnapshot,
+} from "./postgres-store";
 
 const verifiedUserPermissions: PermissionAction[] = [
   "view",
@@ -63,7 +70,7 @@ export function getCompanyConnectionUserId() {
   return COMPANY_CONNECTION_USER_ID;
 }
 
-type IntoStore = {
+export type IntoStore = {
   users: IntoUser[];
   currentUserId: string;
   invoices: UploadedInvoice[];
@@ -72,8 +79,6 @@ type IntoStore = {
     userId: string;
     cache: ExactMasterDataCache;
   }>;
-  outlookConnections: OutlookConnection[];
-  outlookLogs: OutlookIngestionLog[];
   duplicateLogs: DuplicateDecisionLog[];
   auditEvents: AuditEvent[];
   learning: BookingLearningStore;
@@ -145,12 +150,13 @@ function createSeedInvoice(overrides: Partial<UploadedInvoice>): UploadedInvoice
     userId: ownerId,
     uploadedByUserId: overrides.uploadedByUserId ?? ownerId,
     uploadedByName: ownerName,
-    source: "manual",
+    source: "manual_upload",
     fileName: "seed-invoice.pdf",
     fileType: "application/pdf",
     fileSize: 120_000,
     checksum: "seed-invoice-checksum",
     storageKey: "seed/seed-invoice.pdf",
+    localFileStatus: "available",
     status: "Ready to Book",
     exactBookingStatus: "not_booked",
     extractedData: {
@@ -201,8 +207,7 @@ function createSeedInvoice(overrides: Partial<UploadedInvoice>): UploadedInvoice
     ...overrides,
   };
 
-  storeMockInvoiceFile({
-    storageKey: invoice.storageKey,
+  const storedSeedFile = storeMockInvoiceFile({
     fileName: invoice.fileName,
     fileType: "text/plain",
     content: [
@@ -211,65 +216,76 @@ function createSeedInvoice(overrides: Partial<UploadedInvoice>): UploadedInvoice
       "This is the stored source attachment used by the mock workspace.",
     ].join("\n"),
   });
+  invoice.storageKey = storedSeedFile.storageKey;
+  invoice.fileSize = storedSeedFile.fileSize;
+  invoice.fileType = storedSeedFile.fileType;
+  invoice.checksum = storedSeedFile.checksum;
 
   return invoice;
 }
 
 function createInitialStore(): IntoStore {
   const users = createSeedUsers();
-  const readyInvoice = createSeedInvoice({});
-  const checkInvoice = createSeedInvoice({
-    userId: "user_admin",
-    uploadedByUserId: "user_admin",
-    uploadedByName: "David Kwon",
-    fileName: "missing-due-date-invoice.png",
-    fileType: "image/png",
-    checksum: "missing-due-date-checksum",
-    status: "Validation Failed",
-    extractedData: {
-      ...emptyExtractedInvoiceData(),
-      supplierName: "Delta IT Services",
-      supplierVatNumber: "NL855512340B01",
-      supplierChamberOfCommerceNumber: "55230119",
-      supplierAddress: "Europalaan 21, Utrecht",
-      supplierCountry: "NL",
-      invoiceNumber: "INV-CHECK-104",
-      referenceCode: "",
-      invoiceDate: "2026-04-08",
-      dueDate: "",
-      paymentTerms: "30 days",
-      currency: "EUR",
-      netAmount: 210,
-      vatAmount: 44.1,
-      grossAmount: 254.1,
-      iban: "NL39RABO0300065264",
-      expenseDescription: "Google Workspace",
-      beneficiary: "",
-      serviceStartDate: "",
-      serviceEndDate: "",
-      companyVatNumber: "NL857017263B01",
-      reverseChargeMentioned: false,
-      intraCommunityMentioned: false,
-      confidence: 0.74,
-      rawText: "Seeded invoice with missing due date.",
-      lineItems: [],
-    },
-  });
+  const seedDemoInvoices = process.env.NODE_ENV !== "production";
+  const readyInvoice = seedDemoInvoices ? createSeedInvoice({}) : null;
+  const checkInvoice = seedDemoInvoices
+    ? createSeedInvoice({
+        userId: "user_admin",
+        uploadedByUserId: "user_admin",
+        uploadedByName: "David Kwon",
+        fileName: "missing-due-date-invoice.png",
+        fileType: "image/png",
+        checksum: "missing-due-date-checksum",
+        status: "Validation Failed",
+        extractedData: {
+          ...emptyExtractedInvoiceData(),
+          supplierName: "Delta IT Services",
+          supplierVatNumber: "NL855512340B01",
+          supplierChamberOfCommerceNumber: "55230119",
+          supplierAddress: "Europalaan 21, Utrecht",
+          supplierCountry: "NL",
+          invoiceNumber: "INV-CHECK-104",
+          referenceCode: "",
+          invoiceDate: "2026-04-08",
+          dueDate: "",
+          paymentTerms: "30 days",
+          currency: "EUR",
+          netAmount: 210,
+          vatAmount: 44.1,
+          grossAmount: 254.1,
+          iban: "NL39RABO0300065264",
+          expenseDescription: "Google Workspace",
+          beneficiary: "",
+          serviceStartDate: "",
+          serviceEndDate: "",
+          companyVatNumber: "NL857017263B01",
+          reverseChargeMentioned: false,
+          intraCommunityMentioned: false,
+          confidence: 0.74,
+          rawText: "Seeded invoice with missing due date.",
+          lineItems: [],
+        },
+      })
+    : null;
   const store: IntoStore = {
     users,
     currentUserId: "user_accountant",
-    invoices: [checkInvoice, readyInvoice],
+    invoices: [checkInvoice, readyInvoice].filter(
+      (invoice): invoice is UploadedInvoice => Boolean(invoice)
+    ),
     exactConnections: [],
     exactMasterDataCaches: [],
-    outlookConnections: [],
-    outlookLogs: [],
     duplicateLogs: [],
     auditEvents: [],
     learning: createInitialLearningStore(),
   };
 
-  recomputeInvoiceInStore(store, readyInvoice.id);
-  recomputeInvoiceInStore(store, checkInvoice.id);
+  if (readyInvoice) {
+    recomputeInvoiceInStore(store, readyInvoice.id);
+  }
+  if (checkInvoice) {
+    recomputeInvoiceInStore(store, checkInvoice.id);
+  }
 
   for (const invoice of store.invoices) {
     store.auditEvents.push({
@@ -277,7 +293,7 @@ function createInitialStore(): IntoStore {
       invoiceId: invoice.id,
       userId: invoice.uploadedByUserId,
       userName: invoice.uploadedByName,
-      type: invoice.source === "outlook" ? "invoice_imported" : "invoice_uploaded",
+      type: "invoice_uploaded",
       message: `${invoice.uploadedByName} added ${invoice.fileName}.`,
       metadata: {
         source: invoice.source,
@@ -293,6 +309,9 @@ function createInitialStore(): IntoStore {
 
 const globalStore = globalThis as typeof globalThis & {
   __INTO_STORE?: IntoStore;
+  __INTO_STORE_HYDRATED?: boolean;
+  __INTO_STORE_HYDRATING?: Promise<void>;
+  __INTO_STORE_PERSISTING?: Promise<void>;
 };
 
 export function getStore() {
@@ -300,13 +319,58 @@ export function getStore() {
     !globalStore.__INTO_STORE ||
     !Array.isArray(globalStore.__INTO_STORE.users) ||
     !Array.isArray(globalStore.__INTO_STORE.exactConnections) ||
-    !Array.isArray(globalStore.__INTO_STORE.outlookConnections) ||
     !Array.isArray(globalStore.__INTO_STORE.auditEvents)
   ) {
     globalStore.__INTO_STORE = createInitialStore();
   }
 
+  for (const invoice of globalStore.__INTO_STORE.invoices) {
+    if (!invoice.localFileStatus) {
+      invoice.localFileStatus = invoice.storageKey ? "available" : "missing";
+    }
+  }
+
   return globalStore.__INTO_STORE;
+}
+
+export async function hydrateStoreFromPostgres() {
+  if (!isPostgresPersistenceEnabled() || globalStore.__INTO_STORE_HYDRATED) {
+    return;
+  }
+
+  if (!globalStore.__INTO_STORE_HYDRATING) {
+    globalStore.__INTO_STORE_HYDRATING = loadStoreSnapshot()
+      .then((snapshot) => {
+        if (snapshot) {
+          globalStore.__INTO_STORE = snapshot;
+        } else {
+          globalStore.__INTO_STORE = createInitialStore();
+          globalStore.__INTO_STORE_PERSISTING = saveStoreSnapshot(
+            globalStore.__INTO_STORE
+          );
+        }
+        globalStore.__INTO_STORE_HYDRATED = true;
+      })
+      .finally(() => {
+        globalStore.__INTO_STORE_HYDRATING = undefined;
+      });
+  }
+
+  await globalStore.__INTO_STORE_HYDRATING;
+}
+
+export function persistStoreSoon() {
+  if (!isPostgresPersistenceEnabled()) {
+    return;
+  }
+
+  globalStore.__INTO_STORE_PERSISTING = saveStoreSnapshot(getStore()).catch(() => {
+    // Persistence failures surface in setup status and API retries; never leak secrets.
+  });
+}
+
+export async function flushStoreToPostgres() {
+  await globalStore.__INTO_STORE_PERSISTING;
 }
 
 export function listUsers() {
@@ -367,7 +431,7 @@ export function requireSystemOwner() {
   const user = getCurrentUser();
   if (user.status !== "active" || !user.isSystemOwner) {
     throw new Error(
-      "This INTO account is not allowed to manage shared Exact and Outlook connections. Only the system owner can do this."
+      "This INTO account is not allowed to manage shared Exact Online settings. Only the system owner can do this."
     );
   }
 
@@ -614,6 +678,7 @@ export function logDuplicateDecision(input: Omit<DuplicateDecisionLog, "id" | "c
     ...input,
   };
   getStore().duplicateLogs.unshift(log);
+  persistStoreSoon();
   return log;
 }
 
@@ -639,6 +704,7 @@ export function addAuditEvent(
   };
 
   getStore().auditEvents.unshift(event);
+  persistStoreSoon();
   return event;
 }
 
@@ -746,13 +812,12 @@ export function recomputeInvoiceState(invoiceId: string) {
 }
 
 export function createUploadedInvoice(input: {
-  source: UploadedInvoice["source"];
+  source?: UploadedInvoice["source"];
   fileName: string;
   fileType: string;
   fileSize: number;
   checksum?: string;
   storageKey: string;
-  outlookMessageId?: string;
   userId?: string;
 }) {
   const user =
@@ -765,13 +830,13 @@ export function createUploadedInvoice(input: {
     userId: user.id,
     uploadedByUserId: user.id,
     uploadedByName: userDisplayName(user),
-    source: input.source,
+    source: input.source ?? "manual_upload",
     fileName: input.fileName,
     fileType: input.fileType,
     fileSize: input.fileSize,
     checksum: input.checksum,
     storageKey: input.storageKey,
-    outlookMessageId: input.outlookMessageId,
+    localFileStatus: input.storageKey ? "available" : "missing",
     status: "Uploaded",
     exactBookingStatus: "not_booked",
     extractedData: emptyExtractedInvoiceData(),
@@ -789,11 +854,8 @@ export function createUploadedInvoice(input: {
     invoiceId: invoice.id,
     userId: user.id,
     userName: userDisplayName(user),
-    type: input.source === "outlook" ? "invoice_imported" : "invoice_uploaded",
-    message:
-      input.source === "outlook"
-        ? `${userDisplayName(user)} imported ${input.fileName} from Outlook.`
-        : `${userDisplayName(user)} uploaded ${input.fileName}.`,
+    type: "invoice_uploaded",
+    message: `${userDisplayName(user)} uploaded ${input.fileName}.`,
     metadata: {
       source: input.source,
       fileName: input.fileName,
@@ -987,6 +1049,8 @@ export function resolveDuplicateDecision(input: {
 
   if (invoice) {
     if (input.decision === "cancel_upload" && invoice.status === "Possible Duplicate") {
+      deleteStoredInvoiceFileSync(invoice.storageKey);
+      invoice.localFileStatus = "deleted_by_cleanup";
       const store = getStore();
       store.invoices = store.invoices.filter((item) => item.id !== invoice.id);
       return { log, invoice: null };
@@ -1049,6 +1113,92 @@ export function markInvoiceBooked(invoiceId: string, exactBookingId: string) {
     },
   });
   return invoice;
+}
+
+export async function deleteInvoiceFileAfterBooking(invoiceId: string) {
+  const invoice = getInvoice(invoiceId);
+  if (!invoice) {
+    return null;
+  }
+
+  if (
+    invoice.status !== "Booked" ||
+    !invoice.exactBookingId ||
+    !invoice.storageKey ||
+    invoice.localFileStatus !== "available"
+  ) {
+    return invoice;
+  }
+
+  const deleted = await deleteStoredInvoiceFile(invoice.storageKey);
+  invoice.localFileStatus = deleted ? "deleted_after_booking" : "missing";
+  invoice.updatedAt = now();
+
+  addAuditEvent({
+    invoiceId,
+    type: "invoice_file_deleted",
+    message: deleted
+      ? "Temporary invoice file was deleted after successful Exact booking."
+      : "Temporary invoice file was already missing after successful Exact booking.",
+    metadata: {
+      storageKey: invoice.storageKey,
+      localFileStatus: invoice.localFileStatus,
+      exactBookingId: invoice.exactBookingId,
+    },
+  });
+
+  return invoice;
+}
+
+export async function cleanupTemporaryInvoiceFiles(referenceDate = new Date()) {
+  const retentionMs = temporaryInvoiceRetentionDays() * 24 * 60 * 60 * 1000;
+  const cutoff = referenceDate.getTime() - retentionMs;
+  const deletedInvoiceIds: string[] = [];
+
+  for (const invoice of getStore().invoices) {
+    if (!invoice.storageKey || invoice.localFileStatus !== "available") {
+      continue;
+    }
+
+    const createdAt = new Date(invoice.createdAt).getTime();
+    const bookedAndAttached = invoice.status === "Booked" && Boolean(invoice.exactBookingId);
+    const oldInactiveUpload =
+      invoice.status === "Uploaded" &&
+      Number.isFinite(createdAt) &&
+      createdAt < cutoff;
+
+    if (!bookedAndAttached && !oldInactiveUpload) {
+      continue;
+    }
+
+    const deleted = await deleteStoredInvoiceFile(invoice.storageKey);
+    invoice.localFileStatus = deleted
+      ? bookedAndAttached
+        ? "deleted_after_booking"
+        : "deleted_by_cleanup"
+      : "missing";
+    invoice.updatedAt = now();
+    deletedInvoiceIds.push(invoice.id);
+
+    addAuditEvent({
+      invoiceId: invoice.id,
+      type: bookedAndAttached ? "invoice_file_deleted" : "invoice_file_cleanup",
+      message: bookedAndAttached
+        ? "Temporary invoice file was deleted after successful Exact booking."
+        : "Old temporary invoice file was deleted by cleanup.",
+      metadata: {
+        storageKey: invoice.storageKey,
+        localFileStatus: invoice.localFileStatus,
+        retentionDays: temporaryInvoiceRetentionDays(),
+      },
+    });
+  }
+
+  return {
+    checked: getStore().invoices.length,
+    deleted: deletedInvoiceIds.length,
+    invoiceIds: deletedInvoiceIds,
+  };
 }
 
 export function markInvoiceBookingFailed(invoiceId: string, message: string) {
@@ -1363,128 +1513,6 @@ export function disconnectExactConnection(userId = COMPANY_CONNECTION_USER_ID) {
   }
 
   return connection;
-}
-
-export function setOutlookConnection(connection: OutlookConnection) {
-  const store = getStore();
-  store.outlookConnections = [
-    connection,
-    ...store.outlookConnections.filter((item) => item.userId !== connection.userId),
-  ];
-  addAuditEvent({
-    type: "connection_connected",
-    message: "Company Outlook connection updated.",
-    metadata: {
-      provider: "outlook",
-      connectionScope: "company",
-      connectionOwnerId: connection.userId,
-      mailboxAddress: connection.mailboxAddress,
-      status: connection.status,
-    },
-  });
-  return connection;
-}
-
-export function getOutlookConnection(userId = COMPANY_CONNECTION_USER_ID) {
-  return (
-    getStore().outlookConnections.find((connection) => connection.userId === userId) ??
-    null
-  );
-}
-
-export function publicOutlookConnection(
-  connection = getOutlookConnection()
-): PublicOutlookConnection | null {
-  if (!connection) {
-    return null;
-  }
-
-  return {
-    id: connection.id,
-    userId: connection.userId,
-    mailboxAddress: connection.mailboxAddress,
-    status: connection.status,
-    expiresAt: connection.expiresAt,
-    lastSyncAt: connection.lastSyncAt,
-    createdAt: connection.createdAt,
-    updatedAt: connection.updatedAt,
-  };
-}
-
-export function setOutlookConnectionNeedsReconnect(
-  userId = COMPANY_CONNECTION_USER_ID,
-  reason = "Outlook access must be re-authorized."
-) {
-  const store = getStore();
-  const connection = getOutlookConnection(userId);
-  if (!connection) {
-    return null;
-  }
-
-  const updatedConnection: OutlookConnection = {
-    ...connection,
-    status: "needs_reconnect",
-    updatedAt: now(),
-  };
-  store.outlookConnections = [
-    updatedConnection,
-    ...store.outlookConnections.filter((item) => item.userId !== userId),
-  ];
-  addAuditEvent({
-    type: "token_refresh_failure",
-    message: "Company Outlook token refresh failed; reconnect required.",
-    metadata: {
-      provider: "outlook",
-      connectionScope: "company",
-      connectionOwnerId: userId,
-      connectionId: connection.id,
-      reason,
-    },
-  });
-  return updatedConnection;
-}
-
-export function disconnectOutlookConnection(userId = COMPANY_CONNECTION_USER_ID) {
-  const store = getStore();
-  const connection = getOutlookConnection(userId);
-  store.outlookConnections = store.outlookConnections.filter(
-    (item) => item.userId !== userId
-  );
-
-  if (connection) {
-    addAuditEvent({
-      type: "connection_disconnected",
-      message: "Company Outlook connection disconnected and local tokens removed.",
-      metadata: {
-        provider: "outlook",
-        connectionScope: "company",
-        connectionOwnerId: userId,
-        connectionId: connection.id,
-      },
-    });
-  }
-
-  return connection;
-}
-
-export function addOutlookLog(log: OutlookIngestionLog) {
-  getStore().outlookLogs.unshift(log);
-  addAuditEvent({
-    invoiceId: log.processedInvoiceId,
-    type: "outlook_categorized",
-    message: `Outlook email categorized as ${log.category}: ${log.subject}.`,
-    metadata: {
-      connectionId: log.connectionId,
-      messageId: log.messageId,
-      sender: log.sender,
-      detectedAttachmentCount: log.detectedAttachmentCount,
-    },
-  });
-  return log;
-}
-
-export function listOutlookLogs() {
-  return getStore().outlookLogs;
 }
 
 function includesText(value: string | null | undefined, query: string) {

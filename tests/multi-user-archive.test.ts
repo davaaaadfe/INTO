@@ -3,23 +3,19 @@ import assert from "node:assert/strict";
 import {
   createUploadedInvoice,
   disconnectExactConnection,
-  disconnectOutlookConnection,
   getCompanyConnectionUserId,
   getExactConnection,
   listAuditEvents,
   publicExactConnection,
-  publicOutlookConnection,
   requirePermission,
   requireSystemOwner,
   searchInvoiceArchive,
   switchCurrentUser,
   setExactConnection,
-  setOutlookConnection,
 } from "../lib/repository/invoice-store";
 import { createMockExactConnection } from "../lib/services/exact-online-service";
-import { createMockOutlookConnection } from "../lib/services/outlook-service";
 
-test("stores provider credentials as shared company connections", () => {
+test("stores Exact credentials as a shared company connection", () => {
   switchCurrentUser("user_admin");
   const connectionOwnerId = getCompanyConnectionUserId();
   setExactConnection(createMockExactConnection(connectionOwnerId));
@@ -34,30 +30,23 @@ test("does not expose encrypted OAuth token fields in public connection metadata
   switchCurrentUser("user_admin");
   const connectionOwnerId = getCompanyConnectionUserId();
   setExactConnection(createMockExactConnection(connectionOwnerId));
-  setOutlookConnection(createMockOutlookConnection(connectionOwnerId));
 
   const exact = publicExactConnection();
-  const outlook = publicOutlookConnection();
 
   assert.equal("accessTokenCiphertext" in (exact ?? {}), false);
   assert.equal("refreshTokenCiphertext" in (exact ?? {}), false);
-  assert.equal("accessTokenCiphertext" in (outlook ?? {}), false);
-  assert.equal("refreshTokenCiphertext" in (outlook ?? {}), false);
 
   switchCurrentUser("user_accountant");
 });
 
-test("disconnect removes stored company provider connections", () => {
+test("disconnect removes stored company Exact connection", () => {
   switchCurrentUser("user_admin");
   const connectionOwnerId = getCompanyConnectionUserId();
   setExactConnection(createMockExactConnection(connectionOwnerId));
-  setOutlookConnection(createMockOutlookConnection(connectionOwnerId));
 
   disconnectExactConnection();
-  disconnectOutlookConnection();
 
   assert.equal(publicExactConnection(), null);
-  assert.equal(publicOutlookConnection(), null);
 
   switchCurrentUser("user_accountant");
 });
@@ -95,7 +84,7 @@ test("archive search can retrieve invoices uploaded by another user", () => {
 test("invoice creation records uploader metadata and audit event", () => {
   switchCurrentUser("user_admin");
   const invoice = createUploadedInvoice({
-    source: "manual",
+    source: "manual_upload",
     fileName: "audit-test.pdf",
     fileType: "application/pdf",
     fileSize: 999,

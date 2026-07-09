@@ -28,7 +28,7 @@ function invoiceData(overrides: Partial<ReturnType<typeof emptyExtractedInvoiceD
 
 test("blocks a duplicate file that has already been booked in Exact Online", () => {
   const invoice = createUploadedInvoice({
-    source: "manual",
+    source: "manual_upload",
     fileName: "booked-duplicate.pdf",
     fileType: "application/pdf",
     fileSize: 12_345,
@@ -39,7 +39,7 @@ test("blocks a duplicate file that has already been booked in Exact Online", () 
   markInvoiceBooked(invoice.id, "EXACT-DUP-BOOKED");
 
   const duplicate = findDuplicateBeforeProcessing({
-    source: "manual",
+    source: "manual_upload",
     fileName: "booked-duplicate.pdf",
     fileSize: 12_345,
     checksum: "checksum-booked-duplicate",
@@ -58,7 +58,7 @@ test("blocks a duplicate file that has already been booked in Exact Online", () 
 
 test("asks for a decision when a duplicate file was processed but not booked", () => {
   const invoice = createUploadedInvoice({
-    source: "outlook",
+    source: "manual_upload",
     fileName: "processed-duplicate.pdf",
     fileType: "application/pdf",
     fileSize: 22_222,
@@ -71,7 +71,7 @@ test("asks for a decision when a duplicate file was processed but not booked", (
   );
 
   const duplicate = findDuplicateBeforeProcessing({
-    source: "outlook",
+    source: "manual_upload",
     fileName: "processed-duplicate.pdf",
     fileSize: 22_222,
     checksum: "checksum-processed-duplicate",
@@ -87,7 +87,7 @@ test("asks for a decision when a duplicate file was processed but not booked", (
 
 test("marks matching invoice contents as a possible duplicate", () => {
   const existing = createUploadedInvoice({
-    source: "manual",
+    source: "manual_upload",
     fileName: "content-duplicate-existing.pdf",
     fileType: "application/pdf",
     fileSize: 33_333,
@@ -100,7 +100,7 @@ test("marks matching invoice contents as a possible duplicate", () => {
   );
 
   const uploaded = createUploadedInvoice({
-    source: "manual",
+    source: "manual_upload",
     fileName: "content-duplicate-new.pdf",
     fileType: "application/pdf",
     fileSize: 44_444,

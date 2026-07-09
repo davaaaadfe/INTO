@@ -13,8 +13,12 @@
 /outputs/
 /dist/
 /build/
+/github-upload-ready/
+/github-upload-ready-dbfree/
 /.wrangler/
 /.vite/
+/storage/
+/data/
 
 # env files
 .env*
@@ -27,6 +31,9 @@ yarn-error.log*
 .pnpm-debug.log*
 .DS_Store
 *.pem
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
 
 # vercel
 .vercel

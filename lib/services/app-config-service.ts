@@ -16,7 +16,6 @@ export type SetupStatus = {
   isPreviewDeployment: boolean;
   previewDeploymentMessage?: string;
   exactCallbackUrl: string;
-  outlookCallbackUrl: string;
   checks: SetupCheck[];
 };
 
@@ -68,19 +67,13 @@ export function previewDeploymentMessage() {
     return undefined;
   }
 
-  return "You are viewing a Vercel preview deployment. UI testing is okay here, but Exact Online and Outlook OAuth should use the stable production callback URL configured in the system settings.";
+  return "You are viewing a Vercel preview deployment. UI testing is okay here, but Exact Online OAuth should use the stable production callback URL configured in the system settings.";
 }
 
-export function oauthCallbackUrl(provider: "exact" | "outlook") {
-  const path =
-    provider === "exact" ? "/api/exact/callback" : "/api/outlook/callback";
-  return `${applicationBaseUrl()}${path}`;
+export function exactOAuthCallbackUrl() {
+  return `${applicationBaseUrl()}/api/exact/callback`;
 }
 
 export function exactRedirectUri() {
-  return envValue("EXACT_ONLINE_REDIRECT_URI") || oauthCallbackUrl("exact");
-}
-
-export function microsoftRedirectUri() {
-  return envValue("MICROSOFT_REDIRECT_URI") || oauthCallbackUrl("outlook");
+  return envValue("EXACT_ONLINE_REDIRECT_URI") || exactOAuthCallbackUrl();
 }

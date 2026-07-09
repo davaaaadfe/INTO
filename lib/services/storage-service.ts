@@ -1,3 +1,17 @@
+import { createHash } from "node:crypto";
+import {
+  mkdir,
+  readFile,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
+import {
+  mkdirSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import path from "node:path";
 import { createId } from "../utils/id";
 
 const supportedExtensions = new Set(["pdf", "jpg", "jpeg", "png", "xml", "ubl"]);
@@ -6,6 +20,7 @@ export type StoredFile = {
   storageKey: string;
   fileType: string;
   fileSize: number;
+  checksum: string;
 };
 
 export type StoredInvoiceFile = StoredFile & {
@@ -13,17 +28,7 @@ export type StoredInvoiceFile = StoredFile & {
   bytes: Uint8Array;
 };
 
-const globalFileStore = globalThis as typeof globalThis & {
-  __INTO_FILE_STORE?: Map<string, StoredInvoiceFile>;
-};
-
-function fileStore() {
-  if (!globalFileStore.__INTO_FILE_STORE) {
-    globalFileStore.__INTO_FILE_STORE = new Map();
-  }
-
-  return globalFileStore.__INTO_FILE_STORE;
-}
+type StorageProvider = "local_temp";
 
 export function getFileExtension(fileName: string) {
   return fileName.split(".").pop()?.toLowerCase() ?? "";
@@ -35,6 +40,34 @@ export function isSupportedInvoiceFile(fileName: string) {
 
 export function supportedInvoiceFileExtensions() {
   return [...supportedExtensions];
+}
+
+function envValue(key: string) {
+  return process.env[key]?.trim() ?? "";
+}
+
+export function invoiceStorageProvider(): StorageProvider {
+  return "local_temp";
+}
+
+export function temporaryInvoiceStoragePath() {
+  const configuredPath = envValue("TEMP_INVOICE_STORAGE_PATH");
+  if (!configuredPath) {
+    return path.join(
+      /*turbopackIgnore: true*/ process.cwd(),
+      "storage",
+      "tmp-invoices"
+    );
+  }
+
+  return path.isAbsolute(configuredPath)
+    ? configuredPath
+    : path.resolve(/*turbopackIgnore: true*/ process.cwd(), configuredPath);
+}
+
+export function temporaryInvoiceRetentionDays() {
+  const parsed = Number.parseInt(envValue("TEMP_INVOICE_RETENTION_DAYS"), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 30;
 }
 
 function contentTypeFor(fileName: string, fileType = "") {
@@ -59,62 +92,118 @@ function contentTypeFor(fileName: string, fileType = "") {
   return "application/octet-stream";
 }
 
-export async function storeInvoiceFile(file: File): Promise<StoredFile> {
-  const storedFile: StoredInvoiceFile = {
-    storageKey: `invoices/${createId("file")}/${file.name}`,
-    fileName: file.name,
-    fileType: contentTypeFor(file.name, file.type),
-    fileSize: file.size,
-    bytes: new Uint8Array(await file.arrayBuffer()),
-  };
+function checksumFor(bytes: Uint8Array) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
 
-  fileStore().set(storedFile.storageKey, storedFile);
+function safeFileName(fileName: string) {
+  const baseName = path.basename(fileName).replace(/[^\w.-]+/g, "_");
+  return baseName || "invoice";
+}
+
+function fileNameFromStorageKey(storageKey: string) {
+  return path.basename(storageKey).replace(/^file_[\w-]+__/, "");
+}
+
+function localStorageKey(fileName: string) {
+  return path.join(
+    temporaryInvoiceStoragePath(),
+    `${createId("file")}__${safeFileName(fileName)}`
+  );
+}
+
+export async function storeInvoiceFile(file: File): Promise<StoredFile> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const storageKey = localStorageKey(file.name);
+  await mkdir(path.dirname(storageKey), { recursive: true });
+  await writeFile(storageKey, bytes);
 
   return {
-    storageKey: storedFile.storageKey,
-    fileType: storedFile.fileType,
-    fileSize: storedFile.fileSize,
+    storageKey,
+    fileType: contentTypeFor(file.name, file.type),
+    fileSize: bytes.byteLength,
+    checksum: checksumFor(bytes),
   };
 }
 
 export function storeMockInvoiceFile(input: {
-  storageKey: string;
+  storageKey?: string;
   fileName: string;
   fileType: string;
   content: string;
 }) {
   const bytes = new TextEncoder().encode(input.content);
-  const storedFile: StoredInvoiceFile = {
-    storageKey: input.storageKey,
+  const storageKey = input.storageKey
+    ? path.resolve(/*turbopackIgnore: true*/ process.cwd(), input.storageKey)
+    : localStorageKey(input.fileName);
+  mkdirSync(path.dirname(storageKey), { recursive: true });
+  writeFileSync(storageKey, bytes);
+
+  return {
+    storageKey,
     fileName: input.fileName,
     fileType: contentTypeFor(input.fileName, input.fileType),
     fileSize: bytes.byteLength,
+    checksum: checksumFor(bytes),
     bytes,
   };
-
-  fileStore().set(input.storageKey, storedFile);
-  return storedFile;
 }
 
-export function getStoredInvoiceFile(storageKey: string) {
-  return fileStore().get(storageKey) ?? null;
+export async function getStoredInvoiceFile(
+  storageKey: string,
+  fallback?: { fileName?: string; fileType?: string }
+) {
+  try {
+    const bytes = await readFile(storageKey);
+    const metadata = await stat(storageKey);
+    const fileName = fallback?.fileName || fileNameFromStorageKey(storageKey);
+    const fileType = fallback?.fileType || contentTypeFor(fileName);
+
+    return {
+      storageKey,
+      fileName,
+      fileType,
+      fileSize: metadata.size,
+      checksum: checksumFor(bytes),
+      bytes,
+    };
+  } catch {
+    return null;
+  }
 }
 
-export function verifyInvoiceStorageWorks() {
-  const storageKey = `health/${createId("file")}/storage-check.txt`;
+export async function deleteStoredInvoiceFile(storageKey: string) {
+  try {
+    await unlink(storageKey);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function deleteStoredInvoiceFileSync(storageKey: string) {
+  try {
+    unlinkSync(storageKey);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function verifyInvoiceStorageWorks() {
   const content = "INTO storage readiness check";
-  const storedFile = storeMockInvoiceFile({
-    storageKey,
+  const stored = await storeInvoiceFile(
+    new File([content], "storage-check.txt", { type: "text/plain" })
+  );
+  const storedAgain = await getStoredInvoiceFile(stored.storageKey, {
     fileName: "storage-check.txt",
     fileType: "text/plain",
-    content,
   });
-  const storedAgain = getStoredInvoiceFile(storageKey);
-  fileStore().delete(storageKey);
+  await deleteStoredInvoiceFile(stored.storageKey);
 
   return Boolean(
     storedAgain &&
-      storedAgain.fileSize === storedFile.fileSize &&
+      storedAgain.fileSize === content.length &&
       new TextDecoder().decode(storedAgain.bytes) === content
   );
 }

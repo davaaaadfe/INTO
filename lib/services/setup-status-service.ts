@@ -1,17 +1,13 @@
 import type {
   ExactConnection,
   ExactMasterDataCache,
-  OutlookConnection,
 } from "../domain/invoice";
 import {
   getExactConnection,
   getExactMasterData,
-  getOutlookConnection,
   isCachedExactMasterDataStale,
   listInvoices,
   refreshExactConnectionForUser,
-  setOutlookConnection,
-  setOutlookConnectionNeedsReconnect,
   syncExactDataNow,
 } from "../repository/invoice-store";
 import {
@@ -19,7 +15,6 @@ import {
   currentDeploymentUrl,
   exactRedirectUri,
   isPreviewDeployment,
-  microsoftRedirectUri,
   previewDeploymentMessage,
   type SetupCheck,
   type SetupStatus,
@@ -32,10 +27,7 @@ import {
 } from "./exact-api-client";
 import { bookInvoiceInExact } from "./exact-online-service";
 import {
-  refreshOutlookTokenIfNeeded,
-  verifyOutlookMailboxAccess,
-} from "./outlook-service";
-import {
+  invoiceStorageProvider,
   supportedInvoiceFileExtensions,
   verifyInvoiceStorageWorks,
 } from "./storage-service";
@@ -46,14 +38,6 @@ type ExactReadiness = {
   details: string[];
   missingEnv: string[];
   connection: ExactConnection | null;
-};
-
-type OutlookReadiness = {
-  status: SetupStatusLevel;
-  message: string;
-  details: string[];
-  missingEnv: string[];
-  connection: OutlookConnection | null;
 };
 
 type MasterDataReadiness = {
@@ -101,6 +85,14 @@ function missingRequiredEnv(keys: string[]) {
   return keys.filter((key) => !hasEnv(key));
 }
 
+function missingDatabaseSettings() {
+  if (runtimeEnvironment() !== "production") {
+    return [];
+  }
+
+  return missingRequiredEnv(["DATABASE_URL"]);
+}
+
 function missingOAuthSecurityEnv() {
   const missing: string[] = [];
 
@@ -127,13 +119,6 @@ function missingExactServerSettings() {
       "EXACT_ONLINE_CLIENT_ID",
       "EXACT_ONLINE_CLIENT_SECRET",
     ]),
-    ...missingOAuthSecurityEnv(),
-  ];
-}
-
-function missingOutlookServerSettings() {
-  return [
-    ...missingRequiredEnv(["MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET"]),
     ...missingOAuthSecurityEnv(),
   ];
 }
@@ -232,102 +217,59 @@ async function exactConnectionReadiness(): Promise<ExactReadiness> {
   }
 }
 
-async function outlookConnectionReadiness(): Promise<OutlookReadiness> {
-  const connection = getOutlookConnection();
-
-  if (!connection) {
-    return {
-      ...needsSetup(
-        "INTO is not connected to the invoice mailbox yet. Ask the system owner to connect the shared Outlook mailbox.",
-        ["Invoice email scanning will be available after the company mailbox is connected."],
-        missingOutlookServerSettings()
-      ),
-      connection: null,
-    };
-  }
-
-  if (
-    connection.status !== "connected" ||
-    !connection.accessTokenCiphertext ||
-    !connection.refreshTokenCiphertext
-  ) {
-    return {
-      ...needsSetup(
-        "INTO is not connected to the invoice mailbox yet. Ask the system owner to reconnect the shared Outlook mailbox.",
-        ["The saved company Outlook mailbox cannot currently be used."],
-        missingOutlookServerSettings()
-      ),
-      connection,
-    };
-  }
-
-  try {
-    const refreshedConnection = await refreshOutlookTokenIfNeeded(connection);
-    const currentConnection =
-      refreshedConnection && refreshedConnection.updatedAt !== connection.updatedAt
-        ? setOutlookConnection(refreshedConnection)
-        : refreshedConnection;
-
-    const mailboxAccessible = await verifyOutlookMailboxAccess(currentConnection);
-
-    if (!currentConnection || !mailboxAccessible) {
-      return {
-        ...needsSetup(
-          "INTO is not connected to the invoice mailbox yet. Ask the system owner to check the shared Outlook mailbox.",
-          ["INTO could not confirm access to the configured invoice mailbox."],
-          missingOutlookServerSettings()
-        ),
-        connection: currentConnection,
-      };
-    }
-
-    return {
-      status: "ok",
-      message: "Shared Outlook invoice mailbox is ready.",
-      details: ["The company invoice mailbox is connected and reachable."],
-      missingEnv: [],
-      connection: currentConnection,
-    };
-  } catch {
-    setOutlookConnectionNeedsReconnect(connection.userId);
-    return {
-      ...needsSetup(
-        "INTO is not connected to the invoice mailbox yet. Ask the system owner to reconnect the shared Outlook mailbox.",
-        ["INTO could not verify access to the company invoice mailbox."],
-        missingOutlookServerSettings()
-      ),
-      connection,
-    };
-  }
-}
-
-function uploadReadiness() {
+async function uploadReadiness() {
   const supportedExtensions = supportedInvoiceFileExtensions();
   const requiredExtensions = ["pdf", "jpg", "jpeg", "png", "xml", "ubl"];
   const supportedTypesConfigured = requiredExtensions.every((extension) =>
     supportedExtensions.includes(extension)
   );
-  const storageWorks = verifyInvoiceStorageWorks();
+  const storageWorks = await verifyInvoiceStorageWorks();
 
   if (!supportedTypesConfigured || !storageWorks) {
-    return notReady("Invoice upload needs attention.", [
-      supportedTypesConfigured
-        ? "Supported invoice file types are configured."
-        : "Supported invoice file types are incomplete.",
-      storageWorks
-        ? "Invoice file storage is working."
-        : "Invoice file storage could not save and read a test file.",
-    ]);
+    return notReady(
+      "Invoice upload needs attention.",
+      [
+        supportedTypesConfigured
+          ? "Supported invoice file types are configured."
+          : "Supported invoice file types are incomplete.",
+        storageWorks
+          ? "Invoice file storage is working."
+          : "Temporary local invoice storage could not save and read a test file.",
+      ]
+    );
+  }
+
+  const details = [
+    "Users can upload PDF, JPG, PNG, XML, and UBL invoice files.",
+    "Temporary local invoice storage is ready.",
+  ];
+
+  if (runtimeEnvironment() === "production" && invoiceStorageProvider() === "local_temp") {
+    details.push(
+      "Temporary local storage on Vercel is suitable only for short-lived processing. Files may not survive redeploys. This is acceptable only if invoices are processed and booked quickly."
+    );
   }
 
   return {
     status: "ok" as const,
     message: "Invoice upload is ready.",
-    details: ["Users can upload PDF, JPG, PNG, XML, and UBL invoice files."],
+    details,
+    missingEnv: [],
   };
 }
 
 function reviewQueueReadiness() {
+  const missingDatabaseEnv = missingDatabaseSettings();
+  if (missingDatabaseEnv.length) {
+    return needsSetup(
+      "Invoice review queue needs production record storage setup.",
+      [
+        "Invoices, audit history, duplicate decisions, and booking attempts must be stored durably before production use.",
+      ],
+      missingDatabaseEnv
+    );
+  }
+
   try {
     const invoices = listInvoices();
     if (!Array.isArray(invoices)) {
@@ -340,6 +282,7 @@ function reviewQueueReadiness() {
       status: "ok" as const,
       message: "Invoice review queue is ready.",
       details: ["Invoices can be listed for review."],
+      missingEnv: [],
     };
   } catch {
     return notReady("Invoice review queue needs attention.", [
@@ -468,11 +411,8 @@ function bookingReadiness(
 }
 
 export async function getSetupStatus(): Promise<SetupStatus> {
-  const [exactReadiness, outlookReadiness] = await Promise.all([
-    exactConnectionReadiness(),
-    outlookConnectionReadiness(),
-  ]);
-  const uploadStatus = uploadReadiness();
+  const exactReadiness = await exactConnectionReadiness();
+  const uploadStatus = await uploadReadiness();
   const reviewQueueStatus = reviewQueueReadiness();
   const masterDataStatus = await masterDataReadiness(exactReadiness);
   const bookingStatus = bookingReadiness(exactReadiness, masterDataStatus);
@@ -484,7 +424,6 @@ export async function getSetupStatus(): Promise<SetupStatus> {
     isPreviewDeployment: isPreviewDeployment(),
     previewDeploymentMessage: previewDeploymentMessage(),
     exactCallbackUrl: exactRedirectUri(),
-    outlookCallbackUrl: microsoftRedirectUri(),
     checks: [
       readinessCheck(
         "shared-exact",
@@ -495,26 +434,20 @@ export async function getSetupStatus(): Promise<SetupStatus> {
         exactReadiness.missingEnv
       ),
       readinessCheck(
-        "shared-outlook",
-        "Shared Outlook invoice mailbox",
-        outlookReadiness.status,
-        outlookReadiness.message,
-        outlookReadiness.details,
-        outlookReadiness.missingEnv
-      ),
-      readinessCheck(
         "invoice-upload",
         "Invoice upload",
         uploadStatus.status,
         uploadStatus.message,
-        uploadStatus.details
+        uploadStatus.details,
+        uploadStatus.missingEnv
       ),
       readinessCheck(
         "review-queue",
         "Invoice review queue",
         reviewQueueStatus.status,
         reviewQueueStatus.message,
-        reviewQueueStatus.details
+        reviewQueueStatus.details,
+        reviewQueueStatus.missingEnv
       ),
       readinessCheck(
         "exact-master-sync",

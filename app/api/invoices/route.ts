@@ -20,72 +20,74 @@ import type {
   DuplicateDetectionResult,
   UploadedInvoice,
 } from "../../../lib/domain/invoice";
+import { withPersistentStore } from "../../../lib/repository/persistent-request";
 
 export async function GET() {
-  return Response.json({ invoices: listInvoices() });
+  return withPersistentStore(() => Response.json({ invoices: listInvoices() }));
 }
 
 export async function POST(request: Request) {
-  try {
-    requirePermission("upload");
-    const formData = await request.formData();
-    const files = formData
-      .getAll("files")
-      .filter((value): value is File => value instanceof File);
-    const checksums = formData
-      .getAll("checksums")
-      .map((value) => (typeof value === "string" ? value : ""));
+  return withPersistentStore(async () => {
+    try {
+      requirePermission("upload");
+      const formData = await request.formData();
+      const files = formData
+        .getAll("files")
+        .filter((value): value is File => value instanceof File);
+      const checksums = formData
+        .getAll("checksums")
+        .map((value) => (typeof value === "string" ? value : ""));
 
-    if (files.length === 0) {
-      return Response.json(
-        { error: "Upload at least one invoice file." },
-        { status: 400 }
-      );
-    }
+      if (files.length === 0) {
+        return Response.json(
+          { error: "Upload at least one invoice file." },
+          { status: 400 }
+        );
+      }
 
-    const processed: Array<UploadedInvoice | null> = [];
-    const rejected: Array<{ fileName: string; checksum?: string; reason: string }> = [];
-    const duplicates: Array<{
-      fileName: string;
-      fileSize: number;
-      checksum?: string;
-      reason: string;
-      duplicateInvoiceId: string;
-      exactBookingId?: string;
-      detection: DuplicateDetectionResult;
-    }> = [];
+      const processed: Array<UploadedInvoice | null> = [];
+      const rejected: Array<{ fileName: string; checksum?: string; reason: string }> = [];
+      const duplicates: Array<{
+        fileName: string;
+        fileSize: number;
+        checksum?: string;
+        reason: string;
+        duplicateInvoiceId: string;
+        exactBookingId?: string;
+        detection: DuplicateDetectionResult;
+      }> = [];
 
-    for (const [index, file] of files.entries()) {
-      const checksum = checksums[index] || undefined;
-      const duplicate = findDuplicateBeforeProcessing({
-        fileName: file.name,
-        fileSize: file.size,
-        checksum,
-        source: "manual",
-      });
-
-      if (duplicate) {
-        duplicates.push({
+      for (const [index, file] of files.entries()) {
+        const checksum = checksums[index] || undefined;
+        const duplicate = findDuplicateBeforeProcessing({
           fileName: file.name,
           fileSize: file.size,
           checksum,
-          reason: duplicate.detection.message,
-          duplicateInvoiceId: duplicate.duplicate.id,
-          exactBookingId: duplicate.detection.candidates[0]?.exactBookingId,
-          detection: duplicate.detection,
+          source: "manual_upload",
         });
-        continue;
-      }
 
-      const storedFile = await storeInvoiceFile(file);
-      const invoice = createUploadedInvoice({
-        source: "manual",
-        fileName: file.name,
-        fileType: storedFile.fileType,
-        fileSize: storedFile.fileSize,
-        checksum,
-        storageKey: storedFile.storageKey,
-      });
+        if (duplicate) {
+          duplicates.push({
+            fileName: file.name,
+            fileSize: file.size,
+            checksum,
+            reason: duplicate.detection.message,
+            duplicateInvoiceId: duplicate.duplicate.id,
+            exactBookingId: duplicate.detection.candidates[0]?.exactBookingId,
+            detection: duplicate.detection,
+          });
+          continue;
+        }
+
+        const storedFile = await storeInvoiceFile(file);
+        const invoice = createUploadedInvoice({
+          source: "manual_upload",
+          fileName: file.name,
+          fileType: storedFile.fileType,
+          fileSize: storedFile.fileSize,
+          checksum: checksum ?? storedFile.checksum,
+          storageKey: storedFile.storageKey,
+        });
 
       logger.info("invoice.uploaded", {
         invoiceId: invoice.id,
@@ -137,19 +139,20 @@ export async function POST(request: Request) {
         errorCount: finalInvoice?.validationErrors.length ?? 0,
       });
 
-      processed.push(finalInvoice);
-    }
+        processed.push(finalInvoice);
+      }
 
-    return Response.json(
-      { invoices: listInvoices(), processed, rejected, duplicates },
-      { status: 201 }
-    );
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unexpected upload error";
-    logger.error("invoice.upload_failed", { message });
-    return Response.json(
-      { error: message },
-      { status: message.includes("not allowed") ? 403 : 500 }
-    );
-  }
+      return Response.json(
+        { invoices: listInvoices(), processed, rejected, duplicates },
+        { status: 201 }
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unexpected upload error";
+      logger.error("invoice.upload_failed", { message });
+      return Response.json(
+        { error: message },
+        { status: message.includes("not allowed") ? 403 : 500 }
+      );
+    }
+  });
 }

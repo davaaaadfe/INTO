@@ -6,6 +6,10 @@ components/work
 outputs
 dist
 build
+github-upload-ready
+github-upload-ready-dbfree
+storage
+data
 .next
 .vite
 .wrangler
@@ -13,3 +17,7 @@ node_modules
 .agents
 .codex
 *.log
+*.tsbuildinfo
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

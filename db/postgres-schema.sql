@@ -8,7 +8,16 @@ CREATE TABLE users (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TYPE invoice_source AS ENUM ('manual', 'outlook');
+-- Runtime bridge used while INTO migrates from the local mock repository to
+-- fully normalized PostgreSQL tables. It keeps production state durable on
+-- Vercel without exposing provider tokens or relying on serverless memory.
+CREATE TABLE into_runtime_store (
+  id text PRIMARY KEY,
+  payload jsonb NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TYPE invoice_source AS ENUM ('manual_upload');
 CREATE TYPE invoice_status AS ENUM (
   'Uploaded',
   'Reading',
@@ -54,7 +63,6 @@ CREATE TABLE uploaded_invoices (
   file_size bigint NOT NULL,
   checksum text,
   storage_key text NOT NULL,
-  outlook_message_id text,
   status invoice_status NOT NULL DEFAULT 'Uploaded',
   last_error text,
   exact_booking_id text,
@@ -224,33 +232,6 @@ CREATE TABLE account_mapping_decisions (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE outlook_connections (
-  id uuid PRIMARY KEY,
-  connection_scope text NOT NULL DEFAULT 'company',
-  connection_owner_id text NOT NULL DEFAULT 'company_connection',
-  mailbox_address text NOT NULL,
-  access_token_ciphertext text NOT NULL,
-  refresh_token_ciphertext text NOT NULL,
-  expires_at timestamptz NOT NULL,
-  status text NOT NULL DEFAULT 'connected',
-  last_sync_at timestamptz,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (connection_scope)
-);
-
-CREATE TABLE outlook_email_ingestions (
-  id uuid PRIMARY KEY,
-  connection_id uuid NOT NULL REFERENCES outlook_connections(id),
-  message_id text NOT NULL UNIQUE,
-  subject text NOT NULL,
-  sender text NOT NULL,
-  category text NOT NULL,
-  detected_attachment_count integer NOT NULL DEFAULT 0,
-  processed_invoice_id uuid REFERENCES uploaded_invoices(id),
-  created_at timestamptz NOT NULL DEFAULT now()
-);
-
 CREATE UNIQUE INDEX invoice_duplicate_guard_idx
   ON extracted_invoice_data (lower(coalesce(supplier_name, '')), lower(coalesce(invoice_number, '')))
   WHERE supplier_name IS NOT NULL AND invoice_number IS NOT NULL;
@@ -272,4 +253,3 @@ CREATE INDEX booking_attempts_invoice_idx ON booking_attempts (invoice_id);
 CREATE INDEX exact_master_data_caches_freshness_idx ON exact_master_data_caches (stale_after);
 CREATE INDEX supplier_resolution_decisions_identity_idx ON supplier_resolution_decisions (user_id, supplier_identity);
 CREATE INDEX account_mapping_decisions_lookup_idx ON account_mapping_decisions (user_id, supplier_account_id, description_key);
-CREATE INDEX outlook_ingestions_connection_idx ON outlook_email_ingestions (connection_id);

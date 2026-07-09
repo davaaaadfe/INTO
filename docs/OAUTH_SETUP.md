@@ -1,8 +1,8 @@
 # INTO OAuth Setup
 
-INTO never asks for Exact Online or Outlook passwords. Users authenticate on the
-provider's official login page, approve access, and INTO stores only encrypted
-OAuth access and refresh tokens.
+INTO never asks for Exact Online passwords. The system owner authenticates on
+Exact Online's official login page, approves access, and INTO stores only
+encrypted OAuth access and refresh tokens.
 
 ## Exact Online
 
@@ -50,61 +50,6 @@ Flow:
 6. INTO validates OAuth state, exchanges the code server-side, encrypts tokens,
    and stores them as the company Exact connection.
 
-## Microsoft Outlook / Microsoft Graph
-
-1. In Azure Portal, open Microsoft Entra ID.
-2. Go to App registrations.
-3. Create or update an app registration for INTO.
-4. Add a Web redirect URI:
-
-```text
-https://your-domain/api/outlook/callback
-```
-
-For local development:
-
-```text
-http://localhost:3000/api/outlook/callback
-```
-
-5. Add Microsoft Graph delegated permissions:
-
-```text
-offline_access
-User.Read
-Mail.ReadWrite
-```
-
-6. Create a client secret.
-7. Copy the values into environment variables.
-
-Important: `MICROSOFT_CLIENT_ID` is the Azure Application (client) ID, not the
-user's Outlook email address.
-
-```text
-MICROSOFT_CLIENT_ID=
-MICROSOFT_CLIENT_SECRET=
-MICROSOFT_REDIRECT_URI=https://your-domain/api/outlook/callback
-MICROSOFT_TENANT_ID=common
-```
-
-8. Restart or redeploy INTO.
-9. Sign in to INTO as the system owner.
-10. Click `Connect Company Outlook`.
-
-INTO uses one company Outlook mailbox for ingestion. Invoice import reads only
-from that connected mailbox.
-
-Flow:
-
-1. The system owner clicks `Connect Company Outlook`.
-2. INTO redirects the system owner to Microsoft.
-3. The system owner logs in directly with the approved company mailbox account.
-4. Microsoft asks the system owner to approve Graph permissions.
-5. Microsoft returns an authorization code to `/api/outlook/callback`.
-6. INTO validates OAuth state, exchanges the code server-side, encrypts tokens,
-   and stores them as the company Outlook connection.
-
 ## Required Security Variables
 
 Use long random values and store them only as server-side environment variables.
@@ -126,7 +71,6 @@ EXACT_OAUTH_STATE_SECRET=
 INTO never stores:
 
 - Exact Online passwords
-- Microsoft passwords
 - Plaintext access tokens
 - Plaintext refresh tokens
 - OAuth client secrets in source code

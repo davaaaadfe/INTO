@@ -1,31 +1,36 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { exactRedirectUri, microsoftRedirectUri } from "../lib/services/app-config-service";
+import { rm } from "node:fs/promises";
+import { exactRedirectUri } from "../lib/services/app-config-service";
 import {
-  disconnectExactConnection,
-  disconnectOutlookConnection,
   getCompanyConnectionUserId,
+  disconnectExactConnection,
   setExactConnection,
-  setOutlookConnection,
 } from "../lib/repository/invoice-store";
 import { createMockExactConnection } from "../lib/services/exact-online-service";
-import { createMockOutlookConnection } from "../lib/services/outlook-service";
 import { getSetupStatus } from "../lib/services/setup-status-service";
 
 const envKeys = [
+  "NODE_ENV",
   "APP_URL",
   "NEXT_PUBLIC_APP_URL",
   "VERCEL_URL",
   "VERCEL_ENV",
   "VERCEL_PROJECT_PRODUCTION_URL",
+  "DATABASE_URL",
+  "STORAGE_PROVIDER",
+  "STORAGE_MODE",
+  "TEMP_INVOICE_STORAGE_PATH",
+  "TEMP_INVOICE_RETENTION_DAYS",
+  "S3_ENDPOINT",
+  "S3_BUCKET",
+  "S3_ACCESS_KEY_ID",
+  "S3_SECRET_ACCESS_KEY",
+  "S3_REGION",
   "EXACT_ONLINE_MODE",
   "EXACT_ONLINE_CLIENT_ID",
   "EXACT_ONLINE_CLIENT_SECRET",
   "EXACT_ONLINE_REDIRECT_URI",
-  "MICROSOFT_OUTLOOK_MODE",
-  "MICROSOFT_CLIENT_ID",
-  "MICROSOFT_CLIENT_SECRET",
-  "MICROSOFT_REDIRECT_URI",
   "OAUTH_TOKEN_ENCRYPTION_KEY",
   "OAUTH_STATE_SECRET",
 ];
@@ -63,7 +68,6 @@ async function withEnv(
 
 function resetSharedConnections() {
   disconnectExactConnection();
-  disconnectOutlookConnection();
 }
 
 test("derives OAuth callback URLs from Vercel deployment host", async () => {
@@ -71,10 +75,6 @@ test("derives OAuth callback URLs from Vercel deployment host", async () => {
     assert.equal(
       exactRedirectUri(),
       "https://into-example.vercel.app/api/exact/callback"
-    );
-    assert.equal(
-      microsoftRedirectUri(),
-      "https://into-example.vercel.app/api/outlook/callback"
     );
   });
 });
@@ -95,15 +95,12 @@ test("setup status identifies preview deployments and keeps stable callback URLs
         status.exactCallbackUrl,
         "https://into.example.com/api/exact/callback"
       );
-      assert.equal(
-        status.outlookCallbackUrl,
-        "https://into.example.com/api/outlook/callback"
-      );
       assert.equal(status.isPreviewDeployment, true);
       assert.match(
         status.previewDeploymentMessage ?? "",
         /Vercel preview deployment/
       );
+      assert.doesNotMatch(JSON.stringify(status), /Outlook|Microsoft|mailbox|\/api\/outlook/);
       resetSharedConnections();
     }
   );
@@ -114,7 +111,6 @@ test("setup status reports friendly readiness without exposing secret values", a
     {
       APP_URL: "https://into.example.com",
       EXACT_ONLINE_CLIENT_ID: "exact-client-id-secret-value",
-      MICROSOFT_CLIENT_SECRET: "microsoft-client-secret-value",
       OAUTH_TOKEN_ENCRYPTION_KEY: "encryption-secret-value",
       OAUTH_STATE_SECRET: "state-secret-value",
     },
@@ -124,14 +120,13 @@ test("setup status reports friendly readiness without exposing secret values", a
       const serialized = JSON.stringify(status);
 
       assert.match(serialized, /Shared Exact Online connection/);
-      assert.match(serialized, /Shared Outlook invoice mailbox/);
       assert.match(serialized, /Ask the system owner/);
       assert.doesNotMatch(serialized, /exact-client-id-secret-value/);
-      assert.doesNotMatch(serialized, /microsoft-client-secret-value/);
       assert.doesNotMatch(serialized, /encryption-secret-value/);
       assert.doesNotMatch(serialized, /state-secret-value/);
       assert.doesNotMatch(serialized, /accessTokenCiphertext/);
       assert.doesNotMatch(serialized, /refreshTokenCiphertext/);
+      assert.doesNotMatch(serialized, /Outlook|Microsoft|mailbox|MICROSOFT_|\/api\/outlook/);
       resetSharedConnections();
     }
   );
@@ -145,7 +140,6 @@ test("setup status omits developer infrastructure checks from the user checklist
 
     assert.deepEqual(ids, [
       "shared-exact",
-      "shared-outlook",
       "invoice-upload",
       "review-queue",
       "exact-master-sync",
@@ -156,6 +150,8 @@ test("setup status omits developer infrastructure checks from the user checklist
     assert.equal(ids.includes("environment"), false);
     assert.equal(JSON.stringify(checks).includes("DATABASE_URL"), false);
     assert.equal(JSON.stringify(checks).includes("S3_BUCKET"), false);
+    assert.equal(JSON.stringify(checks).includes("Outlook"), false);
+    assert.equal(JSON.stringify(checks).includes("Microsoft"), false);
     resetSharedConnections();
   });
 });
@@ -165,25 +161,16 @@ test("setup status does not mark shared integrations ready before they are conne
     resetSharedConnections();
     const checks = (await getSetupStatus()).checks;
     const exact = checks.find((check) => check.id === "shared-exact");
-    const outlook = checks.find((check) => check.id === "shared-outlook");
     const upload = checks.find((check) => check.id === "invoice-upload");
     const reviewQueue = checks.find((check) => check.id === "review-queue");
     const masterData = checks.find((check) => check.id === "exact-master-sync");
     const booking = checks.find((check) => check.id === "invoice-booking");
 
     assert.equal(exact?.status, "warning");
-    assert.equal(outlook?.status, "warning");
     assert.match(exact?.message ?? "", /not connected to Exact Online yet/);
-    assert.match(outlook?.message ?? "", /not connected to the invoice mailbox yet/);
     assert.deepEqual(exact?.missingEnv, [
       "EXACT_ONLINE_CLIENT_ID",
       "EXACT_ONLINE_CLIENT_SECRET",
-      "OAUTH_TOKEN_ENCRYPTION_KEY",
-      "OAUTH_STATE_SECRET",
-    ]);
-    assert.deepEqual(outlook?.missingEnv, [
-      "MICROSOFT_CLIENT_ID",
-      "MICROSOFT_CLIENT_SECRET",
       "OAUTH_TOKEN_ENCRYPTION_KEY",
       "OAUTH_STATE_SECRET",
     ]);
@@ -195,19 +182,68 @@ test("setup status does not mark shared integrations ready before they are conne
   });
 });
 
+test("setup status folds missing production database into the review queue readiness item", async () => {
+  await withEnv(
+    {
+      NODE_ENV: "production",
+      APP_URL: "https://into.example.com",
+      STORAGE_PROVIDER: "memory",
+    },
+    async () => {
+      resetSharedConnections();
+      const checks = (await getSetupStatus()).checks;
+      const ids = checks.map((check) => check.id);
+      const reviewQueue = checks.find((check) => check.id === "review-queue");
+
+      assert.equal(ids.includes("database"), false);
+      assert.equal(reviewQueue?.status, "warning");
+      assert.match(reviewQueue?.message ?? "", /production record storage/);
+      assert.deepEqual(reviewQueue?.missingEnv, ["DATABASE_URL"]);
+      assert.doesNotMatch(reviewQueue?.message ?? "", /DATABASE_URL/);
+      resetSharedConnections();
+    }
+  );
+});
+
+test("setup status uses local temporary invoice storage without requiring S3", async () => {
+  const storagePath = `storage/tmp-tests/setup-${Date.now()}-${Math.random()
+    .toString(16)
+    .slice(2)}`;
+  await withEnv(
+    {
+      NODE_ENV: "production",
+      APP_URL: "https://into.example.com",
+      STORAGE_MODE: "local_temp",
+      TEMP_INVOICE_STORAGE_PATH: storagePath,
+    },
+    async () => {
+      resetSharedConnections();
+      const checks = (await getSetupStatus()).checks;
+      const ids = checks.map((check) => check.id);
+      const upload = checks.find((check) => check.id === "invoice-upload");
+
+      assert.equal(ids.includes("storage"), false);
+      assert.equal(upload?.status, "ok");
+      assert.match(upload?.details.join(" ") ?? "", /Temporary local invoice storage is ready/);
+      assert.deepEqual(upload?.missingEnv, []);
+      assert.doesNotMatch(JSON.stringify(upload), /S3_/);
+      resetSharedConnections();
+    }
+  );
+  await rm(storagePath, { recursive: true, force: true });
+});
+
 test("setup status marks checklist ready when shared connections and Exact data are available", async () => {
   await withEnv(
     {
       APP_URL: "https://into.example.com",
       EXACT_ONLINE_MODE: "mock",
-      MICROSOFT_OUTLOOK_MODE: "mock",
     },
     async () => {
       resetSharedConnections();
       const companyConnectionUserId = getCompanyConnectionUserId();
 
       setExactConnection(createMockExactConnection(companyConnectionUserId));
-      setOutlookConnection(createMockOutlookConnection(companyConnectionUserId));
 
       const checks = (await getSetupStatus()).checks;
 
@@ -215,7 +251,6 @@ test("setup status marks checklist ready when shared connections and Exact data 
         checks.map((check) => [check.id, check.status]),
         [
           ["shared-exact", "ok"],
-          ["shared-outlook", "ok"],
           ["invoice-upload", "ok"],
           ["review-queue", "ok"],
           ["exact-master-sync", "ok"],

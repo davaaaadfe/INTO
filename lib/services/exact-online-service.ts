@@ -171,7 +171,7 @@ export async function bookInvoiceInExact(
     );
   }
 
-  if (!getStoredInvoiceFile(invoice.purchaseJournal.attachmentStorageKey)) {
+  if (!(await getStoredInvoiceFile(invoice.purchaseJournal.attachmentStorageKey))) {
     throw new Error("Original invoice file is not available in storage.");
   }
 

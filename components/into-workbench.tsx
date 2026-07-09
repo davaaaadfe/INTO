@@ -17,9 +17,7 @@ import type {
   IntoUser,
   InvoiceArchiveResult,
   PermissionAction,
-  OutlookIngestionLog,
   PublicExactConnection,
-  PublicOutlookConnection,
   UploadedInvoice,
   ValidationError,
 } from "../lib/domain/invoice";
@@ -37,8 +35,6 @@ type ApiState = {
   exactMasterData: ExactMasterDataCache | null;
   exactMasterDataStale: boolean;
   exactMasterDataReadOnly: boolean;
-  outlookConnection: PublicOutlookConnection | null;
-  outlookLogs: OutlookIngestionLog[];
 };
 
 type UploadItemStatus =
@@ -133,7 +129,6 @@ type SetupStatus = {
   isPreviewDeployment: boolean;
   previewDeploymentMessage?: string;
   exactCallbackUrl: string;
-  outlookCallbackUrl: string;
   checks: SetupCheck[];
 };
 
@@ -1026,8 +1021,6 @@ export function IntoWorkbench() {
     exactMasterData: null,
     exactMasterDataStale: true,
     exactMasterDataReadOnly: true,
-    outlookConnection: null,
-    outlookLogs: [],
   });
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<string>("");
   const [draft, setDraft] = useState<ExtractedInvoiceData | null>(null);
@@ -1375,14 +1368,12 @@ export function IntoWorkbench() {
     const [
       invoiceResponse,
       exactResponse,
-      outlookResponse,
       userResponse,
       setupResponse,
     ] =
       await Promise.all([
       fetch("/api/invoices"),
       fetch("/api/exact/status"),
-      fetch("/api/outlook/status"),
       fetch("/api/users"),
       fetch("/api/setup/status"),
     ]);
@@ -1394,10 +1385,6 @@ export function IntoWorkbench() {
       masterData: ExactMasterDataCache | null;
       masterDataStale: boolean;
       masterDataReadOnly: boolean;
-    };
-    const outlookData = (await outlookResponse.json()) as {
-      connection: PublicOutlookConnection | null;
-      logs: OutlookIngestionLog[];
     };
     const userData = (await userResponse.json()) as {
       users: IntoUser[];
@@ -1417,8 +1404,6 @@ export function IntoWorkbench() {
       exactMasterData: exactData.masterData,
       exactMasterDataStale: exactData.masterDataStale,
       exactMasterDataReadOnly: exactData.masterDataReadOnly,
-      outlookConnection: outlookData.connection,
-      outlookLogs: outlookData.logs,
     });
     setSetupStatus(setupData);
 
@@ -1503,29 +1488,19 @@ export function IntoWorkbench() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const exactStatus = params.get("exact");
-    const outlookStatus = params.get("outlook");
-    if (!exactStatus && !outlookStatus) {
+    if (!exactStatus) {
       return;
     }
 
     const timeoutId = window.setTimeout(() => {
-      if (exactStatus) {
-        setMessage(
-          exactStatus === "connected"
-            ? "Exact Online is connected. INTO synced Exact master data."
-            : "Exact Online connection failed. Check your Exact app credentials and redirect URI."
-        );
-      } else if (outlookStatus) {
-        setMessage(
-          outlookStatus === "connected"
-            ? "Outlook is connected with Microsoft OAuth."
-            : "Outlook connection failed. Check your Microsoft app credentials and redirect URI."
-        );
-      }
+      setMessage(
+        exactStatus === "connected"
+          ? "Exact Online is connected. INTO synced Exact master data."
+          : "Exact Online connection failed. Check your Exact app credentials and redirect URI."
+      );
       refreshAll().catch(() => undefined);
     }, 0);
     params.delete("exact");
-    params.delete("outlook");
     const nextQuery = params.toString();
     window.history.replaceState(
       null,
@@ -1875,37 +1850,6 @@ export function IntoWorkbench() {
     }
   }
 
-  async function connectOutlook() {
-    setBusy("outlook-connect");
-    try {
-      const response = await fetch("/api/outlook/connect", { method: "POST" });
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error ?? "Outlook connection failed.");
-      }
-
-      if (data.requiresRedirect && data.authorizationUrl) {
-        setMessage("Redirecting to Microsoft to authorize Outlook access.");
-        window.location.assign(data.authorizationUrl);
-        return;
-      }
-
-      setState((current) => ({ ...current, outlookConnection: data.connection }));
-      setMessage(
-        data.mode === "real"
-          ? "Outlook is connected with Microsoft OAuth."
-          : "Outlook mock connection is active."
-      );
-      flashButton("outlook-connect", "success");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Outlook connection failed.");
-      flashButton("outlook-connect", "error");
-    } finally {
-      setBusy("");
-    }
-  }
-
   async function disconnectExact() {
     setBusy("exact-disconnect");
     try {
@@ -1928,62 +1872,6 @@ export function IntoWorkbench() {
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Exact disconnect failed.");
       flashButton("exact-disconnect", "error");
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function disconnectOutlook() {
-    setBusy("outlook-disconnect");
-    try {
-      const response = await fetch("/api/outlook/disconnect", { method: "POST" });
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error ?? "Outlook disconnect failed.");
-      }
-
-      setState((current) => ({ ...current, outlookConnection: data.connection }));
-      setMessage("Outlook disconnected. Local OAuth tokens were removed.");
-      flashButton("outlook-disconnect", "success");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Outlook disconnect failed.");
-      flashButton("outlook-disconnect", "error");
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function ingestOutlook() {
-    setBusy("outlook-ingest");
-    try {
-      const response = await fetch("/api/outlook/ingest", { method: "POST" });
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error ?? "Outlook ingestion failed.");
-      }
-
-      setState((current) => ({
-        ...current,
-        invoices: data.invoices,
-        outlookLogs: data.logs,
-      }));
-      if (data.duplicates?.length) {
-        setDuplicatePrompts((current) => [...current, ...data.duplicates]);
-      }
-      setSelectedInvoiceId(data.invoices?.[0]?.id ?? selectedInvoiceId);
-      setMessage(
-        data.duplicates?.length
-          ? `Detected invoice emails were processed. ${data.duplicates.length} duplicate(s) need a decision.`
-          : "Detected invoice emails were processed and categorized."
-      );
-      flashButton("outlook-ingest", "success");
-    } catch (error) {
-      setMessage(
-        error instanceof Error ? error.message : "Outlook ingestion failed."
-      );
-      flashButton("outlook-ingest", "error");
     } finally {
       setBusy("");
     }
@@ -2685,9 +2573,8 @@ export function IntoWorkbench() {
             <UploadProgressList items={uploadItems} />
           </div>
 
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-1">
-            {isSystemOwner ? (
-              <>
+          {isSystemOwner ? (
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-1">
                 <div className="rounded-lg border border-stone-300 bg-white p-4">
                   <h2 className="text-lg font-semibold">Company Exact Online</h2>
                   <p className="mt-1 text-sm text-stone-500">
@@ -2765,114 +2652,8 @@ export function IntoWorkbench() {
                     </ActionButton>
                   </div>
                 </div>
-
-                <div className="rounded-lg border border-stone-300 bg-white p-4">
-                  <h2 className="text-lg font-semibold">Company Outlook ingestion</h2>
-                  <p className="mt-1 text-sm text-stone-500">
-                    {state.outlookConnection
-                      ? `Reading invoices from ${state.outlookConnection.mailboxAddress}`
-                      : "No company Outlook mailbox connected"}
-                  </p>
-                  <div className="mt-3 rounded-md border border-stone-200 bg-stone-50 p-3 text-xs text-stone-600">
-                    <div className="font-semibold text-stone-800">
-                      Last Outlook scan
-                    </div>
-                    <div className="mt-1">
-                      {state.outlookLogs[0]
-                        ? formatTimestamp(state.outlookLogs[0].createdAt)
-                        : "Not scanned yet"}
-                    </div>
-                  </div>
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    <ActionButton
-                      variant="outline"
-                      onClick={connectOutlook}
-                      loading={busy === "outlook-connect"}
-                      feedback={buttonFeedbackFor(
-                        "outlook-connect",
-                        "outlook-connect"
-                      )}
-                      disabled={busy === "outlook-connect"}
-                      disabledReason="Company Outlook connection is in progress."
-                    >
-                      {state.outlookConnection
-                        ? "Reconnect Company Outlook"
-                        : "Connect Company Outlook"}
-                    </ActionButton>
-                    <ActionButton
-                      variant="secondary"
-                      onClick={ingestOutlook}
-                      loading={busy === "outlook-ingest"}
-                      feedback={buttonFeedbackFor(
-                        "outlook-ingest",
-                        "outlook-ingest"
-                      )}
-                      disabled={
-                        !state.outlookConnection ||
-                        busy === "outlook-ingest" ||
-                        !hasPermission("upload")
-                      }
-                      disabledReason={
-                        !hasPermission("upload")
-                          ? "Your INTO account is not verified to import invoices from the company Outlook mailbox."
-                          : "Scan Outlook Now is disabled until the company Outlook mailbox is connected."
-                      }
-                    >
-                      Scan Outlook Now
-                    </ActionButton>
-                    <ActionButton
-                      variant="danger"
-                      onClick={disconnectOutlook}
-                      loading={busy === "outlook-disconnect"}
-                      feedback={buttonFeedbackFor(
-                        "outlook-disconnect",
-                        "outlook-disconnect"
-                      )}
-                      disabled={
-                        !state.outlookConnection || busy === "outlook-disconnect"
-                      }
-                      disabledReason="Company Outlook is not connected."
-                    >
-                      Disconnect Company Outlook
-                    </ActionButton>
-                  </div>
-                </div>
-              </>
-            ) : (
-              <div className="rounded-lg border border-stone-300 bg-white p-4">
-                <h2 className="text-lg font-semibold">Outlook invoice scan</h2>
-                <p className="mt-1 text-sm text-stone-500">
-                  Scan the shared invoice mailbox for new invoice attachments.
-                </p>
-                {!state.outlookConnection ? (
-                  <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
-                    INTO is not connected to the invoice mailbox yet. Ask the
-                    system owner to connect the shared Outlook mailbox.
-                  </div>
-                ) : null}
-                <div className="mt-4 flex flex-wrap gap-2">
-                  <ActionButton
-                    variant="secondary"
-                    onClick={ingestOutlook}
-                    loading={busy === "outlook-ingest"}
-                    feedback={buttonFeedbackFor("outlook-ingest", "outlook-ingest")}
-                    disabled={
-                      !state.outlookConnection ||
-                      busy === "outlook-ingest" ||
-                      !hasPermission("upload")
-                    }
-                    disabledReason={
-                      !hasPermission("upload")
-                        ? "Your INTO account is not verified to import invoices from the company Outlook mailbox."
-                        : "Scan Outlook Now is disabled until the shared Outlook mailbox is connected by the system owner."
-                    }
-                  >
-                    Scan Outlook Now
-                  </ActionButton>
-                </div>
-              </div>
-            )}
-          </div>
+            </div>
+          ) : null}
         </section>
 
         {message ? (
@@ -3156,8 +2937,7 @@ export function IntoWorkbench() {
                   }
                 >
                   <option value="">All</option>
-                  <option value="manual">Manual upload</option>
-                  <option value="outlook">Outlook</option>
+                  <option value="manual_upload">Manual upload</option>
                 </select>
               </label>
               <label className="flex flex-col gap-1 text-sm">
@@ -4297,27 +4077,6 @@ export function IntoWorkbench() {
           </section>
         )}
 
-        {state.outlookLogs.length ? (
-          <section className="rounded-lg border border-stone-300 bg-white p-4">
-            <h2 className="text-lg font-semibold">Outlook processing log</h2>
-            <div className="mt-3 grid gap-2 md:grid-cols-2">
-              {state.outlookLogs.slice(0, 4).map((log) => (
-                <div
-                  key={log.id}
-                  className="rounded-lg border border-stone-200 px-3 py-2 text-sm"
-                >
-                  <div className="font-semibold">{log.subject}</div>
-                  <div className="mt-1 text-stone-500">
-                    {log.sender} - {log.category}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
-        ) : null}
-        <p className="text-center text-[11px] text-stone-400">
-          UI version: review-form-required-data-v2
-        </p>
       </div>
     </main>
   );

@@ -21,23 +21,22 @@ EXACT_ONLINE_CLIENT_ID=
 EXACT_ONLINE_CLIENT_SECRET=
 EXACT_ONLINE_REDIRECT_URI=https://your-vercel-domain.vercel.app/api/exact/callback
 
-MICROSOFT_CLIENT_ID=
-MICROSOFT_CLIENT_SECRET=
-MICROSOFT_REDIRECT_URI=https://your-vercel-domain.vercel.app/api/outlook/callback
-
 OAUTH_TOKEN_ENCRYPTION_KEY=
 OAUTH_STATE_SECRET=
+
+STORAGE_MODE=local_temp
+TEMP_INVOICE_STORAGE_PATH=storage/tmp-invoices
+TEMP_INVOICE_RETENTION_DAYS=30
 ```
 
-`EXACT_ONLINE_REDIRECT_URI` and `MICROSOFT_REDIRECT_URI` can be omitted when
-Vercel provides `VERCEL_PROJECT_PRODUCTION_URL` or `VERCEL_URL`; INTO will derive
-the callback URLs automatically. Setting them explicitly is still recommended
-when using a custom domain.
+`EXACT_ONLINE_REDIRECT_URI` can be omitted when Vercel provides
+`VERCEL_PROJECT_PRODUCTION_URL` or `VERCEL_URL`; INTO will derive the callback
+URL automatically. Setting it explicitly is still recommended when using a
+custom domain.
 
-`DATABASE_URL` is optional. In database-free mode, INTO uses Exact Online as the
-long-term booking record and checks Exact for duplicate invoice references and
-amounts before booking. Without a database, INTO does not keep a durable
-application-side invoice archive or audit history across server restarts.
+`DATABASE_URL` is recommended for durable INTO metadata and audit history.
+Invoice files are stored only temporarily while they are processed, reviewed,
+and attached to Exact Online.
 
 ## 3. Callback URLs
 
@@ -45,28 +44,24 @@ Production:
 
 ```text
 https://into.yourcompany.com/api/exact/callback
-https://into.yourcompany.com/api/outlook/callback
 ```
 
 Vercel preview or generated domain:
 
 ```text
 https://your-project.vercel.app/api/exact/callback
-https://your-project.vercel.app/api/outlook/callback
 ```
 
 Local development:
 
 ```text
 http://localhost:3000/api/exact/callback
-http://localhost:3000/api/outlook/callback
 ```
 
 Optional ngrok:
 
 ```text
 https://your-ngrok-host.ngrok-free.app/api/exact/callback
-https://your-ngrok-host.ngrok-free.app/api/outlook/callback
 ```
 
 For optional ngrok or any other external development host, set `APP_URL` or the
@@ -79,7 +74,6 @@ when something needed for invoice processing is not ready. The panel uses
 runtime checks where possible and shows user-facing items only:
 
 - Shared Exact Online connection
-- Shared Outlook invoice mailbox
 - Invoice upload
 - Invoice review queue
 - Exact master data sync
@@ -91,7 +85,11 @@ tokens, encryption keys, or passwords.
 
 ## 5. Production Storage Notes
 
-Use an S3-compatible storage provider for original invoice files. Local
-filesystem storage is only for development because Vercel serverless files are
-not durable. A PostgreSQL database is optional if you later want a durable INTO
-invoice archive and audit history in addition to Exact Online.
+INTO defaults to temporary local invoice file storage. Uploaded files are kept
+only while an invoice is being processed, previewed, reviewed, or retried. After
+a successful Exact Online booking with an Exact reference, INTO deletes the
+local file and keeps the invoice metadata and audit history.
+
+Temporary local storage on Vercel may not survive redeploys, so invoices should
+be processed and booked promptly. Failed or unbooked invoices keep their local
+files as long as the Vercel instance keeps them available.

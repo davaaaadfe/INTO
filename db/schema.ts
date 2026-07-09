@@ -37,13 +37,12 @@ export const uploadedInvoices = sqliteTable(
       .notNull()
       .references(() => users.id),
     uploadedByName: text("uploaded_by_name").notNull(),
-    source: text("source", { enum: ["manual", "outlook"] }).notNull(),
+    source: text("source", { enum: ["manual_upload"] }).notNull(),
     fileName: text("file_name").notNull(),
     fileType: text("file_type").notNull(),
     fileSize: integer("file_size").notNull(),
     checksum: text("checksum"),
     storageKey: text("storage_key").notNull(),
-    outlookMessageId: text("outlook_message_id"),
     status: text("status").notNull(),
     lastError: text("last_error"),
     exactBookingId: text("exact_booking_id"),
@@ -107,7 +106,7 @@ export const duplicateDecisionLogs = sqliteTable(
     duplicateInvoiceId: text("duplicate_invoice_id").references(
       () => uploadedInvoices.id
     ),
-    source: text("source", { enum: ["manual", "outlook"] }).notNull(),
+    source: text("source", { enum: ["manual_upload"] }).notNull(),
     fileName: text("file_name").notNull(),
     checksum: text("checksum"),
     detectionOutcome: text("detection_outcome").notNull(),
@@ -339,51 +338,6 @@ export const accountMappingDecisions = sqliteTable(
       table.supplierAccountId,
       table.descriptionKey
     ),
-  ]
-);
-
-export const outlookConnections = sqliteTable(
-  "outlook_connections",
-  {
-    id: text("id").primaryKey(),
-    connectionScope: text("connection_scope").notNull().default("company"),
-    connectionOwnerId: text("connection_owner_id")
-      .notNull()
-      .default("company_connection"),
-    mailboxAddress: text("mailbox_address").notNull(),
-    accessTokenCiphertext: text("access_token_ciphertext").notNull(),
-    refreshTokenCiphertext: text("refresh_token_ciphertext").notNull(),
-    expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
-    status: text("status").notNull(),
-    lastSyncAt: integer("last_sync_at", { mode: "timestamp_ms" }),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
-    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
-  },
-  (table) => [
-    uniqueIndex("outlook_connections_scope_idx").on(table.connectionScope),
-  ]
-);
-
-export const outlookEmailIngestions = sqliteTable(
-  "outlook_email_ingestions",
-  {
-    id: text("id").primaryKey(),
-    connectionId: text("connection_id")
-      .notNull()
-      .references(() => outlookConnections.id),
-    messageId: text("message_id").notNull(),
-    subject: text("subject").notNull(),
-    sender: text("sender").notNull(),
-    category: text("category").notNull(),
-    detectedAttachmentCount: integer("detected_attachment_count").notNull(),
-    processedInvoiceId: text("processed_invoice_id").references(
-      () => uploadedInvoices.id
-    ),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
-  },
-  (table) => [
-    uniqueIndex("outlook_email_ingestions_message_idx").on(table.messageId),
-    index("outlook_email_ingestions_connection_idx").on(table.connectionId),
   ]
 );
 

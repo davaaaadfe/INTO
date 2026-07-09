@@ -13,7 +13,12 @@ export const INVOICE_STATUSES = [
 ] as const;
 
 export type InvoiceStatus = (typeof INVOICE_STATUSES)[number];
-export type InvoiceSource = "manual" | "outlook";
+export type InvoiceSource = "manual_upload";
+export type LocalInvoiceFileStatus =
+  | "available"
+  | "deleted_after_booking"
+  | "deleted_by_cleanup"
+  | "missing";
 export type ValidationSeverity = "error" | "warning";
 export type UserStatus = "invited" | "active" | "disabled";
 export type PermissionAction =
@@ -53,7 +58,8 @@ export type AuditEventType =
   | "invoice_approved"
   | "invoice_booked"
   | "invoice_booking_failed"
-  | "outlook_categorized"
+  | "invoice_file_deleted"
+  | "invoice_file_cleanup"
   | "duplicate_decision"
   | "invoice_reread"
   | "connection_connected"
@@ -405,7 +411,7 @@ export type UploadedInvoice = {
   fileSize: number;
   checksum?: string;
   storageKey: string;
-  outlookMessageId?: string;
+  localFileStatus: LocalInvoiceFileStatus;
   status: InvoiceStatus;
   lastError?: string;
   exactBookingId?: string;
@@ -441,36 +447,6 @@ export type PublicExactConnection = Omit<
   ExactConnection,
   "accessTokenCiphertext" | "refreshTokenCiphertext"
 >;
-
-export type OutlookConnection = {
-  id: string;
-  userId: string;
-  mailboxAddress: string;
-  status: "connected" | "needs_reconnect";
-  accessTokenCiphertext: string;
-  refreshTokenCiphertext: string;
-  expiresAt: string;
-  lastSyncAt?: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type PublicOutlookConnection = Omit<
-  OutlookConnection,
-  "accessTokenCiphertext" | "refreshTokenCiphertext"
->;
-
-export type OutlookIngestionLog = {
-  id: string;
-  connectionId: string;
-  messageId: string;
-  subject: string;
-  sender: string;
-  category: "INTOed" | "INTO Needs Review" | "No Invoice";
-  detectedAttachmentCount: number;
-  processedInvoiceId?: string;
-  createdAt: string;
-};
 
 export type InvoiceArchiveSortField =
   | "invoiceDate"

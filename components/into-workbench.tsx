@@ -111,26 +111,6 @@ type ArchiveFilterState = {
   pageSize: number;
 };
 
-type SetupStatusLevel = "ok" | "warning" | "error";
-
-type SetupCheck = {
-  id: string;
-  label: string;
-  status: SetupStatusLevel;
-  message: string;
-  missingEnv: string[];
-  details: string[];
-};
-
-type SetupStatus = {
-  appUrl: string;
-  deploymentUrl: string;
-  environment: "development" | "production" | "test";
-  isPreviewDeployment: boolean;
-  previewDeploymentMessage?: string;
-  exactCallbackUrl: string;
-  checks: SetupCheck[];
-};
 
 const previewFitModeLabels: Record<PreviewFitMode, string> = {
   auto: "Auto-fit",
@@ -197,27 +177,6 @@ const statusTone: Record<string, string> = {
   "Booking Failed": "border-rose-300 bg-rose-50 text-rose-800",
 };
 
-const setupTone: Record<SetupStatusLevel, string> = {
-  ok: "border-emerald-300 bg-emerald-50 text-emerald-900",
-  warning: "border-amber-300 bg-amber-50 text-amber-900",
-  error: "border-rose-300 bg-rose-50 text-rose-900",
-};
-
-function PreviewDeploymentNotice({ message }: { message?: string }) {
-  if (!message) {
-    return null;
-  }
-
-  return (
-    <div className="mt-3 rounded-md border border-sky-200 bg-sky-50 p-3 text-sm text-sky-900">
-      {message}
-    </div>
-  );
-}
-
-function setupLabel(status: SetupStatusLevel) {
-  return status === "ok" ? "Ready" : status === "warning" ? "Needs attention" : "Needs setup";
-}
 
 const reviewStatuses = new Set<UploadedInvoice["status"]>([
   "Validation Failed",
@@ -899,117 +858,6 @@ function PreviewDocument({
   );
 }
 
-function SetupWizard({
-  setupStatus,
-  onRefresh,
-  isSystemOwner,
-}: {
-  setupStatus: SetupStatus;
-  onRefresh: () => void;
-  isSystemOwner: boolean;
-}) {
-  const hasAttention = setupStatus.checks.some((check) => check.status !== "ok");
-  const firstAttentionCheck = setupStatus.checks.find(
-    (check) => check.status !== "ok"
-  );
-
-  if (!hasAttention) {
-    return (
-      <section className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-emerald-900">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h2 className="text-lg font-semibold">INTO is ready.</h2>
-            <p className="mt-1 text-sm">
-              You can upload invoices, review them, and book them to Exact Online.
-            </p>
-            <PreviewDeploymentNotice
-              message={setupStatus.previewDeploymentMessage}
-            />
-          </div>
-          <ActionButton variant="ghost" onClick={onRefresh}>
-            Refresh status
-          </ActionButton>
-        </div>
-      </section>
-    );
-  }
-
-  if (!isSystemOwner) {
-    return (
-      <section className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-amber-950">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h2 className="text-lg font-semibold">INTO needs system setup</h2>
-            <p className="mt-1 max-w-3xl text-sm">
-              {firstAttentionCheck?.message ??
-                "Some company setup is not complete yet. Ask the system owner to check INTO setup."}
-            </p>
-            <PreviewDeploymentNotice
-              message={setupStatus.previewDeploymentMessage}
-            />
-          </div>
-          <ActionButton variant="ghost" onClick={onRefresh}>
-            Refresh status
-          </ActionButton>
-        </div>
-      </section>
-    );
-  }
-
-  return (
-    <section className="rounded-lg border border-stone-300 bg-white p-4">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <h2 className="text-lg font-semibold">System setup</h2>
-          <p className="mt-1 max-w-3xl text-sm text-stone-600">
-            Company-level connections and safe server settings for INTO.
-          </p>
-          <PreviewDeploymentNotice
-            message={setupStatus.previewDeploymentMessage}
-          />
-        </div>
-        <ActionButton variant="ghost" onClick={onRefresh}>
-          Refresh status
-        </ActionButton>
-      </div>
-
-      <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-        {setupStatus.checks.map((check) => (
-          <div
-            key={check.id}
-            className={`rounded-lg border p-3 text-sm ${setupTone[check.status]}`}
-          >
-            <div className="flex items-center justify-between gap-2">
-              <h3 className="font-semibold">{check.label}</h3>
-              <span className="rounded-md border border-current px-2 py-1 text-xs font-semibold">
-                {setupLabel(check.status)}
-              </span>
-            </div>
-            <p className="mt-2 text-sm">{check.message}</p>
-            {isSystemOwner && check.missingEnv.length ? (
-              <div className="mt-2 rounded-md bg-white/70 p-2 text-xs">
-                <div className="font-semibold">System owner setup</div>
-                <div className="mt-1">
-                  The following server settings are missing:{" "}
-                  <span className="break-words font-semibold">
-                    {check.missingEnv.join(", ")}
-                  </span>
-                  . Add them in Vercel Environment Variables, then redeploy.
-                </div>
-              </div>
-            ) : null}
-            <ul className="mt-2 space-y-1 text-xs">
-              {check.details.map((detail) => (
-                <li key={detail}>{detail}</li>
-              ))}
-            </ul>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
 export function IntoWorkbench() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [state, setState] = useState<ApiState>({
@@ -1042,7 +890,6 @@ export function IntoWorkbench() {
     useState<ArchiveFilterState>(defaultArchiveFilters);
   const [archive, setArchive] = useState<InvoiceArchiveResult | null>(null);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
-  const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
 
   const selectedInvoice = useMemo(
     () =>
@@ -1365,17 +1212,10 @@ export function IntoWorkbench() {
   }
 
   async function refreshAll() {
-    const [
-      invoiceResponse,
-      exactResponse,
-      userResponse,
-      setupResponse,
-    ] =
-      await Promise.all([
+    const [invoiceResponse, exactResponse, userResponse] = await Promise.all([
       fetch("/api/invoices"),
       fetch("/api/exact/status"),
       fetch("/api/users"),
-      fetch("/api/setup/status"),
     ]);
     const invoiceData = (await invoiceResponse.json()) as {
       invoices: UploadedInvoice[];
@@ -1391,9 +1231,6 @@ export function IntoWorkbench() {
       currentUser: IntoUser | null;
       permissions: PermissionAction[];
     };
-    const setupData = setupResponse.ok
-      ? ((await setupResponse.json()) as SetupStatus)
-      : null;
 
     setState({
       users: userData.users,
@@ -1405,7 +1242,6 @@ export function IntoWorkbench() {
       exactMasterDataStale: exactData.masterDataStale,
       exactMasterDataReadOnly: exactData.masterDataReadOnly,
     });
-    setSetupStatus(setupData);
 
     if (!selectedInvoiceId && invoiceData.invoices[0]) {
       setSelectedInvoiceId(invoiceData.invoices[0].id);
@@ -2465,6 +2301,9 @@ export function IntoWorkbench() {
               Bulk upload invoices, review extracted fields, validate every total,
               and book approved purchases into Exact Online.
             </p>
+            <p className="mt-2 text-xs font-semibold text-emerald-700">
+              UI CHANGE PROOF: INTO-FIX-ACTIVE
+            </p>
           </div>
           <div className="flex flex-col gap-3">
             <div className="grid grid-cols-4 gap-2 text-center">
@@ -2502,13 +2341,6 @@ export function IntoWorkbench() {
           </div>
         </header>
 
-        {setupStatus ? (
-          <SetupWizard
-            setupStatus={setupStatus}
-            onRefresh={refreshAll}
-            isSystemOwner={Boolean(state.currentUser?.isSystemOwner)}
-          />
-        ) : null}
 
         <section className="grid gap-4 xl:grid-cols-[1.45fr_0.55fr]">
           <div className="rounded-lg border border-stone-300 bg-white p-4">

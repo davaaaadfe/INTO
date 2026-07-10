@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import {
   deleteStoredInvoiceFile,
   getStoredInvoiceFile,
@@ -17,6 +18,8 @@ async function withEnv(
 ) {
   const keys = [
     "NODE_ENV",
+    "VERCEL",
+    "VERCEL_ENV",
     "STORAGE_MODE",
     "STORAGE_PROVIDER",
     "TEMP_INVOICE_STORAGE_PATH",
@@ -97,4 +100,25 @@ test("does not require S3 settings in production when using local temp storage",
     }
   );
   await rm(storagePath, { recursive: true, force: true });
+});
+test("uses writable tmp storage for relative paths on Vercel", async () => {
+  const storagePath = testStoragePath("vercel-local");
+  let resolvedStoragePath = "";
+
+  await withEnv(
+    {
+      NODE_ENV: "production",
+      VERCEL: "1",
+      VERCEL_ENV: "production",
+      TEMP_INVOICE_STORAGE_PATH: storagePath,
+    },
+    async () => {
+      resolvedStoragePath = temporaryInvoiceStoragePath();
+      assert.equal(resolvedStoragePath.startsWith(tmpdir()), true);
+      assert.equal(resolvedStoragePath.includes("storage"), true);
+      assert.equal(await verifyInvoiceStorageWorks(), true);
+    }
+  );
+
+  await rm(resolvedStoragePath, { recursive: true, force: true });
 });

@@ -11,6 +11,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { createId } from "../utils/id";
 
@@ -50,19 +51,21 @@ export function invoiceStorageProvider(): StorageProvider {
   return "local_temp";
 }
 
+function temporaryInvoiceStorageRoot() {
+  return envValue("VERCEL") || envValue("VERCEL_ENV")
+    ? tmpdir()
+    : /*turbopackIgnore: true*/ process.cwd();
+}
+
 export function temporaryInvoiceStoragePath() {
   const configuredPath = envValue("TEMP_INVOICE_STORAGE_PATH");
   if (!configuredPath) {
-    return path.join(
-      /*turbopackIgnore: true*/ process.cwd(),
-      "storage",
-      "tmp-invoices"
-    );
+    return path.join(temporaryInvoiceStorageRoot(), "storage", "tmp-invoices");
   }
 
   return path.isAbsolute(configuredPath)
     ? configuredPath
-    : path.resolve(/*turbopackIgnore: true*/ process.cwd(), configuredPath);
+    : path.resolve(temporaryInvoiceStorageRoot(), configuredPath);
 }
 
 export function temporaryInvoiceRetentionDays() {

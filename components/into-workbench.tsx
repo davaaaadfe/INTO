@@ -808,7 +808,7 @@ function UploadProgressList({ items }: { items: UploadItem[] }) {
 
 function MissingInvoiceFileNotice() {
   return (
-    <div className="flex min-h-[320px] items-center justify-center rounded-md border border-amber-200 bg-amber-50 p-6 text-center text-sm font-medium text-amber-950">
+    <div className="flex h-full min-h-[360px] items-center justify-center rounded-lg border border-amber-200 bg-amber-50 p-6 text-center text-sm font-medium leading-6 text-amber-950">
       {missingInvoiceFileMessage}
     </div>
   );
@@ -850,12 +850,13 @@ function PreviewDocument({
     ["jpg", "jpeg", "png"].includes(fileExtension(invoice.fileName));
   const isPdf =
     previewType === "application/pdf" || fileExtension(invoice.fileName) === "pdf";
+  const manualPdfScale = fitMode === "manual" ? Math.max(1, Math.sqrt(zoom)) : 1;
   const pdfZoom =
-    fitMode === "width"
-      ? "page-width"
-      : fitMode === "height"
-        ? "page-fit"
-        : Math.round(zoom * 100);
+    fitMode === "height"
+      ? "page-fit"
+      : fitMode === "manual"
+        ? Math.round(manualPdfScale * 100)
+        : "page-width";
   const framedSourceUrl = isPdf
     ? `${sourceUrl}#page=${page}&toolbar=0&navpanes=0&zoom=${pdfZoom}`
     : sourceUrl;
@@ -866,24 +867,22 @@ function PreviewDocument({
   const pdfStyle = {
     transform: `rotate(${rotation}deg)`,
     transformOrigin: "center top",
+    width: fitMode === "manual" ? `${manualPdfScale * 100}%` : undefined,
+    height: fitMode === "manual" ? `${manualPdfScale * 100}%` : undefined,
   };
-  const maxPreviewHeight = fullscreen
-    ? "max-h-[calc(100vh-230px)]"
-    : "max-h-[760px]";
-  const fixedPreviewHeight = fullscreen ? "h-[calc(100vh-230px)]" : "h-[760px]";
   const baseFrame =
     "rounded-md border border-stone-300 bg-white shadow-sm transition-transform";
   const imageSizing: Record<PreviewFitMode, string> = {
-    auto: `max-w-full ${maxPreviewHeight} object-contain`,
+    auto: "h-auto w-full max-w-none object-contain",
     width: "h-auto w-full max-w-none",
-    height: `${maxPreviewHeight} w-auto max-w-none`,
-    manual: "h-auto max-w-none",
+    height: "h-full w-auto max-w-none object-contain",
+    manual: "h-auto w-full max-w-none",
   };
   const pdfSizing: Record<PreviewFitMode, string> = {
-    auto: `${fixedPreviewHeight} w-full max-w-[860px]`,
-    width: `${fixedPreviewHeight} w-full min-w-[780px] max-w-none`,
-    height: `${fixedPreviewHeight} w-[min(100%,760px)]`,
-    manual: `${fixedPreviewHeight} w-[860px] max-w-none`,
+    auto: "h-full min-h-[680px] w-full max-w-none",
+    width: "h-full min-h-[680px] w-full max-w-none",
+    height: "h-full min-h-[680px] w-full max-w-none",
+    manual: "h-full min-h-[680px] min-w-full max-w-none",
   };
 
   if (isImage) {
@@ -999,9 +998,7 @@ export function IntoWorkbench() {
       value: `${vatCode.code} - ${vatCode.description}`,
       label: `${vatCode.code} - ${vatCode.description}`,
     }));
-  const previewCanPan =
-    previewFileStatus === "available" &&
-    (previewFitMode === "manual" || previewZoom > 1);
+  const previewCanPan = previewFileStatus === "available";
   const pageCount = selectedInvoice?.fileName.toLowerCase().endsWith(".pdf") ? 3 : 1;
   const hasUnsavedChanges = Boolean(
     selectedInvoice &&
@@ -3398,16 +3395,20 @@ export function IntoWorkbench() {
                   </ActionButton>
                   <ActionButton
                     variant="ghost"
-                    onClick={() =>
-                      setPreviewRotation((value) => (value + 270) % 360)
-                    }
+                    onClick={() => {
+                      setPreviewRotation((value) => (value + 270) % 360);
+                      setPreviewPan(resetPreviewPan());
+                    }}
                     className="min-h-9 px-3 py-1 text-xs"
                   >
                     Rotate left
                   </ActionButton>
                   <ActionButton
                     variant="ghost"
-                    onClick={() => setPreviewRotation((value) => (value + 90) % 360)}
+                    onClick={() => {
+                      setPreviewRotation((value) => (value + 90) % 360);
+                      setPreviewPan(resetPreviewPan());
+                    }}
                     className="min-h-9 px-3 py-1 text-xs"
                   >
                     Rotate right
@@ -3466,14 +3467,14 @@ export function IntoWorkbench() {
                 </div>
               </div>
               <div
-                className={`relative overflow-auto bg-[#f7f8f5] p-4 sm:p-5 ${
+                className={`relative overflow-hidden bg-[#f7f8f5] p-3 sm:p-4 ${
                   previewFullscreen
-                    ? "flex-1"
-                    : "max-h-[900px] lg:max-h-[calc(100vh-220px)]"
+                    ? "min-h-0 flex-1"
+                    : "h-[min(78vh,980px)] min-h-[680px] lg:h-[calc(100vh-170px)]"
                 }`}
               >
                 <div
-                  className="mx-auto w-fit"
+                  className="flex h-full w-full items-start justify-center will-change-transform"
                   style={{
                     transform: `translate3d(${previewPan.x}px, ${previewPan.y}px, 0)`,
                   }}
@@ -3491,10 +3492,11 @@ export function IntoWorkbench() {
                 {previewCanPan ? (
                   <div
                     aria-label="Drag to move invoice preview"
-                    className={`absolute inset-0 z-10 ${
+                    className={`absolute inset-0 z-10 select-none touch-none ${
                       previewDragging ? "cursor-grabbing" : "cursor-grab"
                     }`}
                     role="presentation"
+                    style={{ touchAction: "none", userSelect: "none" }}
                     onPointerDown={startPreviewPan}
                     onPointerMove={movePreview}
                     onPointerUp={stopPreviewPan}

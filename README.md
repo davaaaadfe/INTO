@@ -53,19 +53,27 @@ INTO keeps the local file so users can preview and retry it.
 
 ### Real Exact Online connection
 
-1. Create or open your Exact Online app registration.
-2. Add this redirect URI:
+INTO uses Exact Online OAuth. It must never ask for or store an Exact username
+or password. The system owner configures one shared Exact OAuth app, then users
+authenticate on Exact Online's official OAuth page.
+
+1. Create or open the Exact Online OAuth app for INTO.
+2. Register the callback URL that matches where INTO is running:
 
 ```text
-http://localhost:3000/api/exact/callback
+Local:  http://localhost:3000/api/exact/callback
+Vercel: https://your-vercel-domain/api/exact/callback
 ```
 
-3. Put the credentials in `.env`:
+3. Put the required values in the right place:
+
+- Local development: `.env` or `.env.local`
+- Vercel: Project Settings > Environment Variables, then redeploy
 
 ```bash
 EXACT_ONLINE_MODE=real
-EXACT_ONLINE_CLIENT_ID=your_exact_client_id
-EXACT_ONLINE_CLIENT_SECRET=your_exact_client_secret
+EXACT_ONLINE_CLIENT_ID=your_exact_oauth_app_client_id
+EXACT_ONLINE_CLIENT_SECRET=your_exact_oauth_app_client_secret
 EXACT_ONLINE_REDIRECT_URI=http://localhost:3000/api/exact/callback
 EXACT_ONLINE_BASE_URL=https://start.exactonline.nl
 OAUTH_TOKEN_ENCRYPTION_KEY=use-a-long-random-secret
@@ -73,12 +81,18 @@ OAUTH_STATE_SECRET=use-another-long-random-secret
 EXACT_ONLINE_ENABLE_REAL_BOOKING=false
 ```
 
-4. Restart the dev server, sign in as the system owner, and click `Connect Company Exact`.
+`EXACT_ONLINE_CLIENT_ID` must be the Exact OAuth app Client ID, not a user email
+address. `EXACT_ONLINE_CLIENT_SECRET` must be the app secret from Exact.
+
+4. Restart the dev server or redeploy Vercel, sign in as the system owner, and
+   click `Connect Company Exact`.
+5. After the connection succeeds, click `Sync Exact Data Now` to load suppliers,
+   payment conditions, journals, G/L accounts, cost centers, cost units, VAT
+   codes, and available historical purchase data from Exact.
 
 In real mode, INTO exchanges the OAuth code, encrypts the access and refresh
-tokens for the company Exact account, discovers the current division, and syncs suppliers, payment
-conditions, journals, G/L accounts, cost centers, cost units, VAT codes, and
-available historical purchase data from Exact. Exact remains the source of
+tokens for the company Exact account, refreshes tokens when needed, discovers
+the current division, and syncs Exact master data. Exact remains the source of
 truth.
 
 INTO is read-only for Exact master data. It may fetch and cache suppliers,

@@ -2417,6 +2417,40 @@ export function IntoWorkbench() {
                       ? `Company connection active for division ${state.exactConnection.divisionCode}`
                       : "No company Exact account connected"}
                   </p>
+                  <div className="mt-3 rounded-md border border-sky-200 bg-sky-50 p-3 text-xs text-sky-950">
+                    <div className="font-semibold text-sky-950">
+                      Exact OAuth setup for system owners
+                    </div>
+                    <ul className="mt-2 list-disc space-y-1 pl-4">
+                      <li>
+                        Local development: put Exact OAuth details in `.env` or
+                        `.env.local`.
+                      </li>
+                      <li>
+                        Vercel: put Exact OAuth details in Project Settings &gt;
+                        Environment Variables, then redeploy.
+                      </li>
+                      <li>
+                        Required variables: `EXACT_ONLINE_CLIENT_ID`,
+                        `EXACT_ONLINE_CLIENT_SECRET`, `EXACT_ONLINE_REDIRECT_URI`,
+                        and `OAUTH_TOKEN_ENCRYPTION_KEY`.
+                      </li>
+                      <li>
+                        `EXACT_ONLINE_CLIENT_ID` must be the Exact OAuth app
+                        Client ID, not an email address.
+                      </li>
+                      <li>
+                        INTO never asks for or stores an Exact username or
+                        password. Exact login happens on Exact Online&apos;s OAuth
+                        page, then INTO stores encrypted OAuth tokens.
+                      </li>
+                      <li>
+                        After connecting Exact, run Sync Exact Data Now to load
+                        suppliers, journals, G/L accounts, VAT codes, cost
+                        centers, cost units, and payment conditions.
+                      </li>
+                    </ul>
+                  </div>
                   {state.exactMasterDataReadOnly ? (
                     <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-xs font-semibold text-emerald-900">
                       Exact master data is read-only in INTO. Suppliers, journals, G/L

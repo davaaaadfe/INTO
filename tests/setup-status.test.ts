@@ -126,6 +126,7 @@ test("setup status reports friendly readiness without exposing secret values", a
       assert.doesNotMatch(serialized, /state-secret-value/);
       assert.doesNotMatch(serialized, /accessTokenCiphertext/);
       assert.doesNotMatch(serialized, /refreshTokenCiphertext/);
+      assert.match(serialized, /Client ID, not an email address/);
       assert.doesNotMatch(serialized, /Outlook|Microsoft|mailbox|MICROSOFT_|\/api\/outlook/);
       resetSharedConnections();
     }
@@ -171,6 +172,7 @@ test("setup status does not mark shared integrations ready before they are conne
     assert.deepEqual(exact?.missingEnv, [
       "EXACT_ONLINE_CLIENT_ID",
       "EXACT_ONLINE_CLIENT_SECRET",
+      "EXACT_ONLINE_REDIRECT_URI",
       "OAUTH_TOKEN_ENCRYPTION_KEY",
       "OAUTH_STATE_SECRET",
     ]);

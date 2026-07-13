@@ -113,11 +113,31 @@ function missingOAuthSecurityEnv() {
   return missing;
 }
 
+function exactClientIdLooksLikeEmail() {
+  const clientId = process.env.EXACT_ONLINE_CLIENT_ID?.trim() ?? "";
+  return Boolean(clientId && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clientId));
+}
+
+function exactSetupGuidance(details: string[] = []) {
+  return [
+    ...details,
+    "Local development: put Exact OAuth details in .env or .env.local.",
+    "Vercel production: put Exact OAuth details in Vercel Project Settings > Environment Variables, then redeploy.",
+    "Required Exact settings: EXACT_ONLINE_CLIENT_ID, EXACT_ONLINE_CLIENT_SECRET, EXACT_ONLINE_REDIRECT_URI, and OAUTH_TOKEN_ENCRYPTION_KEY.",
+    "EXACT_ONLINE_CLIENT_ID must be the Exact OAuth app Client ID, not an email address.",
+    "INTO never asks for or stores Exact usernames or passwords; users authenticate on Exact Online's OAuth page.",
+    ...(exactClientIdLooksLikeEmail()
+      ? ["The configured EXACT_ONLINE_CLIENT_ID looks like an email address. Replace it with the Client ID from the Exact OAuth app."]
+      : []),
+  ];
+}
+
 function missingExactServerSettings() {
   return [
     ...missingRequiredEnv([
       "EXACT_ONLINE_CLIENT_ID",
       "EXACT_ONLINE_CLIENT_SECRET",
+      "EXACT_ONLINE_REDIRECT_URI",
     ]),
     ...missingOAuthSecurityEnv(),
   ];
@@ -146,7 +166,7 @@ async function exactConnectionReadiness(): Promise<ExactReadiness> {
     return {
       ...needsSetup(
         "INTO is not connected to Exact Online yet. Ask the system owner to connect the shared Exact Online account.",
-        ["Invoice booking will be available after the company Exact account is connected."],
+        exactSetupGuidance(["Invoice booking will be available after the company Exact account is connected."]),
         missingExactServerSettings()
       ),
       connection: null,
@@ -161,7 +181,7 @@ async function exactConnectionReadiness(): Promise<ExactReadiness> {
     return {
       ...needsSetup(
         "INTO is not connected to Exact Online yet. Ask the system owner to reconnect the shared Exact Online account.",
-        ["The saved company Exact connection cannot currently be used."],
+        exactSetupGuidance(["The saved company Exact connection cannot currently be used."]),
         missingExactServerSettings()
       ),
       connection,
@@ -175,7 +195,7 @@ async function exactConnectionReadiness(): Promise<ExactReadiness> {
       return {
         ...needsSetup(
           "INTO is not connected to Exact Online yet. Ask the system owner to reconnect the shared Exact Online account.",
-          ["INTO could not refresh the company Exact connection."],
+          exactSetupGuidance(["INTO could not refresh the company Exact connection."]),
           missingExactServerSettings()
         ),
         connection: refreshedConnection,
@@ -191,7 +211,7 @@ async function exactConnectionReadiness(): Promise<ExactReadiness> {
       return {
         ...needsSetup(
           "INTO is connected to Exact Online, but company access could not be confirmed. Ask the system owner to check the shared Exact Online account.",
-          ["INTO could not confirm the Exact company division."],
+          exactSetupGuidance(["INTO could not confirm the Exact company division."]),
           missingExactServerSettings()
         ),
         connection: refreshedConnection,
@@ -201,7 +221,7 @@ async function exactConnectionReadiness(): Promise<ExactReadiness> {
     return {
       status: "ok",
       message: "Shared Exact Online connection is ready.",
-      details: ["The company Exact account is connected and reachable."],
+      details: ["The company Exact account is connected and reachable.", "Exact master data can be synced from the shared company Exact connection."],
       missingEnv: [],
       connection: refreshedConnection,
     };
@@ -209,7 +229,7 @@ async function exactConnectionReadiness(): Promise<ExactReadiness> {
     return {
       ...needsSetup(
         "INTO is not connected to Exact Online yet. Ask the system owner to reconnect the shared Exact Online account.",
-        ["INTO could not verify access to the company Exact account."],
+        exactSetupGuidance(["INTO could not verify access to the company Exact account."]),
         missingExactServerSettings()
       ),
       connection,

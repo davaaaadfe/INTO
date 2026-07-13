@@ -133,6 +133,106 @@ function invoiceNumberFromFile(fileName: string) {
   return `INV-${baseName.slice(0, 14).toUpperCase() || "UPLOAD"}`;
 }
 
+export type InvoiceReferenceDetection = {
+  value: string;
+  confidence: number;
+};
+
+const invoiceReferenceLabelPattern = [
+  "invoice\\s*(?:number|no\\.?|#)",
+  "reference",
+  "ref\\.?",
+  "document\\s*number",
+  "bill\\s*number",
+  "factuurnummer",
+  "factuur\\s*nr\\.?",
+  "factuurnr",
+  "referentie",
+  "kenmerk",
+  "rechnungsnummer",
+  "rechnung\\s*nr\\.?",
+  "belegnummer",
+  "referenz",
+  "numero\\s*de\\s*facture",
+  "n\\s*facture",
+  "reference",
+  "numero\\s*de\\s*factura",
+  "n\\s*factura",
+  "referencia",
+  "numero\\s*fattura",
+  "n\\s*fattura",
+  "riferimento",
+].join("|");
+
+const invoiceReferenceValuePattern =
+  "([a-z]{1,8}[-_/ ]?\\d[a-z0-9._/-]{1,24}|\\d{4}[-_/]\\d{2,8}|\\d{5,})";
+
+function normalizeInvoiceReferenceText(input: string) {
+  return input
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[°º]/g, " ")
+    .toLowerCase();
+}
+
+function cleanInvoiceReferenceValue(value: string) {
+  return value
+    .trim()
+    .replace(/^[#:\-.\s]+/, "")
+    .replace(/[.,;:\s]+$/, "")
+    .replace(/\s+/g, "-")
+    .toUpperCase();
+}
+
+function looksLikeForbiddenReference(value: string, context = "") {
+  const normalizedValue = value.replace(/\s+/g, "").toUpperCase();
+  const normalizedContext = normalizeInvoiceReferenceText(context);
+
+  if (/^[A-Z]{2}\d{2}[A-Z0-9]{10,30}$/.test(normalizedValue)) {
+    return true;
+  }
+
+  if (/^(NL|DE|FR|ES|IT|BE|IE|KR|US)\d{6,}[A-Z0-9]*$/.test(normalizedValue)) {
+    return true;
+  }
+
+  return /\b(vat|btw|iban|supplier|customer|debtor|creditor|order|po)\b/.test(
+    normalizedContext
+  );
+}
+
+export function detectInvoiceReference(
+  input: string
+): InvoiceReferenceDetection | null {
+  const normalized = normalizeInvoiceReferenceText(input);
+  const labelledReference = new RegExp(
+    `(?:${invoiceReferenceLabelPattern})\\s*(?:nr\\.?|no\\.?)?\\s*[:#.-]?\\s*${invoiceReferenceValuePattern}`,
+    "i"
+  ).exec(normalized);
+
+  if (labelledReference?.[1]) {
+    const value = cleanInvoiceReferenceValue(labelledReference[1]);
+    if (!looksLikeForbiddenReference(value)) {
+      return { value, confidence: 0.94 };
+    }
+  }
+
+  const generalReference = /\b(?:inv|fac|rf)[-_/ ]?\d[a-z0-9._/-]{2,24}\b|\b20\d{2}[-_/]\d{3,8}\b/i.exec(
+    normalized
+  );
+  if (generalReference?.[0]) {
+    const start = Math.max(0, generalReference.index - 24);
+    const end = Math.min(normalized.length, generalReference.index + generalReference[0].length + 24);
+    const context = normalized.slice(start, end);
+    const value = cleanInvoiceReferenceValue(generalReference[0]);
+    if (!looksLikeForbiddenReference(value, context)) {
+      return { value, confidence: 0.78 };
+    }
+  }
+
+  return null;
+}
+
 function addDays(date: Date, days: number) {
   const next = new Date(date);
   next.setUTCDate(next.getUTCDate() + days);
@@ -235,6 +335,9 @@ export async function extractInvoiceData(
   const beneficiary = /david|kwon|flight|hotel|booking/i.test(file.name)
     ? "David Kwon"
     : "";
+  const detectedReference = detectInvoiceReference(file.name);
+  const invoiceNumber = detectedReference?.value ?? invoiceNumberFromFile(file.name);
+  const referenceCode = invalidByName ? "" : invoiceNumber;
 
   return {
     supplierName: profile.name,
@@ -242,10 +345,9 @@ export async function extractInvoiceData(
     supplierChamberOfCommerceNumber: profile.chamberOfCommerceNumber,
     supplierAddress: profile.address,
     supplierCountry: profile.country,
-    invoiceNumber: invoiceNumberFromFile(file.name),
-    referenceCode: /reference/i.test(file.name)
-      ? `REF-${String(seed).slice(0, 5)}`
-      : "",
+    invoiceNumber,
+    referenceCode,
+    referenceCodeConfidence: invalidByName ? 0 : (detectedReference?.confidence ?? 0.82),
     invoiceDate: isoDate(invoiceDate),
     dueDate: invalidByName ? "" : isoDate(addDays(invoiceDate, 30)),
     paymentTerms: paymentMismatch ? "immediately" : profile.paymentTerms,

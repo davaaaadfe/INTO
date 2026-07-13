@@ -5,6 +5,7 @@ import {
   DragEvent,
   type PointerEvent as ReactPointerEvent,
   ReactNode,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -27,6 +28,7 @@ import {
   getRequiredBookingDataIssues,
 } from "../lib/services/required-booking-data";
 import {
+  clampPreviewPan,
   movePreviewPan,
   resetPreviewPan,
   type PreviewPan,
@@ -135,6 +137,7 @@ function invoiceFileCanBeRequested(invoice: UploadedInvoice) {
 const minPreviewZoom = 0.7;
 const maxPreviewZoom = 3;
 const previewZoomStep = 0.15;
+const defaultPreviewZoom = 1 + previewZoomStep;
 
 const previewFitModeLabels: Record<PreviewFitMode, string> = {
   auto: "Auto-fit",
@@ -821,7 +824,6 @@ function PreviewDocument({
   rotation,
   page,
   fitMode,
-  fullscreen,
 }: {
   invoice: UploadedInvoice;
   fileStatus: PreviewFileStatus;
@@ -829,7 +831,6 @@ function PreviewDocument({
   rotation: number;
   page: number;
   fitMode: PreviewFitMode;
-  fullscreen: boolean;
 }) {
   if (fileStatus === "checking") {
     return (
@@ -850,25 +851,28 @@ function PreviewDocument({
     ["jpg", "jpeg", "png"].includes(fileExtension(invoice.fileName));
   const isPdf =
     previewType === "application/pdf" || fileExtension(invoice.fileName) === "pdf";
-  const manualPdfScale = fitMode === "manual" ? Math.max(1, Math.sqrt(zoom)) : 1;
+  const usesPreviewScale = fitMode === "manual" || fitMode === "auto";
+  const pdfFrameScale = usesPreviewScale ? Math.max(1, Math.sqrt(zoom)) : 1;
   const pdfZoom =
     fitMode === "height"
       ? "page-fit"
-      : fitMode === "manual"
-        ? Math.round(manualPdfScale * 100)
+      : usesPreviewScale
+        ? Math.round(pdfFrameScale * 100)
         : "page-width";
   const framedSourceUrl = isPdf
     ? `${sourceUrl}#page=${page}&toolbar=0&navpanes=0&zoom=${pdfZoom}`
     : sourceUrl;
   const imageStyle = {
-    transform: `${fitMode === "manual" ? `scale(${zoom}) ` : ""}rotate(${rotation}deg)`,
+    transform: `rotate(${rotation}deg)`,
     transformOrigin: "center top",
+    width: usesPreviewScale ? `${Math.max(1, zoom) * 100}%` : undefined,
+    maxWidth: usesPreviewScale ? "none" : undefined,
   };
   const pdfStyle = {
     transform: `rotate(${rotation}deg)`,
     transformOrigin: "center top",
-    width: fitMode === "manual" ? `${manualPdfScale * 100}%` : undefined,
-    height: fitMode === "manual" ? `${manualPdfScale * 100}%` : undefined,
+    width: usesPreviewScale ? `${pdfFrameScale * 100}%` : undefined,
+    height: usesPreviewScale ? `${pdfFrameScale * 100}%` : undefined,
   };
   const baseFrame =
     "rounded-md border border-stone-300 bg-white shadow-sm transition-transform";
@@ -910,6 +914,8 @@ function PreviewDocument({
 
 export function IntoWorkbench() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const previewViewportRef = useRef<HTMLDivElement | null>(null);
+  const previewContentRef = useRef<HTMLDivElement | null>(null);
   const [state, setState] = useState<ApiState>({
     users: [],
     currentUser: null,
@@ -930,7 +936,7 @@ export function IntoWorkbench() {
   const [isDragging, setIsDragging] = useState(false);
   const [uploadItems, setUploadItems] = useState<UploadItem[]>([]);
   const [duplicatePrompts, setDuplicatePrompts] = useState<DuplicateUploadPrompt[]>([]);
-  const [previewZoom, setPreviewZoom] = useState(1);
+  const [previewZoom, setPreviewZoom] = useState(defaultPreviewZoom);
   const [previewRotation, setPreviewRotation] = useState(0);
   const [previewPage, setPreviewPage] = useState(1);
   const [previewFitMode, setPreviewFitMode] = useState<PreviewFitMode>("auto");
@@ -1269,7 +1275,7 @@ export function IntoWorkbench() {
     setPreviewFitMode(fitMode);
     setPreviewPan(resetPreviewPan());
     if (fitMode !== "manual") {
-      setPreviewZoom(1);
+      setPreviewZoom(defaultPreviewZoom);
     }
   }
 
@@ -1283,11 +1289,26 @@ export function IntoWorkbench() {
 
   function resetPreviewView() {
     setPreviewPage(1);
-    setPreviewZoom(1);
+    setPreviewZoom(defaultPreviewZoom);
     setPreviewRotation(0);
     setPreviewFitMode("auto");
     setPreviewPan(resetPreviewPan());
   }
+
+  const clampPreviewPanToBounds = useCallback((pan: PreviewPan) => {
+    const viewport = previewViewportRef.current;
+    const content = previewContentRef.current;
+    if (!viewport || !content) {
+      return pan;
+    }
+
+    return clampPreviewPan(pan, {
+      viewportWidth: viewport.clientWidth,
+      viewportHeight: viewport.clientHeight,
+      contentWidth: Math.max(content.scrollWidth, content.offsetWidth),
+      contentHeight: Math.max(content.scrollHeight, content.offsetHeight),
+    });
+  }, []);
 
   function startPreviewPan(event: ReactPointerEvent<HTMLDivElement>) {
     if (!previewCanPan) {
@@ -1306,7 +1327,9 @@ export function IntoWorkbench() {
 
     event.preventDefault();
     setPreviewPan((current) =>
-      movePreviewPan(current, { x: event.movementX, y: event.movementY })
+      clampPreviewPanToBounds(
+        movePreviewPan(current, { x: event.movementX, y: event.movementY })
+      )
     );
   }
 
@@ -1477,7 +1500,7 @@ export function IntoWorkbench() {
       const timeoutId = window.setTimeout(() => {
         setDraft(nextDraft);
         setPreviewPage(1);
-        setPreviewZoom(1);
+        setPreviewZoom(defaultPreviewZoom);
         setPreviewRotation(0);
         setPreviewFitMode("auto");
         setPreviewPan(resetPreviewPan());
@@ -1512,6 +1535,22 @@ export function IntoWorkbench() {
       cancelled = true;
     };
   }, [selectedInvoice]);
+
+  useEffect(() => {
+    const frameId = window.requestAnimationFrame(() => {
+      setPreviewPan((current) => clampPreviewPanToBounds(current));
+    });
+
+    return () => window.cancelAnimationFrame(frameId);
+  }, [
+    selectedInvoiceId,
+    previewFileStatus,
+    previewFitMode,
+    previewZoom,
+    previewRotation,
+    previewFullscreen,
+    clampPreviewPanToBounds,
+  ]);
 
   useEffect(() => {
     if (!selectedInvoice?.id) {
@@ -3467,6 +3506,7 @@ export function IntoWorkbench() {
                 </div>
               </div>
               <div
+                ref={previewViewportRef}
                 className={`relative overflow-hidden bg-[#f7f8f5] p-3 sm:p-4 ${
                   previewFullscreen
                     ? "min-h-0 flex-1"
@@ -3474,6 +3514,7 @@ export function IntoWorkbench() {
                 }`}
               >
                 <div
+                  ref={previewContentRef}
                   className="flex h-full w-full items-start justify-center will-change-transform"
                   style={{
                     transform: `translate3d(${previewPan.x}px, ${previewPan.y}px, 0)`,
@@ -3486,7 +3527,6 @@ export function IntoWorkbench() {
                     rotation={previewRotation}
                     page={previewPage}
                     fitMode={previewFitMode}
-                    fullscreen={previewFullscreen}
                   />
                 </div>
                 {previewCanPan ? (

@@ -101,6 +101,7 @@ export type ExtractedInvoiceData = {
   supplierCountry: string;
   invoiceNumber: string;
   referenceCode: string;
+  referenceCodeConfidence?: number;
   invoiceDate: string;
   dueDate: string;
   paymentTerms: string;
@@ -497,6 +498,7 @@ export type DuplicateCandidate = {
   id: string;
   supplierName: string;
   invoiceNumber: string;
+  referenceCode?: string;
 };
 
 export type SupplierLearningDecision = {

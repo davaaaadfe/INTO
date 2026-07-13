@@ -61,11 +61,12 @@ function validateRequiredString(
   data: ExtractedInvoiceData,
   field: keyof ExtractedInvoiceData,
   label: string,
-  errors: ValidationError[]
+  errors: ValidationError[],
+  message = `${label} is required.`
 ) {
   const value = data[field];
   if (typeof value !== "string" || !value.trim()) {
-    errors.push(error(field, `${label} is required.`));
+    errors.push(error(field, message));
   }
 }
 
@@ -100,6 +101,13 @@ export function validateInvoiceData(
 
   validateRequiredString(data, "supplierName", "Supplier name", errors);
   validateRequiredString(data, "invoiceDate", "Invoice date", errors);
+  validateRequiredString(
+    data,
+    "referenceCode",
+    "Your ref.",
+    errors,
+    "Your ref. is required before booking to Exact Online."
+  );
 
   if (data.invoiceDate && !isValidIsoDate(data.invoiceDate)) {
     errors.push(
@@ -113,6 +121,21 @@ export function validateInvoiceData(
 
   if (data.currency && !currencyPattern.test(data.currency.trim())) {
     errors.push(error("currency", "Currency must be a three-letter ISO code."));
+  }
+
+  if (
+    data.referenceCode &&
+    typeof data.referenceCodeConfidence === "number" &&
+    data.referenceCodeConfidence > 0 &&
+    data.referenceCodeConfidence < 0.8
+  ) {
+    errors.push(
+      error(
+        "referenceCode",
+        "Invoice reference could not be confidently detected. Please confirm Your ref.",
+        "warning"
+      )
+    );
   }
 
   const netAmount = validateAmount(data, "netAmount", "Net amount", errors);
@@ -134,20 +157,21 @@ export function validateInvoiceData(
   }
 
   const supplier = normalizeText(data.supplierName);
-  const invoiceNumber = normalizeText(data.invoiceNumber);
-  if (supplier && invoiceNumber) {
+  const invoiceReference = normalizeText(data.referenceCode || data.invoiceNumber);
+  if (supplier && invoiceReference) {
     const duplicate = duplicateCandidates.find(
       (candidate) =>
         candidate.id !== invoiceId &&
         normalizeText(candidate.supplierName) === supplier &&
-        normalizeText(candidate.invoiceNumber) === invoiceNumber
+        normalizeText(candidate.referenceCode || candidate.invoiceNumber) ===
+          invoiceReference
     );
 
     if (duplicate) {
       errors.push(
         error(
-          "duplicate",
-          "Duplicate invoice number for this supplier was found in the current workspace."
+          "referenceCode",
+          "This invoice reference already exists for this supplier. Duplicate invoices cannot be booked."
         )
       );
     }

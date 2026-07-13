@@ -20,6 +20,7 @@ const requiredLabels: Array<{
     data: ExtractedInvoiceData,
     booking: PurchaseJournalBooking | null | undefined
   ) => boolean;
+  message?: string;
 }> = [
   {
     field: "supplierName",
@@ -35,6 +36,7 @@ const requiredLabels: Array<{
     field: "referenceCode",
     label: "Your ref",
     isFilled: (data) => hasText(data.referenceCode),
+    message: "Your ref. is required before booking to Exact Online.",
   },
   {
     field: "paymentTerms",
@@ -106,7 +108,8 @@ export function getRequiredBookingDataIssues(
     .map((item) => ({
       field: item.field,
       label: item.label,
-      message: `${item.label} is required before booking to Exact Online.`,
+      message:
+        item.message ?? `${item.label} is required before booking to Exact Online.`,
     }));
 }
 

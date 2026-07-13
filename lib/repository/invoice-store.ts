@@ -483,6 +483,7 @@ export function duplicateCandidates(): DuplicateCandidate[] {
     id: invoice.id,
     supplierName: invoice.extractedData.supplierName,
     invoiceNumber: invoice.extractedData.invoiceNumber,
+    referenceCode: invoice.extractedData.referenceCode,
   }));
 }
 
@@ -773,6 +774,7 @@ function recomputeInvoiceInStore(store: IntoStore, invoiceId: string) {
       id: candidate.id,
       supplierName: candidate.extractedData.supplierName,
       invoiceNumber: candidate.extractedData.invoiceNumber,
+      referenceCode: candidate.extractedData.referenceCode,
     }))
   );
   const purchaseJournal = generatePurchaseJournalBooking(

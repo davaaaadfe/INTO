@@ -3,6 +3,7 @@
 import {
   ChangeEvent,
   DragEvent,
+  type PointerEvent as ReactPointerEvent,
   ReactNode,
   useEffect,
   useMemo,
@@ -25,6 +26,11 @@ import {
   REQUIRED_BOOKING_DISABLED_REASON,
   getRequiredBookingDataIssues,
 } from "../lib/services/required-booking-data";
+import {
+  movePreviewPan,
+  resetPreviewPan,
+  type PreviewPan,
+} from "../lib/services/preview-pan";
 
 type ApiState = {
   users: IntoUser[];
@@ -58,6 +64,8 @@ type UploadItem = {
 
 type ButtonFeedback = "success" | "error";
 type PreviewFitMode = "auto" | "width" | "height" | "manual";
+type PreviewFileStatus = "checking" | "available" | "missing";
+type ResolvedPreviewFileStatus = Exclude<PreviewFileStatus, "checking">;
 type ActiveView = "queue" | "archive";
 type FieldTone = "neutral" | "warning" | "error";
 
@@ -111,6 +119,22 @@ type ArchiveFilterState = {
   pageSize: number;
 };
 
+
+const missingInvoiceFileMessage =
+  "Original invoice file could not be found. Please re-upload or re-read this invoice.";
+
+function invoiceFileCanBeRequested(invoice: UploadedInvoice) {
+  return Boolean(
+    invoice.storageKey &&
+      invoice.localFileStatus !== "deleted_after_booking" &&
+      invoice.localFileStatus !== "deleted_by_cleanup" &&
+      invoice.localFileStatus !== "missing"
+  );
+}
+
+const minPreviewZoom = 0.7;
+const maxPreviewZoom = 3;
+const previewZoomStep = 0.15;
 
 const previewFitModeLabels: Record<PreviewFitMode, string> = {
   auto: "Auto-fit",
@@ -365,7 +389,7 @@ function ActionButton({
     ? "loading"
     : feedback ?? (disabled ? "disabled" : "enabled");
   const base =
-    "inline-flex min-h-10 items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-semibold shadow-sm transition disabled:cursor-not-allowed disabled:opacity-70";
+    "inline-flex min-h-11 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-center text-sm font-semibold leading-snug shadow-sm transition disabled:cursor-not-allowed disabled:opacity-90";
   const pointer = blocked ? "cursor-not-allowed" : "cursor-pointer";
   const variants: Record<string, string> = {
     primary: "bg-[#12674f] text-white hover:bg-[#0d503d]",
@@ -377,7 +401,7 @@ function ActionButton({
   };
   const stateClasses: Record<string, string> = {
     enabled: variants[variant],
-    disabled: "border border-stone-300 bg-stone-100 text-stone-400",
+    disabled: "border border-stone-300 bg-stone-100 text-stone-600",
     loading: "bg-stone-700 text-white",
     success: "border border-emerald-500 bg-emerald-100 text-emerald-900",
     error: "border border-rose-400 bg-rose-50 text-rose-800",
@@ -415,7 +439,7 @@ function ReviewActionBar({ actions }: { actions: ReviewActionDefinition[] }) {
 
   return (
     <div className="mt-4 rounded-xl border border-stone-200 bg-white p-3 shadow-sm">
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-5">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 2xl:grid-cols-3">
         {actions.map((action) => (
           <ActionButton
             key={action.key}
@@ -425,7 +449,7 @@ function ReviewActionBar({ actions }: { actions: ReviewActionDefinition[] }) {
             feedback={action.feedback}
             disabled={action.disabled}
             disabledReason={action.disabledReason}
-            className="w-full whitespace-nowrap"
+            className="w-full min-w-0 whitespace-normal break-words px-3"
           >
             {action.label}
           </ActionButton>
@@ -488,9 +512,9 @@ function ReviewSection({
   children: ReactNode;
 }) {
   return (
-    <section className="rounded-xl border border-stone-200 bg-white p-4 shadow-sm">
-      <h3 className="text-base font-semibold text-stone-950">{title}</h3>
-      <div className="mt-4 grid gap-4">{children}</div>
+    <section className="rounded-xl border border-stone-200 bg-white p-3 shadow-sm">
+      <h3 className="text-sm font-semibold text-stone-950">{title}</h3>
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">{children}</div>
     </section>
   );
 }
@@ -524,9 +548,9 @@ function ReviewField({
           : "border-stone-300";
 
   return (
-    <label className="flex flex-col gap-2 text-sm">
+    <label className="flex flex-col gap-1.5 text-sm">
       <div className="flex items-center justify-between gap-2">
-        <span className="font-medium text-stone-700">
+        <span className="text-xs font-medium text-stone-700">
           {label}
           {required ? (
             <>
@@ -548,15 +572,15 @@ function ReviewField({
       </div>
       <ValidationMessage issue={issue} />
       {helper && !issue?.message ? (
-        <p className="text-xs leading-5 text-stone-500">{helper}</p>
+        <p className="text-[11px] leading-4 text-stone-500">{helper}</p>
       ) : null}
     </label>
   );
 }
 
 function inputBaseClass(emphasized = false) {
-  return `w-full rounded-lg border-0 bg-transparent px-3 py-2.5 outline-none disabled:cursor-not-allowed disabled:bg-stone-50 disabled:text-stone-500 ${
-    emphasized ? "text-lg font-semibold text-emerald-950" : "text-stone-900"
+  return `w-full rounded-lg border-0 bg-transparent px-2.5 py-2 text-sm outline-none disabled:cursor-not-allowed disabled:bg-stone-50 disabled:text-stone-500 ${
+    emphasized ? "text-base font-semibold text-emerald-950" : "text-stone-900"
   }`;
 }
 
@@ -725,12 +749,12 @@ function CollapsibleSection({
   return (
     <details
       open={open || undefined}
-      className="rounded-xl border border-stone-200 bg-white/80 p-4 text-stone-700 shadow-sm"
+      className="rounded-xl border border-stone-200 bg-white/80 p-3 text-stone-700 shadow-sm"
     >
       <summary className="cursor-pointer text-sm font-semibold text-stone-700">
         {title}
       </summary>
-      <div className="mt-4 grid gap-4 sm:grid-cols-2">{children}</div>
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">{children}</div>
     </details>
   );
 }
@@ -782,8 +806,17 @@ function UploadProgressList({ items }: { items: UploadItem[] }) {
   );
 }
 
+function MissingInvoiceFileNotice() {
+  return (
+    <div className="flex min-h-[320px] items-center justify-center rounded-md border border-amber-200 bg-amber-50 p-6 text-center text-sm font-medium text-amber-950">
+      {missingInvoiceFileMessage}
+    </div>
+  );
+}
+
 function PreviewDocument({
   invoice,
+  fileStatus,
   zoom,
   rotation,
   page,
@@ -791,12 +824,25 @@ function PreviewDocument({
   fullscreen,
 }: {
   invoice: UploadedInvoice;
+  fileStatus: PreviewFileStatus;
   zoom: number;
   rotation: number;
   page: number;
   fitMode: PreviewFitMode;
   fullscreen: boolean;
 }) {
+  if (fileStatus === "checking") {
+    return (
+      <div className="flex min-h-[320px] items-center justify-center rounded-md border border-stone-200 bg-white p-6 text-sm text-stone-500">
+        Checking original invoice file...
+      </div>
+    );
+  }
+
+  if (fileStatus === "missing") {
+    return <MissingInvoiceFileNotice />;
+  }
+
   const sourceUrl = `/api/invoices/${invoice.id}/file`;
   const previewType = invoice.fileType;
   const isImage =
@@ -809,12 +855,16 @@ function PreviewDocument({
       ? "page-width"
       : fitMode === "height"
         ? "page-fit"
-        : "page-fit";
+        : Math.round(zoom * 100);
   const framedSourceUrl = isPdf
     ? `${sourceUrl}#page=${page}&toolbar=0&navpanes=0&zoom=${pdfZoom}`
     : sourceUrl;
-  const style = {
-    transform: `scale(${zoom}) rotate(${rotation}deg)`,
+  const imageStyle = {
+    transform: `${fitMode === "manual" ? `scale(${zoom}) ` : ""}rotate(${rotation}deg)`,
+    transformOrigin: "center top",
+  };
+  const pdfStyle = {
+    transform: `rotate(${rotation}deg)`,
     transformOrigin: "center top",
   };
   const maxPreviewHeight = fullscreen
@@ -842,18 +892,19 @@ function PreviewDocument({
         src={sourceUrl}
         alt={invoice.fileName}
         className={`mx-auto ${baseFrame} ${imageSizing[fitMode]}`}
-        style={style}
+        decoding="async"
+        style={imageStyle}
       />
     );
   }
 
   return (
     <iframe
-      key={`${invoice.id}-${page}`}
+      key={`${invoice.id}-${page}-${fitMode}-${Math.round(zoom * 100)}`}
       src={framedSourceUrl}
       title={`Original invoice source: ${invoice.fileName}`}
       className={`mx-auto ${baseFrame} ${pdfSizing[fitMode]}`}
-      style={style}
+      style={pdfStyle}
     />
   );
 }
@@ -885,6 +936,12 @@ export function IntoWorkbench() {
   const [previewPage, setPreviewPage] = useState(1);
   const [previewFitMode, setPreviewFitMode] = useState<PreviewFitMode>("auto");
   const [previewFullscreen, setPreviewFullscreen] = useState(false);
+  const [previewPan, setPreviewPan] = useState<PreviewPan>(() => resetPreviewPan());
+  const [previewDragging, setPreviewDragging] = useState(false);
+  const [previewFileProbe, setPreviewFileProbe] = useState<{
+    invoiceId: string;
+    status: ResolvedPreviewFileStatus;
+  } | null>(null);
   const [activeView, setActiveView] = useState<ActiveView>("queue");
   const [archiveFilters, setArchiveFilters] =
     useState<ArchiveFilterState>(defaultArchiveFilters);
@@ -898,6 +955,17 @@ export function IntoWorkbench() {
       null,
     [selectedInvoiceId, state.invoices]
   );
+  const previewFileStatus = useMemo<PreviewFileStatus>(() => {
+    if (!selectedInvoice || !invoiceFileCanBeRequested(selectedInvoice)) {
+      return "missing";
+    }
+
+    if (previewFileProbe?.invoiceId !== selectedInvoice.id) {
+      return "checking";
+    }
+
+    return previewFileProbe.status;
+  }, [previewFileProbe, selectedInvoice]);
   const selectedPurchaseJournal = selectedInvoice?.purchaseJournal ?? null;
   const firstBookingLine = selectedPurchaseJournal?.lines[0] ?? null;
   const currentCurrency =
@@ -931,6 +999,9 @@ export function IntoWorkbench() {
       value: `${vatCode.code} - ${vatCode.description}`,
       label: `${vatCode.code} - ${vatCode.description}`,
     }));
+  const previewCanPan =
+    previewFileStatus === "available" &&
+    (previewFitMode === "manual" || previewZoom > 1);
   const pageCount = selectedInvoice?.fileName.toLowerCase().endsWith(".pdf") ? 3 : 1;
   const hasUnsavedChanges = Boolean(
     selectedInvoice &&
@@ -1199,8 +1270,17 @@ export function IntoWorkbench() {
 
   function setPreviewFit(fitMode: PreviewFitMode) {
     setPreviewFitMode(fitMode);
+    setPreviewPan(resetPreviewPan());
     if (fitMode !== "manual") {
       setPreviewZoom(1);
+    }
+  }
+
+  function setManualPreviewZoom(nextZoom: number) {
+    setPreviewFitMode("manual");
+    setPreviewZoom(nextZoom);
+    if (nextZoom <= 1) {
+      setPreviewPan(resetPreviewPan());
     }
   }
 
@@ -1209,6 +1289,35 @@ export function IntoWorkbench() {
     setPreviewZoom(1);
     setPreviewRotation(0);
     setPreviewFitMode("auto");
+    setPreviewPan(resetPreviewPan());
+  }
+
+  function startPreviewPan(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!previewCanPan) {
+      return;
+    }
+
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setPreviewDragging(true);
+  }
+
+  function movePreview(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!previewDragging) {
+      return;
+    }
+
+    event.preventDefault();
+    setPreviewPan((current) =>
+      movePreviewPan(current, { x: event.movementX, y: event.movementY })
+    );
+  }
+
+  function stopPreviewPan(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    setPreviewDragging(false);
   }
 
   async function refreshAll() {
@@ -1374,10 +1483,37 @@ export function IntoWorkbench() {
         setPreviewZoom(1);
         setPreviewRotation(0);
         setPreviewFitMode("auto");
+        setPreviewPan(resetPreviewPan());
       }, 0);
 
       return () => window.clearTimeout(timeoutId);
     }
+  }, [selectedInvoice]);
+
+  useEffect(() => {
+    if (!selectedInvoice || !invoiceFileCanBeRequested(selectedInvoice)) {
+      return;
+    }
+
+    let cancelled = false;
+    fetch(`/api/invoices/${selectedInvoice.id}/file`, { method: "HEAD" })
+      .then((response) => {
+        if (!cancelled) {
+          setPreviewFileProbe({
+            invoiceId: selectedInvoice.id,
+            status: response.ok ? "available" : "missing",
+          });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPreviewFileProbe({ invoiceId: selectedInvoice.id, status: "missing" });
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [selectedInvoice]);
 
   useEffect(() => {
@@ -2051,7 +2187,8 @@ export function IntoWorkbench() {
   }
 
   function downloadOriginal() {
-    if (!selectedInvoice) {
+    if (!selectedInvoice || previewFileStatus !== "available") {
+      setMessage(missingInvoiceFileMessage);
       return;
     }
 
@@ -3236,10 +3373,11 @@ export function IntoWorkbench() {
                   <ActionButton
                     variant="ghost"
                     onClick={() => {
-                      setPreviewFitMode("manual");
-                      setPreviewZoom((value) => Math.max(0.65, value - 0.1));
+                      setManualPreviewZoom(
+                        Math.max(minPreviewZoom, previewZoom - previewZoomStep)
+                      );
                     }}
-                    disabled={previewZoom <= 0.65}
+                    disabled={previewZoom <= minPreviewZoom}
                     disabledReason="Minimum zoom reached."
                     className="min-h-9 px-3 py-1 text-xs"
                   >
@@ -3248,10 +3386,11 @@ export function IntoWorkbench() {
                   <ActionButton
                     variant="ghost"
                     onClick={() => {
-                      setPreviewFitMode("manual");
-                      setPreviewZoom((value) => Math.min(1.8, value + 0.1));
+                      setManualPreviewZoom(
+                        Math.min(maxPreviewZoom, previewZoom + previewZoomStep)
+                      );
                     }}
-                    disabled={previewZoom >= 1.8}
+                    disabled={previewZoom >= maxPreviewZoom}
                     disabledReason="Maximum zoom reached."
                     className="min-h-9 px-3 py-1 text-xs"
                   >
@@ -3290,6 +3429,8 @@ export function IntoWorkbench() {
                   <ActionButton
                     variant="outline"
                     onClick={downloadOriginal}
+                    disabled={previewFileStatus !== "available"}
+                    disabledReason={missingInvoiceFileMessage}
                     className="min-h-9 px-3 py-1 text-xs"
                   >
                     Download original
@@ -3325,42 +3466,218 @@ export function IntoWorkbench() {
                 </div>
               </div>
               <div
-                className={`overflow-auto bg-[#f7f8f5] p-4 sm:p-5 ${
+                className={`relative overflow-auto bg-[#f7f8f5] p-4 sm:p-5 ${
                   previewFullscreen
                     ? "flex-1"
                     : "max-h-[900px] lg:max-h-[calc(100vh-220px)]"
                 }`}
               >
-                <PreviewDocument
-                  invoice={selectedInvoice}
-                  zoom={previewZoom}
-                  rotation={previewRotation}
-                  page={previewPage}
-                  fitMode={previewFitMode}
-                  fullscreen={previewFullscreen}
-                />
+                <div
+                  className="mx-auto w-fit"
+                  style={{
+                    transform: `translate3d(${previewPan.x}px, ${previewPan.y}px, 0)`,
+                  }}
+                >
+                  <PreviewDocument
+                    invoice={selectedInvoice}
+                    fileStatus={previewFileStatus}
+                    zoom={previewZoom}
+                    rotation={previewRotation}
+                    page={previewPage}
+                    fitMode={previewFitMode}
+                    fullscreen={previewFullscreen}
+                  />
+                </div>
+                {previewCanPan ? (
+                  <div
+                    aria-label="Drag to move invoice preview"
+                    className={`absolute inset-0 z-10 ${
+                      previewDragging ? "cursor-grabbing" : "cursor-grab"
+                    }`}
+                    role="presentation"
+                    onPointerDown={startPreviewPan}
+                    onPointerMove={movePreview}
+                    onPointerUp={stopPreviewPan}
+                    onPointerCancel={stopPreviewPan}
+                    onPointerLeave={stopPreviewPan}
+                  />
+                ) : null}
               </div>
             </section>
 
-            <aside className="min-w-0 overflow-hidden rounded-xl border border-stone-200 bg-white shadow-sm lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
-              <div className="sticky top-0 z-20 border-b border-stone-200 bg-white/95 p-4 shadow-sm backdrop-blur">
+            <aside className="min-w-0 overflow-hidden rounded-xl border border-stone-200 bg-white shadow-sm">
+              <div className="border-b border-stone-200 bg-white/95 p-3 shadow-sm">
                 <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
                   <div>
-                    <h2 className="text-xl font-semibold text-stone-950">
+                    <h2 className="text-lg font-semibold text-stone-950">
                       Review invoice
                     </h2>
-                    <p className="mt-1 text-sm leading-5 text-stone-500">
+                    <p className="mt-1 text-xs leading-4 text-stone-500">
                       Fix fields here, then save to rerun validation.
                     </p>
                   </div>
-                  <span className="rounded-md border border-stone-200 bg-stone-50 px-2 py-1 text-xs font-semibold text-stone-500">
-                    Actions
-                  </span>
                 </div>
-                <ReviewActionBar actions={reviewActions} />
               </div>
 
-              <div className="flex flex-col gap-5 bg-stone-50/40 p-4 sm:p-5">
+              <div className="flex flex-col gap-3 bg-stone-50/40 p-3 sm:p-4">
+                <section className="grid gap-3">
+                  <ReviewSection title="Required data">
+                    <SelectField
+                      label="Supplier"
+                      required
+                      value={draft.supplierName}
+                      options={supplierOptions}
+                      listId={`supplier-options-${selectedInvoice.id}`}
+                      onChange={(value) => updateDraft("supplierName", value)}
+                      disabled={!hasPermission("edit")}
+                      issue={supplierFieldIssue}
+                      helper={
+                        selectedPurchaseJournal?.supplierResolution.selectedAccountName
+                          ? `Exact account: ${selectedPurchaseJournal.supplierResolution.selectedAccountName}`
+                          : "Search synced Exact supplier accounts."
+                      }
+                      confidence={
+                        selectedPurchaseJournal?.supplierResolution.matchConfidence
+                      }
+                      threshold={confidenceThreshold}
+                    />
+                    <TextField
+                      label="Expense description"
+                      required
+                      value={draft.expenseDescription}
+                      onChange={(value) => updateDraft("expenseDescription", value)}
+                      disabled={!hasPermission("edit")}
+                      issue={expenseDescriptionIssue}
+                      helper={
+                        selectedPurchaseJournal?.description
+                          ? `Booking description: ${selectedPurchaseJournal.description}`
+                          : undefined
+                      }
+                    />
+                    <TextField
+                      label="Your ref"
+                      required
+                      value={draft.referenceCode}
+                      onChange={(value) => updateDraft("referenceCode", value)}
+                      disabled={!hasPermission("edit")}
+                      issue={yourRefIssue}
+                      helper={
+                        selectedPurchaseJournal?.yourRef
+                          ? `Booking reference: ${selectedPurchaseJournal.yourRef}`
+                          : undefined
+                      }
+                    />
+                    <SelectField
+                      label="Payment condition"
+                      required
+                      value={draft.paymentTerms}
+                      options={paymentConditionOptions}
+                      listId={`payment-options-${selectedInvoice.id}`}
+                      onChange={(value) => updateDraft("paymentTerms", value)}
+                      disabled={!hasPermission("edit")}
+                      issue={paymentConditionFieldIssue}
+                      helper={
+                        selectedPurchaseJournal
+                          ? `Exact default: ${selectedPurchaseJournal.paymentConditionCode || "-"} - ${selectedPurchaseJournal.paymentConditionLabel || "-"}`
+                          : "Search synced Exact payment conditions."
+                      }
+                      confidence={selectedPurchaseJournal?.confidenceScores.paymentCondition}
+                      threshold={confidenceThreshold}
+                    />
+                    <DateField
+                      label="Invoice date"
+                      required
+                      value={draft.invoiceDate}
+                      onChange={(value) => updateDraft("invoiceDate", value)}
+                      disabled={!hasPermission("edit")}
+                      issue={invoiceDateIssue}
+                    />
+                    <SelectField
+                      label="G/L Account"
+                      required
+                      value={
+                        firstBookingLine
+                          ? `${firstBookingLine.glAccount} - ${firstBookingLine.glAccountName}`
+                          : ""
+                      }
+                      options={glAccountOptions}
+                      listId={`gl-options-${selectedInvoice.id}`}
+                      readOnly
+                      issue={glAccountFieldIssue}
+                      helper="Selected from synced Exact G/L accounts."
+                      confidence={firstBookingLine?.glConfidence}
+                      threshold={confidenceThreshold}
+                    />
+                      <DateField
+                        label="Accrual From"
+                        required
+                        value={firstBookingLine?.from ?? ""}
+                        onChange={() => undefined}
+                        disabled
+                        issue={accrualFromIssue}
+                      />
+                      <DateField
+                        label="Accrual To"
+                        required
+                        value={firstBookingLine?.to ?? ""}
+                        onChange={() => undefined}
+                        disabled
+                        issue={accrualToIssue}
+                      />
+                    <SelectField
+                      label="VAT code"
+                      required
+                      value={
+                        firstBookingLine
+                          ? `${firstBookingLine.vatCode} - ${firstBookingLine.vatCodeName}`
+                          : ""
+                      }
+                      options={vatCodeOptions}
+                      listId={`vat-options-${selectedInvoice.id}`}
+                      readOnly
+                      issue={vatCodeFieldIssue}
+                      helper="Selected from synced Exact purchase VAT codes."
+                      confidence={firstBookingLine?.vatConfidence}
+                      threshold={confidenceThreshold}
+                    />
+                      <AmountField
+                        label="Net amount"
+                        required
+                        value={draft.netAmount}
+                        currency={currentCurrency}
+                        onChange={(value) => updateDraft("netAmount", value)}
+                        disabled={!hasPermission("edit")}
+                        issue={
+                          requiredIssueFor(["netAmount"]) ??
+                          validationIssueFor(["netAmount"])
+                        }
+                      />
+                      <AmountField
+                        label="VAT amount"
+                        required
+                        value={draft.vatAmount}
+                        currency={currentCurrency}
+                        onChange={(value) => updateDraft("vatAmount", value)}
+                        disabled={!hasPermission("edit")}
+                        issue={
+                          requiredIssueFor(["vatAmount"]) ??
+                          validationIssueFor(["vatAmount"])
+                        }
+                      />
+                    <AmountField
+                      label="Total Amount"
+                      required
+                      value={draft.grossAmount}
+                      currency={currentCurrency}
+                      onChange={(value) => updateDraft("grossAmount", value)}
+                      disabled={!hasPermission("edit")}
+                      issue={totalAmountFieldIssue}
+                      emphasized
+                    />
+                  </ReviewSection>
+
+                  <ReviewActionBar actions={reviewActions} />
+
                 <div className="flex flex-wrap items-center gap-2">
                   <span
                     className={`rounded-md border px-2 py-1 text-xs font-semibold ${
@@ -3470,165 +3787,6 @@ export function IntoWorkbench() {
                   </div>
                 ) : null}
 
-                <section className="grid gap-4">
-                  <ReviewSection title="Required data">
-                    <SelectField
-                      label="Supplier"
-                      required
-                      value={draft.supplierName}
-                      options={supplierOptions}
-                      listId={`supplier-options-${selectedInvoice.id}`}
-                      onChange={(value) => updateDraft("supplierName", value)}
-                      disabled={!hasPermission("edit")}
-                      issue={supplierFieldIssue}
-                      helper={
-                        selectedPurchaseJournal?.supplierResolution.selectedAccountName
-                          ? `Exact account: ${selectedPurchaseJournal.supplierResolution.selectedAccountName}`
-                          : "Search synced Exact supplier accounts."
-                      }
-                      confidence={
-                        selectedPurchaseJournal?.supplierResolution.matchConfidence
-                      }
-                      threshold={confidenceThreshold}
-                    />
-                    <TextField
-                      label="Expense description"
-                      required
-                      value={draft.expenseDescription}
-                      onChange={(value) => updateDraft("expenseDescription", value)}
-                      disabled={!hasPermission("edit")}
-                      issue={expenseDescriptionIssue}
-                      helper={
-                        selectedPurchaseJournal?.description
-                          ? `Booking description: ${selectedPurchaseJournal.description}`
-                          : undefined
-                      }
-                    />
-                    <TextField
-                      label="Your ref"
-                      required
-                      value={draft.referenceCode}
-                      onChange={(value) => updateDraft("referenceCode", value)}
-                      disabled={!hasPermission("edit")}
-                      issue={yourRefIssue}
-                      helper={
-                        selectedPurchaseJournal?.yourRef
-                          ? `Booking reference: ${selectedPurchaseJournal.yourRef}`
-                          : undefined
-                      }
-                    />
-                    <SelectField
-                      label="Payment condition"
-                      required
-                      value={draft.paymentTerms}
-                      options={paymentConditionOptions}
-                      listId={`payment-options-${selectedInvoice.id}`}
-                      onChange={(value) => updateDraft("paymentTerms", value)}
-                      disabled={!hasPermission("edit")}
-                      issue={paymentConditionFieldIssue}
-                      helper={
-                        selectedPurchaseJournal
-                          ? `Exact default: ${selectedPurchaseJournal.paymentConditionCode || "-"} - ${selectedPurchaseJournal.paymentConditionLabel || "-"}`
-                          : "Search synced Exact payment conditions."
-                      }
-                      confidence={selectedPurchaseJournal?.confidenceScores.paymentCondition}
-                      threshold={confidenceThreshold}
-                    />
-                    <DateField
-                      label="Invoice date"
-                      required
-                      value={draft.invoiceDate}
-                      onChange={(value) => updateDraft("invoiceDate", value)}
-                      disabled={!hasPermission("edit")}
-                      issue={invoiceDateIssue}
-                    />
-                    <SelectField
-                      label="G/L Account"
-                      required
-                      value={
-                        firstBookingLine
-                          ? `${firstBookingLine.glAccount} - ${firstBookingLine.glAccountName}`
-                          : ""
-                      }
-                      options={glAccountOptions}
-                      listId={`gl-options-${selectedInvoice.id}`}
-                      readOnly
-                      issue={glAccountFieldIssue}
-                      helper="Selected from synced Exact G/L accounts."
-                      confidence={firstBookingLine?.glConfidence}
-                      threshold={confidenceThreshold}
-                    />
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <DateField
-                        label="Accrual From"
-                        required
-                        value={firstBookingLine?.from ?? ""}
-                        onChange={() => undefined}
-                        disabled
-                        issue={accrualFromIssue}
-                      />
-                      <DateField
-                        label="Accrual To"
-                        required
-                        value={firstBookingLine?.to ?? ""}
-                        onChange={() => undefined}
-                        disabled
-                        issue={accrualToIssue}
-                      />
-                    </div>
-                    <SelectField
-                      label="VAT code"
-                      required
-                      value={
-                        firstBookingLine
-                          ? `${firstBookingLine.vatCode} - ${firstBookingLine.vatCodeName}`
-                          : ""
-                      }
-                      options={vatCodeOptions}
-                      listId={`vat-options-${selectedInvoice.id}`}
-                      readOnly
-                      issue={vatCodeFieldIssue}
-                      helper="Selected from synced Exact purchase VAT codes."
-                      confidence={firstBookingLine?.vatConfidence}
-                      threshold={confidenceThreshold}
-                    />
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <AmountField
-                        label="Net amount"
-                        required
-                        value={draft.netAmount}
-                        currency={currentCurrency}
-                        onChange={(value) => updateDraft("netAmount", value)}
-                        disabled={!hasPermission("edit")}
-                        issue={
-                          requiredIssueFor(["netAmount"]) ??
-                          validationIssueFor(["netAmount"])
-                        }
-                      />
-                      <AmountField
-                        label="VAT amount"
-                        required
-                        value={draft.vatAmount}
-                        currency={currentCurrency}
-                        onChange={(value) => updateDraft("vatAmount", value)}
-                        disabled={!hasPermission("edit")}
-                        issue={
-                          requiredIssueFor(["vatAmount"]) ??
-                          validationIssueFor(["vatAmount"])
-                        }
-                      />
-                    </div>
-                    <AmountField
-                      label="Total Amount"
-                      required
-                      value={draft.grossAmount}
-                      currency={currentCurrency}
-                      onChange={(value) => updateDraft("grossAmount", value)}
-                      disabled={!hasPermission("edit")}
-                      issue={totalAmountFieldIssue}
-                      emphasized
-                    />
-                  </ReviewSection>
 
                   <CollapsibleSection
                     title="Additional data"
@@ -3699,38 +3857,37 @@ export function IntoWorkbench() {
                 </section>
 
                 {selectedPurchaseJournal ? (
-                  <section className="space-y-4 rounded-xl border border-stone-200 bg-white p-4 shadow-sm">
-                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                      <div>
-                        <h3 className="text-base font-semibold text-stone-950">
-                          Purchase Journal intelligence
-                        </h3>
-                        <p className="mt-1 text-xs text-stone-500">
-                          Threshold {percentScore(selectedPurchaseJournal.confidenceThreshold)}
-                        </p>
+                  <details className="rounded-xl border border-stone-200 bg-white p-3 shadow-sm">
+                    <summary className="flex cursor-pointer items-center justify-between gap-3 text-sm font-semibold text-stone-800">
+                      <span>Purchase Journal intelligence</span>
+                      <span className="text-xs font-medium text-stone-500">
+                        Threshold {percentScore(selectedPurchaseJournal.confidenceThreshold)}
+                      </span>
+                    </summary>
+                    <div className="mt-3 space-y-3">
+                      <div className="flex justify-end">
+                        <ActionButton
+                          variant="ghost"
+                          onClick={() => applyIntelligenceAction("approve")}
+                          loading={busy === "approve-intelligence"}
+                          feedback={buttonFeedbackFor(
+                            "approve-intelligence",
+                            "approve-intelligence"
+                          )}
+                          disabled={
+                            !hasPermission("approve") ||
+                            !canApproveSelectedIntelligence ||
+                            busy === "approve-intelligence"
+                          }
+                          disabledReason={
+                            !hasPermission("approve")
+                              ? "Your INTO account is not verified for purchase journal approval."
+                              : "Approval is available only after required supplier, attachment, and reference checks are resolved."
+                          }
+                        >
+                          Approve intelligence
+                        </ActionButton>
                       </div>
-                      <ActionButton
-                        variant="ghost"
-                        onClick={() => applyIntelligenceAction("approve")}
-                        loading={busy === "approve-intelligence"}
-                        feedback={buttonFeedbackFor(
-                          "approve-intelligence",
-                          "approve-intelligence"
-                        )}
-                        disabled={
-                          !hasPermission("approve") ||
-                          !canApproveSelectedIntelligence ||
-                          busy === "approve-intelligence"
-                        }
-                        disabledReason={
-                          !hasPermission("approve")
-                            ? "Your INTO account is not verified for purchase journal approval."
-                            : "Approval is available only after required supplier, attachment, and reference checks are resolved."
-                        }
-                      >
-                        Approve intelligence
-                      </ActionButton>
-                    </div>
 
                     <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
                       {Object.entries(selectedPurchaseJournal.confidenceScores).map(
@@ -3931,7 +4088,8 @@ export function IntoWorkbench() {
                         </tfoot>
                       </table>
                     </div>
-                  </section>
+                    </div>
+                  </details>
                 ) : null}
 
                 {selectedInvoice.lastError ? (
@@ -3950,3 +4108,5 @@ export function IntoWorkbench() {
     </main>
   );
 }
+
+

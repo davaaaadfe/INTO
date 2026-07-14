@@ -190,6 +190,37 @@ test("uses a learned Factuurnummer pattern for a future invoice", () => {
   assert.ok(result.appliedFields.includes("yourRefPattern"));
 });
 
+test("does not apply a learned rule to a different supplier", () => {
+  const learning = createInitialLearningStore();
+  const original = invoice({}, {
+    paymentTerms: "7 days",
+  });
+  captureUserCorrections({
+    invoice: original,
+    nextExtractedData: { ...original.extractedData, paymentTerms: "30 days" },
+    nextBookingLines: [],
+    learning,
+    user: { id: "user-accountant", name: "Tammy Park" },
+  });
+
+  const unrelated = invoice(
+    { id: "invoice-unrelated", fileName: "other-invoice-001.pdf" },
+    {
+      supplierName: "Different Supplier",
+      supplierVatNumber: "NL999999999B01",
+      paymentTerms: "7 days",
+    }
+  );
+  const result = applyLearnedExtractedData(
+    unrelated,
+    unrelated.extractedData,
+    learning
+  );
+
+  assert.equal(result.data.paymentTerms, "7 days");
+  assert.deepEqual(result.appliedFields, []);
+});
+
 test("applies a learned booking-line split before default suggestions", () => {
   const learning = createInitialLearningStore();
   const original = invoice();
@@ -232,6 +263,9 @@ test("applies a learned booking-line split before default suggestions", () => {
   const future = invoice({ id: "invoice-future", fileName: "AH-invoice-002.pdf" }, {
     invoiceNumber: "INV-002",
     referenceCode: "INV-002",
+    netAmount: 200,
+    vatAmount: 42,
+    grossAmount: 242,
   });
   const booking = generatePurchaseJournalBooking(
     future,
@@ -244,6 +278,13 @@ test("applies a learned booking-line split before default suggestions", () => {
   assert.deepEqual(
     booking.lines.map((line) => line.finalSelectedAccount),
     ["4400", "4420"]
+  );
+  assert.deepEqual(
+    booking.lines.map((line) => [line.amount, line.vatAmount]),
+    [
+      [120, 25.2],
+      [80, 16.8],
+    ]
   );
   assert.equal(booking.totals.difference, 0);
   assert.ok(

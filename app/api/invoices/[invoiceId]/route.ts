@@ -58,11 +58,15 @@ export async function PATCH(request: Request, context: RouteContext) {
           };
       const wrappedPayload =
         "extractedData" in payload || "bookingLines" in payload;
-      const extractedPatch = wrappedPayload
-        ? payload.extractedData ?? {}
-        : payload;
-      const bookingLines = wrappedPayload && Array.isArray(payload.bookingLines)
-        ? payload.bookingLines
+      const envelope = payload as {
+        extractedData?: Partial<ExtractedInvoiceData>;
+        bookingLines?: PurchaseJournalLine[];
+      };
+      const extractedPatch: Partial<ExtractedInvoiceData> = wrappedPayload
+        ? envelope.extractedData ?? {}
+        : (payload as Partial<ExtractedInvoiceData>);
+      const bookingLines = wrappedPayload && Array.isArray(envelope.bookingLines)
+        ? envelope.bookingLines
         : undefined;
       const nextData: ExtractedInvoiceData = {
         ...invoice.extractedData,

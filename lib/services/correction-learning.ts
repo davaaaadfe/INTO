@@ -90,9 +90,7 @@ function invoiceMatchKey(data: ExtractedInvoiceData) {
     .map((line) => learningDescriptionKey(line.description))
     .filter(Boolean)
     .join("+");
-  return [learningDescriptionKey(data.expenseDescription), lineDescriptions]
-    .filter(Boolean)
-    .join("|");
+  return lineDescriptions || learningDescriptionKey(data.expenseDescription);
 }
 
 export function learnedFilenamePattern(fileName: string) {
@@ -346,30 +344,40 @@ export function captureUserCorrections(input: CaptureInput) {
       );
     }
     if (supplierAccountId && previousLine.costCentre !== nextLine.costCentre) {
-      upsertDecision(
-        input.learning.costCentreSelections,
+      const items = input.learning.costCentreSelections;
+      const index = items.findIndex(
         (item) =>
-          item.supplierAccountId === supplierAccountId && item.glAccount === nextGl,
-        {
+          item.supplierAccountId === supplierAccountId && item.glAccount === nextGl
+      );
+      if (index >= 0) {
+        items.splice(index, 1);
+      }
+      if (nextLine.costCentre) {
+        items.unshift({
           supplierAccountId,
           glAccount: nextGl,
           costCentre: nextLine.costCentre,
           decidedAt,
-        }
-      );
+        });
+      }
     }
     if (supplierAccountId && previousLine.costUnit !== nextLine.costUnit) {
-      upsertDecision(
-        input.learning.costUnitSelections,
+      const items = input.learning.costUnitSelections;
+      const index = items.findIndex(
         (item) =>
-          item.supplierAccountId === supplierAccountId && item.glAccount === nextGl,
-        {
+          item.supplierAccountId === supplierAccountId && item.glAccount === nextGl
+      );
+      if (index >= 0) {
+        items.splice(index, 1);
+      }
+      if (nextLine.costUnit) {
+        items.unshift({
           supplierAccountId,
           glAccount: nextGl,
           costUnit: nextLine.costUnit,
           decidedAt,
-        }
-      );
+        });
+      }
     }
   });
 
@@ -551,8 +559,36 @@ export function learnedBookingLinesForInvoice(
     return null;
   }
 
+  const lines = (match.correctedValue as PurchaseJournalLine[]).map((line) => ({
+    ...line,
+    reasoning: [...(line.reasoning ?? [])],
+    vatReasoning: [...(line.vatReasoning ?? [])],
+  }));
+  const learnedTotal = lines.reduce(
+    (sum, line) => sum + line.amount + line.vatAmount,
+    0
+  );
+  const targetTotal = invoice.extractedData.grossAmount ?? learnedTotal;
+
+  if (learnedTotal && Math.abs(targetTotal - learnedTotal) > 0.005) {
+    const ratio = targetTotal / learnedTotal;
+    for (const line of lines) {
+      line.amount = Math.round(line.amount * ratio * 100) / 100;
+      line.vatAmount = Math.round(line.vatAmount * ratio * 100) / 100;
+    }
+    const scaledTotal = lines.reduce(
+      (sum, line) => sum + line.amount + line.vatAmount,
+      0
+    );
+    const difference = Math.round((targetTotal - scaledTotal) * 100) / 100;
+    if (lines.length && difference) {
+      lines[lines.length - 1].amount =
+        Math.round((lines[lines.length - 1].amount + difference) * 100) / 100;
+    }
+  }
+
   return {
-    lines: match.correctedValue as PurchaseJournalLine[],
+    lines,
     confidence: Math.min(match.confidence, 0.99),
   };
 }

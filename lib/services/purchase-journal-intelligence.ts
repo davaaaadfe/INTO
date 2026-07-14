@@ -1367,6 +1367,7 @@ export function generatePurchaseJournalBooking(
   ];
   const learnedCorrectionApplied = Boolean(
     invoice.learnedFieldsApplied?.length ||
+      supplierResolution.method === "Learned decision" ||
       lines.some((line) =>
         line.reasoning.some((reason) => reason === LEARNED_CORRECTION_NOTE)
       )
@@ -1423,7 +1424,7 @@ export function generatePurchaseJournalBooking(
       ...(learnedCorrectionApplied ? [LEARNED_CORRECTION_NOTE] : []),
     ],
     learningSummary: [
-      "Supplier, G/L, VAT, cost centre, cost unit, and accrual decisions are captured for future learning once approved or booked.",
+      "User corrections are saved for future similar invoices and reinforced when the invoice is approved or booked.",
       ...(learnedCorrectionApplied ? [LEARNED_CORRECTION_NOTE] : []),
     ],
   };
@@ -1573,65 +1574,48 @@ export function rememberDecisionsFromInvoice(
   const decidedAt = new Date().toISOString();
   const supplierIdentity = primarySupplierIdentity(invoice.extractedData);
   const supplierAccountId = booking.supplierResolution.selectedAccountId;
-
-  if (
-    !learning.supplierSelections.some(
-      (decision) =>
-        decision.supplierIdentity === supplierIdentity &&
-        decision.accountId === supplierAccountId
-    )
-  ) {
-    learning.supplierSelections.unshift({
-      supplierIdentity,
-      accountId: supplierAccountId,
-      decidedAt,
-    });
-  }
+  learning.supplierSelections = learning.supplierSelections.filter(
+    (decision) => decision.supplierIdentity !== supplierIdentity
+  );
+  learning.supplierSelections.unshift({
+    supplierIdentity,
+    accountId: supplierAccountId,
+    decidedAt,
+  });
 
   for (const line of booking.lines) {
     const key = descriptionKey(line.description);
 
-    if (
-      !learning.glAccountSelections.some(
-        (decision) =>
-          decision.supplierAccountId === supplierAccountId &&
-          decision.descriptionKey === key &&
-          decision.glAccount === line.finalSelectedAccount
-      )
-    ) {
-      learning.glAccountSelections.unshift({
-        supplierAccountId,
-        descriptionKey: key,
-        glAccount: line.finalSelectedAccount,
-        decidedAt,
-      });
-    }
+    learning.glAccountSelections = learning.glAccountSelections.filter(
+      (decision) =>
+        decision.supplierAccountId !== supplierAccountId ||
+        decision.descriptionKey !== key
+    );
+    learning.glAccountSelections.unshift({
+      supplierAccountId,
+      descriptionKey: key,
+      glAccount: line.finalSelectedAccount,
+      decidedAt,
+    });
 
-    if (
-      !learning.vatCodeSelections.some(
-        (decision) =>
-          decision.supplierAccountId === supplierAccountId &&
-          decision.descriptionKey === key &&
-          decision.vatCode === line.vatCode
-      )
-    ) {
-      learning.vatCodeSelections.unshift({
-        supplierAccountId,
-        descriptionKey: key,
-        vatCode: line.vatCode,
-        decidedAt,
-      });
-    }
+    learning.vatCodeSelections = learning.vatCodeSelections.filter(
+      (decision) =>
+        decision.supplierAccountId !== supplierAccountId ||
+        decision.descriptionKey !== key
+    );
+    learning.vatCodeSelections.unshift({
+      supplierAccountId,
+      descriptionKey: key,
+      vatCode: line.vatCode,
+      decidedAt,
+    });
 
-    if (
-      line.costCentre &&
-      !learning.costCentreSelections.some(
-        (decision) =>
-          decision.supplierAccountId === supplierAccountId &&
-          decision.glAccount === line.finalSelectedAccount &&
-          decision.costCentre === line.costCentre
-      )
-    ) {
+    learning.costCentreSelections = learning.costCentreSelections.filter(
+      (decision) =>
+        decision.supplierAccountId !== supplierAccountId ||
+        decision.glAccount !== line.finalSelectedAccount
+    );
+    if (line.costCentre) {
       learning.costCentreSelections.unshift({
         supplierAccountId,
         glAccount: line.finalSelectedAccount,
@@ -1640,15 +1624,12 @@ export function rememberDecisionsFromInvoice(
       });
     }
 
-    if (
-      line.costUnit &&
-      !learning.costUnitSelections.some(
-        (decision) =>
-          decision.supplierAccountId === supplierAccountId &&
-          decision.glAccount === line.finalSelectedAccount &&
-          decision.costUnit === line.costUnit
-      )
-    ) {
+    learning.costUnitSelections = learning.costUnitSelections.filter(
+      (decision) =>
+        decision.supplierAccountId !== supplierAccountId ||
+        decision.glAccount !== line.finalSelectedAccount
+    );
+    if (line.costUnit) {
       learning.costUnitSelections.unshift({
         supplierAccountId,
         glAccount: line.finalSelectedAccount,

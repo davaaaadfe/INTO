@@ -58,12 +58,14 @@ const requiredLabels: Array<{
   {
     field: "accrualFrom",
     label: "Accrual From",
-    isFilled: (_data, booking) => hasText(firstBookingLine(booking)?.from),
+    isFilled: (_data, booking) =>
+      !bookingRequiresAccrual(booking) || hasText(firstBookingLine(booking)?.from),
   },
   {
     field: "accrualTo",
     label: "Accrual To",
-    isFilled: (_data, booking) => hasText(firstBookingLine(booking)?.to),
+    isFilled: (_data, booking) =>
+      !bookingRequiresAccrual(booking) || hasText(firstBookingLine(booking)?.to),
   },
   {
     field: "vatCode",
@@ -89,6 +91,12 @@ const requiredLabels: Array<{
 
 function firstBookingLine(booking: PurchaseJournalBooking | null | undefined) {
   return booking?.lines[0];
+}
+
+export function bookingRequiresAccrual(
+  booking: PurchaseJournalBooking | null | undefined
+) {
+  return hasText(firstBookingLine(booking)?.accrualReason);
 }
 
 function hasText(value: string | undefined | null) {

@@ -531,14 +531,18 @@ function firstDayOfPeriod(year: number, period: number) {
 }
 
 function determineAccrual(data: ExtractedInvoiceData) {
+  const accrualKeyword = /subscription|insurance|maintenance|flight|hotel|event/i.test(
+    `${humanDescription(data)} ${data.rawText ?? ""}`
+  );
+
   if (!isValidIsoDate(data.serviceStartDate) || !isValidIsoDate(data.serviceEndDate)) {
-    if (isValidIsoDate(data.invoiceDate)) {
+    if (accrualKeyword) {
       return {
-        from: firstDayOfMonth(data.invoiceDate),
-        to: lastDayOfMonth(data.invoiceDate),
+        from: "",
+        to: "",
         benefitStartDate: undefined,
         benefitEndDate: undefined,
-        reason: undefined,
+        reason: "Accrual period is unclear. Confirm benefit period.",
       };
     }
 
@@ -553,24 +557,11 @@ function determineAccrual(data: ExtractedInvoiceData) {
 
   const periodMonths = monthSpan(data.serviceStartDate, data.serviceEndDate);
   const paidBeforeBenefit = daysBetween(data.invoiceDate, data.serviceStartDate) > 30;
-  const accrualKeyword = /subscription|insurance|maintenance|flight|hotel|event/i.test(
-    `${humanDescription(data)} ${data.rawText ?? ""}`
-  );
 
   if (periodMonths <= 3 && !paidBeforeBenefit && !accrualKeyword) {
-    if (!isValidIsoDate(data.invoiceDate)) {
-      return {
-        from: "",
-        to: "",
-        benefitStartDate: undefined,
-        benefitEndDate: undefined,
-        reason: undefined,
-      };
-    }
-
     return {
-      from: firstDayOfMonth(data.invoiceDate),
-      to: lastDayOfMonth(data.invoiceDate),
+      from: "",
+      to: "",
       benefitStartDate: undefined,
       benefitEndDate: undefined,
       reason: undefined,

@@ -9,7 +9,10 @@ import {
   amountToMinorUnits,
   validateInvoiceData,
 } from "../lib/services/invoice-validation";
-import { detectInvoiceReference } from "../lib/services/invoice-extraction-service";
+import {
+  detectInvoiceReference,
+  extractInvoiceData,
+} from "../lib/services/invoice-extraction-service";
 
 function validInvoice(overrides: Partial<ExtractedInvoiceData> = {}) {
   return {
@@ -131,4 +134,22 @@ test("detects multilingual invoice reference labels without using VAT or IBAN", 
     detectInvoiceReference("IBAN NL91ABNA0417164300\nVAT NL857017263B01"),
     null
   );
+});
+
+test("keeps the exact invoice reference text when detected", () => {
+  assert.equal(
+    detectInvoiceReference("Invoice no.: Inv-2026/Ab-001")?.value,
+    "Inv-2026/Ab-001"
+  );
+});
+
+test("does not invent Your ref when no invoice reference is confidently detected", async () => {
+  const data = await extractInvoiceData({
+    name: "plain-office-supplies.pdf",
+    type: "application/pdf",
+    size: 1000,
+  });
+
+  assert.equal(data.referenceCode, "");
+  assert.equal(data.invoiceNumber, "");
 });

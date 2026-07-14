@@ -128,11 +128,6 @@ function stableNumber(input: string) {
   return [...input].reduce((sum, char) => sum + char.charCodeAt(0), 0);
 }
 
-function invoiceNumberFromFile(fileName: string) {
-  const baseName = fileName.replace(/\.[^.]+$/, "").replace(/[^a-z0-9]+/gi, "-");
-  return `INV-${baseName.slice(0, 14).toUpperCase() || "UPLOAD"}`;
-}
-
 export type InvoiceReferenceDetection = {
   value: string;
   confidence: number;
@@ -153,19 +148,19 @@ const invoiceReferenceLabelPattern = [
   "rechnung\\s*nr\\.?",
   "belegnummer",
   "referenz",
-  "numero\\s*de\\s*facture",
-  "n\\s*facture",
-  "reference",
-  "numero\\s*de\\s*factura",
-  "n\\s*factura",
+  "num[eé]ro\\s*de\\s*facture",
+  "n[°º]?\\s*facture",
+  "r[eé]f[eé]rence",
+  "n[uú]mero\\s*de\\s*factura",
+  "n[°º]?\\s*factura",
   "referencia",
   "numero\\s*fattura",
-  "n\\s*fattura",
+  "n\\.?\\s*fattura",
   "riferimento",
 ].join("|");
 
 const invoiceReferenceValuePattern =
-  "([a-z]{1,8}[-_/ ]?\\d[a-z0-9._/-]{1,24}|\\d{4}[-_/]\\d{2,8}|\\d{5,})";
+  "([a-z0-9]{1,12}[-_/ ]?\\d[a-z0-9._/ -]{1,30}|\\d{4}[-_/]\\d{2,8}|\\d{5,})";
 
 function normalizeInvoiceReferenceText(input: string) {
   return input
@@ -179,9 +174,7 @@ function cleanInvoiceReferenceValue(value: string) {
   return value
     .trim()
     .replace(/^[#:\-.\s]+/, "")
-    .replace(/[.,;:\s]+$/, "")
-    .replace(/\s+/g, "-")
-    .toUpperCase();
+    .replace(/[.,;:\s]+$/, "");
 }
 
 function looksLikeForbiddenReference(value: string, context = "") {
@@ -204,11 +197,10 @@ function looksLikeForbiddenReference(value: string, context = "") {
 export function detectInvoiceReference(
   input: string
 ): InvoiceReferenceDetection | null {
-  const normalized = normalizeInvoiceReferenceText(input);
   const labelledReference = new RegExp(
     `(?:${invoiceReferenceLabelPattern})\\s*(?:nr\\.?|no\\.?)?\\s*[:#.-]?\\s*${invoiceReferenceValuePattern}`,
     "i"
-  ).exec(normalized);
+  ).exec(input);
 
   if (labelledReference?.[1]) {
     const value = cleanInvoiceReferenceValue(labelledReference[1]);
@@ -218,12 +210,12 @@ export function detectInvoiceReference(
   }
 
   const generalReference = /\b(?:inv|fac|rf)[-_/ ]?\d[a-z0-9._/-]{2,24}\b|\b20\d{2}[-_/]\d{3,8}\b/i.exec(
-    normalized
+    input
   );
   if (generalReference?.[0]) {
     const start = Math.max(0, generalReference.index - 24);
-    const end = Math.min(normalized.length, generalReference.index + generalReference[0].length + 24);
-    const context = normalized.slice(start, end);
+    const end = Math.min(input.length, generalReference.index + generalReference[0].length + 24);
+    const context = input.slice(start, end);
     const value = cleanInvoiceReferenceValue(generalReference[0]);
     if (!looksLikeForbiddenReference(value, context)) {
       return { value, confidence: 0.78 };
@@ -336,7 +328,7 @@ export async function extractInvoiceData(
     ? "David Kwon"
     : "";
   const detectedReference = detectInvoiceReference(file.name);
-  const invoiceNumber = detectedReference?.value ?? invoiceNumberFromFile(file.name);
+  const invoiceNumber = detectedReference?.value ?? "";
   const referenceCode = invalidByName ? "" : invoiceNumber;
 
   return {

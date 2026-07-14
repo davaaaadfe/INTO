@@ -25,10 +25,10 @@ import type {
 } from "../lib/domain/invoice";
 import {
   REQUIRED_BOOKING_DISABLED_REASON,
+  bookingRequiresAccrual,
   getRequiredBookingDataIssues,
 } from "../lib/services/required-booking-data";
 import {
-  clampPreviewPan,
   movePreviewPan,
   resetPreviewPan,
   type PreviewPan,
@@ -915,7 +915,12 @@ function PreviewDocument({
 export function IntoWorkbench() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const previewViewportRef = useRef<HTMLDivElement | null>(null);
-  const previewContentRef = useRef<HTMLDivElement | null>(null);
+  const previewDragStartRef = useRef<{
+    x: number;
+    y: number;
+    scrollLeft: number;
+    scrollTop: number;
+  } | null>(null);
   const [state, setState] = useState<ApiState>({
     users: [],
     currentUser: null,
@@ -941,7 +946,7 @@ export function IntoWorkbench() {
   const [previewPage, setPreviewPage] = useState(1);
   const [previewFitMode, setPreviewFitMode] = useState<PreviewFitMode>("auto");
   const [previewFullscreen, setPreviewFullscreen] = useState(false);
-  const [previewPan, setPreviewPan] = useState<PreviewPan>(() => resetPreviewPan());
+  const [, setPreviewPan] = useState<PreviewPan>(() => resetPreviewPan());
   const [previewDragging, setPreviewDragging] = useState(false);
   const [previewFileProbe, setPreviewFileProbe] = useState<{
     invoiceId: string;
@@ -1083,6 +1088,7 @@ export function IntoWorkbench() {
     validationIssueFor(["yourRef", "referenceCode"]);
   const invoiceDateIssue =
     requiredIssueFor(["invoiceDate"]) ?? validationIssueFor(["invoiceDate"]);
+  const accrualRequired = bookingRequiresAccrual(selectedPurchaseJournal);
   const glAccountIssue = validationIssueFor(
     [],
     [
@@ -1274,6 +1280,7 @@ export function IntoWorkbench() {
   function setPreviewFit(fitMode: PreviewFitMode) {
     setPreviewFitMode(fitMode);
     setPreviewPan(resetPreviewPan());
+    resetPreviewScroll();
     if (fitMode !== "manual") {
       setPreviewZoom(defaultPreviewZoom);
     }
@@ -1293,20 +1300,18 @@ export function IntoWorkbench() {
     setPreviewRotation(0);
     setPreviewFitMode("auto");
     setPreviewPan(resetPreviewPan());
+    resetPreviewScroll();
   }
 
-  const clampPreviewPanToBounds = useCallback((pan: PreviewPan) => {
-    const viewport = previewViewportRef.current;
-    const content = previewContentRef.current;
-    if (!viewport || !content) {
-      return pan;
-    }
+  const resetPreviewScroll = useCallback(() => {
+    window.requestAnimationFrame(() => {
+      const viewport = previewViewportRef.current;
+      if (!viewport) {
+        return;
+      }
 
-    return clampPreviewPan(pan, {
-      viewportWidth: viewport.clientWidth,
-      viewportHeight: viewport.clientHeight,
-      contentWidth: Math.max(content.scrollWidth, content.offsetWidth),
-      contentHeight: Math.max(content.scrollHeight, content.offsetHeight),
+      viewport.scrollLeft = 0;
+      viewport.scrollTop = 0;
     });
   }, []);
 
@@ -1315,8 +1320,19 @@ export function IntoWorkbench() {
       return;
     }
 
+    const viewport = previewViewportRef.current;
+    if (!viewport || event.button !== 0) {
+      return;
+    }
+
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
+    previewDragStartRef.current = {
+      x: event.clientX,
+      y: event.clientY,
+      scrollLeft: viewport.scrollLeft,
+      scrollTop: viewport.scrollTop,
+    };
     setPreviewDragging(true);
   }
 
@@ -1326,10 +1342,16 @@ export function IntoWorkbench() {
     }
 
     event.preventDefault();
+    const viewport = previewViewportRef.current;
+    const start = previewDragStartRef.current;
+    if (!viewport || !start) {
+      return;
+    }
+
+    viewport.scrollLeft = start.scrollLeft - (event.clientX - start.x);
+    viewport.scrollTop = start.scrollTop - (event.clientY - start.y);
     setPreviewPan((current) =>
-      clampPreviewPanToBounds(
-        movePreviewPan(current, { x: event.movementX, y: event.movementY })
-      )
+      movePreviewPan(current, { x: event.movementX, y: event.movementY })
     );
   }
 
@@ -1337,6 +1359,7 @@ export function IntoWorkbench() {
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
+    previewDragStartRef.current = null;
     setPreviewDragging(false);
   }
 
@@ -1504,11 +1527,12 @@ export function IntoWorkbench() {
         setPreviewRotation(0);
         setPreviewFitMode("auto");
         setPreviewPan(resetPreviewPan());
+        resetPreviewScroll();
       }, 0);
 
       return () => window.clearTimeout(timeoutId);
     }
-  }, [selectedInvoice]);
+  }, [selectedInvoice, resetPreviewScroll]);
 
   useEffect(() => {
     if (!selectedInvoice || !invoiceFileCanBeRequested(selectedInvoice)) {
@@ -1534,23 +1558,7 @@ export function IntoWorkbench() {
     return () => {
       cancelled = true;
     };
-  }, [selectedInvoice]);
-
-  useEffect(() => {
-    const frameId = window.requestAnimationFrame(() => {
-      setPreviewPan((current) => clampPreviewPanToBounds(current));
-    });
-
-    return () => window.cancelAnimationFrame(frameId);
-  }, [
-    selectedInvoiceId,
-    previewFileStatus,
-    previewFitMode,
-    previewZoom,
-    previewRotation,
-    previewFullscreen,
-    clampPreviewPanToBounds,
-  ]);
+  }, [selectedInvoice, resetPreviewScroll]);
 
   useEffect(() => {
     if (!selectedInvoice?.id) {
@@ -3437,6 +3445,7 @@ export function IntoWorkbench() {
                     onClick={() => {
                       setPreviewRotation((value) => (value + 270) % 360);
                       setPreviewPan(resetPreviewPan());
+                      resetPreviewScroll();
                     }}
                     className="min-h-9 px-3 py-1 text-xs"
                   >
@@ -3447,6 +3456,7 @@ export function IntoWorkbench() {
                     onClick={() => {
                       setPreviewRotation((value) => (value + 90) % 360);
                       setPreviewPan(resetPreviewPan());
+                      resetPreviewScroll();
                     }}
                     className="min-h-9 px-3 py-1 text-xs"
                   >
@@ -3507,18 +3517,26 @@ export function IntoWorkbench() {
               </div>
               <div
                 ref={previewViewportRef}
-                className={`relative overflow-hidden bg-[#f7f8f5] p-3 sm:p-4 ${
+                className={`relative overflow-auto bg-[#f7f8f5] p-3 sm:p-4 ${
+                  previewCanPan
+                    ? previewDragging
+                      ? "cursor-grabbing"
+                      : "cursor-grab"
+                    : ""
+                } ${
                   previewFullscreen
                     ? "min-h-0 flex-1"
                     : "h-[min(78vh,980px)] min-h-[680px] lg:h-[calc(100vh-170px)]"
                 }`}
+                role="presentation"
+                onPointerDown={startPreviewPan}
+                onPointerMove={movePreview}
+                onPointerUp={stopPreviewPan}
+                onPointerCancel={stopPreviewPan}
+                onPointerLeave={stopPreviewPan}
               >
                 <div
-                  ref={previewContentRef}
-                  className="flex h-full w-full items-start justify-center will-change-transform"
-                  style={{
-                    transform: `translate3d(${previewPan.x}px, ${previewPan.y}px, 0)`,
-                  }}
+                  className="flex min-h-full min-w-full items-start justify-center"
                 >
                   <PreviewDocument
                     invoice={selectedInvoice}
@@ -3529,21 +3547,6 @@ export function IntoWorkbench() {
                     fitMode={previewFitMode}
                   />
                 </div>
-                {previewCanPan ? (
-                  <div
-                    aria-label="Drag to move invoice preview"
-                    className={`absolute inset-0 z-10 select-none touch-none ${
-                      previewDragging ? "cursor-grabbing" : "cursor-grab"
-                    }`}
-                    role="presentation"
-                    style={{ touchAction: "none", userSelect: "none" }}
-                    onPointerDown={startPreviewPan}
-                    onPointerMove={movePreview}
-                    onPointerUp={stopPreviewPan}
-                    onPointerCancel={stopPreviewPan}
-                    onPointerLeave={stopPreviewPan}
-                  />
-                ) : null}
               </div>
             </section>
 
@@ -3652,7 +3655,7 @@ export function IntoWorkbench() {
                     />
                       <DateField
                         label="Accrual From"
-                        required
+                        required={accrualRequired}
                         value={firstBookingLine?.from ?? ""}
                         onChange={() => undefined}
                         disabled
@@ -3660,7 +3663,7 @@ export function IntoWorkbench() {
                       />
                       <DateField
                         label="Accrual To"
-                        required
+                        required={accrualRequired}
                         value={firstBookingLine?.to ?? ""}
                         onChange={() => undefined}
                         disabled

@@ -176,8 +176,6 @@ test("requires booking data fields but ignores empty additional and removed fiel
     "paymentTerms",
     "invoiceDate",
     "glAccount",
-    "accrualFrom",
-    "accrualTo",
     "vatCode",
     "netAmount",
     "vatAmount",
@@ -210,6 +208,44 @@ test("requires booking data fields but ignores empty additional and removed fiel
       `${field} should not block booking when empty`
     );
   }
+});
+
+test("does not require accrual dates for one-time invoices", () => {
+  const invoice = uploadedInvoice({}, {
+    referenceCode: "INV-PJ-001",
+    serviceStartDate: "",
+    serviceEndDate: "",
+  });
+  const booking = buildBooking(invoice);
+  const firstLine = booking.lines[0];
+  firstLine.from = "";
+  firstLine.to = "";
+  firstLine.accrualReason = undefined;
+
+  const errors = purchaseJournalValidationErrors(booking, invoice.extractedData);
+  const errorFields = new Set(errors.map((error) => String(error.field)));
+
+  assert.equal(errorFields.has("accrualFrom"), false);
+  assert.equal(errorFields.has("accrualTo"), false);
+});
+
+test("requires accrual dates only when accrual applies", () => {
+  const invoice = uploadedInvoice({}, {
+    referenceCode: "INV-PJ-001",
+    serviceStartDate: "2026-01-15",
+    serviceEndDate: "2026-06-30",
+    expenseDescription: "Software subscription",
+  });
+  const booking = buildBooking(invoice);
+  const firstLine = booking.lines[0];
+  firstLine.from = "";
+  firstLine.to = "";
+
+  const errors = purchaseJournalValidationErrors(booking, invoice.extractedData);
+  const errorFields = new Set(errors.map((error) => String(error.field)));
+
+  assert.equal(errorFields.has("accrualFrom"), true);
+  assert.equal(errorFields.has("accrualTo"), true);
 });
 
 test("marks multiple matching suppliers for manual supplier review", () => {

@@ -17,6 +17,7 @@ import type {
   InvoiceArchiveFilters,
   InvoiceArchiveResult,
   PermissionAction,
+  PurchaseJournalLine,
   PublicExactConnection,
   UploadedInvoice,
   ValidationError,
@@ -40,6 +41,11 @@ import {
   statusFromPurchaseJournal,
   supplierIdentityForInvoice,
 } from "../services/purchase-journal-intelligence";
+import {
+  applyLearnedExtractedData,
+  captureSupplierAccountCorrection,
+  captureUserCorrections,
+} from "../services/correction-learning";
 import { refreshExactTokenIfNeeded } from "../services/exact-online-service";
 import { createId } from "../utils/id";
 import {
@@ -328,6 +334,13 @@ export function getStore() {
     if (!invoice.localFileStatus) {
       invoice.localFileStatus = invoice.storageKey ? "available" : "missing";
     }
+  }
+
+  if (!globalStore.__INTO_STORE.learning) {
+    globalStore.__INTO_STORE.learning = createInitialLearningStore();
+  }
+  if (!Array.isArray(globalStore.__INTO_STORE.learning.corrections)) {
+    globalStore.__INTO_STORE.learning.corrections = [];
   }
 
   return globalStore.__INTO_STORE;
@@ -891,18 +904,84 @@ export function findDuplicateUploadedFile(input: {
 
 export function updateInvoiceExtraction(
   invoiceId: string,
-  extractedData: ExtractedInvoiceData
+  extractedData: ExtractedInvoiceData,
+  options: { applyLearning?: boolean } = {}
 ) {
   const invoice = getInvoice(invoiceId);
   if (!invoice) {
     return null;
   }
 
-  invoice.extractedData = extractedData;
+  const learned = options.applyLearning === false
+    ? { data: extractedData, appliedFields: [] }
+    : applyLearnedExtractedData(invoice, extractedData, getStore().learning);
+  invoice.extractedData = learned.data;
+  invoice.learnedFieldsApplied = learned.appliedFields;
   invoice.intelligenceApprovedAt = undefined;
   invoice.purchaseJournal = null;
   invoice.updatedAt = now();
   return invoice;
+}
+
+export function saveInvoiceReview(
+  invoiceId: string,
+  nextData: ExtractedInvoiceData,
+  nextBookingLines?: PurchaseJournalLine[]
+) {
+  const invoice = getInvoice(invoiceId);
+  if (!invoice) {
+    return null;
+  }
+
+  const user = getCurrentUser();
+  const captured = captureUserCorrections({
+    invoice,
+    nextExtractedData: nextData,
+    nextBookingLines:
+      nextBookingLines ??
+      invoice.bookingLineOverrides ??
+      invoice.purchaseJournal?.lines ??
+      [],
+    learning: getStore().learning,
+    user,
+  });
+
+  auditInvoiceFieldChanges(invoiceId, invoice.extractedData, nextData);
+  for (const correction of captured) {
+    if (
+      correction.metadata?.lineIndex === undefined &&
+      correction.field !== "bookingLineSplit"
+    ) {
+      continue;
+    }
+
+    addAuditEvent({
+      invoiceId,
+      type: "invoice_field_edited",
+      field:
+        correction.field === "bookingLineSplit"
+          ? "bookingLines"
+          : `bookingLine.${correction.field}`,
+      oldValue: correction.originalValue,
+      newValue: correction.correctedValue,
+      message: `${user.name} corrected ${correction.field}; the decision was saved for future similar invoices.`,
+      metadata: {
+        learnedCorrectionId: correction.id,
+        lineIndex: correction.metadata?.lineIndex,
+      },
+    });
+  }
+
+  invoice.extractedData = nextData;
+  invoice.learnedFieldsApplied = [];
+  if (nextBookingLines) {
+    invoice.bookingLineOverrides = nextBookingLines.map((line) => ({ ...line }));
+  }
+  invoice.intelligenceApprovedAt = undefined;
+  invoice.purchaseJournal = null;
+  invoice.updatedAt = now();
+  persistStoreSoon();
+  return recomputeInvoiceState(invoiceId);
 }
 
 export function applyValidation(
@@ -1003,7 +1082,10 @@ export function replaceInvoiceExtractionFromReread(
   }
 
   pushExtractionHistory(invoice, "duplicate_re_read", decision);
-  invoice.extractedData = extractedData;
+  const learned = applyLearnedExtractedData(invoice, extractedData, getStore().learning);
+  invoice.extractedData = learned.data;
+  invoice.learnedFieldsApplied = learned.appliedFields;
+  invoice.bookingLineOverrides = undefined;
   invoice.duplicateResolutionDecision = decision;
   invoice.duplicateDetection = undefined;
   invoice.intelligenceApprovedAt = undefined;
@@ -1299,20 +1381,24 @@ export function selectInvoiceSupplier(invoiceId: string, accountId: string) {
   }
 
   const supplierIdentity = supplierIdentityForInvoice(invoice);
-
-  if (
-    !store.learning.supplierSelections.some(
-      (decision) =>
-        decision.supplierIdentity === supplierIdentity &&
-        decision.accountId === account.id
-    )
-  ) {
-    store.learning.supplierSelections.unshift({
-      supplierIdentity,
-      accountId: account.id,
-      decidedAt: now(),
-    });
-  }
+  const user = getCurrentUser();
+  const decidedAt = now();
+  captureSupplierAccountCorrection({
+    invoice,
+    learning: store.learning,
+    accountId: account.id,
+    accountName: account.name,
+    user,
+    correctedAt: decidedAt,
+  });
+  store.learning.supplierSelections = store.learning.supplierSelections.filter(
+    (decision) => decision.supplierIdentity !== supplierIdentity
+  );
+  store.learning.supplierSelections.unshift({
+    supplierIdentity,
+    accountId: account.id,
+    decidedAt,
+  });
 
   const updatedInvoice = recomputeInvoiceState(invoiceId);
   addAuditEvent({

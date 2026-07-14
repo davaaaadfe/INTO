@@ -19,6 +19,7 @@ import type {
   IntoUser,
   InvoiceArchiveResult,
   PermissionAction,
+  PurchaseJournalLine,
   PublicExactConnection,
   UploadedInvoice,
   ValidationError,
@@ -92,6 +93,18 @@ type ReviewActionDefinition = {
   feedback?: ButtonFeedback;
 };
 
+type BookingLineDraft = PurchaseJournalLine & {
+  amountInput: string;
+  vatAmountInput: string;
+};
+
+type BookingLineIssue = {
+  id: string;
+  lineIndex?: number;
+  field?: "glAccount" | "description" | "from" | "to" | "vatCode" | "amount" | "vatAmount";
+  message: string;
+};
+
 type ArchiveFilterState = {
   keyword: string;
   invoiceDateFrom: string;
@@ -124,6 +137,7 @@ type ArchiveFilterState = {
 
 const missingInvoiceFileMessage =
   "Original invoice file could not be found. Please re-upload or re-read this invoice.";
+const learnedCorrectionNote = "Applied from previous user correction.";
 
 function invoiceFileCanBeRequested(invoice: UploadedInvoice) {
   return Boolean(
@@ -310,6 +324,28 @@ function numberValue(value: number | null) {
   return typeof value === "number" ? String(value) : "";
 }
 
+function moneyValue(value: number) {
+  return Number.isFinite(value) ? String(value) : "";
+}
+
+function moneyInputValue(value: string | undefined, fallback: number) {
+  return value ?? moneyValue(fallback);
+}
+
+function amountFromInput(value: string | undefined) {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) {
+    return null;
+  }
+
+  const amount = Number(trimmed);
+  return Number.isFinite(amount) ? amount : null;
+}
+
+function roundMoney(value: number) {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
 function percentScore(value: number) {
   return `${Math.round(value * 100)}%`;
 }
@@ -322,6 +358,109 @@ function confidenceTone(value: number, threshold: number) {
 
 function fileExtension(fileName: string) {
   return fileName.split(".").pop()?.toLowerCase() ?? "";
+}
+
+function splitExactOption(value: string) {
+  const [code = "", ...nameParts] = value.split(" - ");
+  return {
+    code: code.trim(),
+    name: nameParts.join(" - ").trim(),
+  };
+}
+
+function bookingLineGlValue(line: BookingLineDraft) {
+  return [line.glAccount, line.glAccountName].filter(Boolean).join(" - ");
+}
+
+function bookingLineVatValue(line: BookingLineDraft) {
+  return [line.vatCode, line.vatCodeName].filter(Boolean).join(" - ");
+}
+
+function toBookingLineDraft(line: PurchaseJournalLine): BookingLineDraft {
+  return {
+    ...line,
+    amountInput: moneyValue(line.amount),
+    vatAmountInput: moneyValue(line.vatAmount),
+  };
+}
+
+function toBookingLinePayload(line: BookingLineDraft): PurchaseJournalLine {
+  const { amountInput, vatAmountInput, ...payload } = line;
+  return {
+    ...payload,
+    amount: amountFromInput(amountInput) ?? 0,
+    vatAmount: amountFromInput(vatAmountInput) ?? 0,
+  };
+}
+
+function fallbackBookingLineDraft(
+  data: ExtractedInvoiceData,
+  seed?: PurchaseJournalLine | null
+): BookingLineDraft {
+  const amount = data.netAmount ?? data.grossAmount ?? 0;
+  const vatAmount = data.vatAmount ?? 0;
+
+  return {
+    id: `ui_line_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    glAccount: seed?.glAccount ?? "",
+    glAccountName: seed?.glAccountName ?? "",
+    suggestedGlAccount: seed?.suggestedGlAccount ?? "",
+    finalSelectedAccount: seed?.finalSelectedAccount ?? seed?.glAccount ?? "",
+    glConfidence: seed?.glConfidence ?? 0,
+    description: data.expenseDescription || data.lineItems[0]?.description || "",
+    from: seed?.from ?? "",
+    to: seed?.to ?? "",
+    costCentre: seed?.costCentre ?? "",
+    costCentreConfidence: seed?.costCentreConfidence ?? 0,
+    costUnit: seed?.costUnit ?? "",
+    costUnitConfidence: seed?.costUnitConfidence ?? 0,
+    vatCode: seed?.vatCode ?? "6",
+    vatCodeName: seed?.vatCodeName ?? "",
+    vatConfidence: seed?.vatConfidence ?? 0,
+    vatReasoning: seed?.vatReasoning ?? [],
+    percentage: seed?.percentage ?? 0,
+    amount,
+    vatAmount,
+    amountInput: moneyValue(amount),
+    vatAmountInput: moneyValue(vatAmount),
+    country: seed?.country ?? data.supplierCountry,
+    intercompany: seed?.intercompany ?? "",
+    roundingAdjustment: 0,
+    reviewRequired: true,
+    reasoning: seed?.reasoning ?? [],
+  };
+}
+
+function blankBookingLineDraft(seed?: BookingLineDraft): BookingLineDraft {
+  return {
+    id: `ui_line_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    glAccount: "",
+    glAccountName: "",
+    suggestedGlAccount: "",
+    finalSelectedAccount: "",
+    glConfidence: 0,
+    description: "",
+    from: seed?.from ?? "",
+    to: seed?.to ?? "",
+    costCentre: seed?.costCentre ?? "",
+    costCentreConfidence: seed?.costCentreConfidence ?? 0,
+    costUnit: seed?.costUnit ?? "",
+    costUnitConfidence: seed?.costUnitConfidence ?? 0,
+    vatCode: seed?.vatCode ?? "6",
+    vatCodeName: seed?.vatCodeName ?? "",
+    vatConfidence: seed?.vatConfidence ?? 0,
+    vatReasoning: seed?.vatReasoning ?? [],
+    percentage: seed?.percentage ?? 0,
+    amount: 0,
+    vatAmount: 0,
+    amountInput: "",
+    vatAmountInput: "0",
+    country: seed?.country ?? "",
+    intercompany: seed?.intercompany ?? "",
+    roundingAdjustment: 0,
+    reviewRequired: true,
+    reasoning: seed?.reasoning ?? [],
+  };
 }
 
 function isAcceptedFile(file: File) {
@@ -585,6 +724,17 @@ function inputBaseClass(emphasized = false) {
   return `w-full rounded-lg border-0 bg-transparent px-2.5 py-2 text-sm outline-none disabled:cursor-not-allowed disabled:bg-stone-50 disabled:text-stone-500 ${
     emphasized ? "text-base font-semibold text-emerald-950" : "text-stone-900"
   }`;
+}
+
+function compactLineInputClass(issue?: FieldIssue) {
+  const border =
+    issue?.tone === "error"
+      ? "border-rose-400"
+      : issue?.tone === "warning"
+        ? "border-amber-400"
+        : "border-stone-300";
+
+  return `w-full rounded-md border ${border} bg-white px-2 py-1.5 text-xs text-stone-900 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100 disabled:cursor-not-allowed disabled:bg-stone-100 disabled:text-stone-500`;
 }
 
 function SelectField({
@@ -933,6 +1083,7 @@ export function IntoWorkbench() {
   });
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<string>("");
   const [draft, setDraft] = useState<ExtractedInvoiceData | null>(null);
+  const [bookingLineDrafts, setBookingLineDrafts] = useState<BookingLineDraft[]>([]);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState("");
   const [buttonFeedback, setButtonFeedback] = useState<
@@ -977,7 +1128,6 @@ export function IntoWorkbench() {
     return previewFileProbe.status;
   }, [previewFileProbe, selectedInvoice]);
   const selectedPurchaseJournal = selectedInvoice?.purchaseJournal ?? null;
-  const firstBookingLine = selectedPurchaseJournal?.lines[0] ?? null;
   const currentCurrency =
     draft?.currency || selectedPurchaseJournal?.currency || "EUR";
   const confidenceThreshold = selectedPurchaseJournal?.confidenceThreshold;
@@ -1009,12 +1159,33 @@ export function IntoWorkbench() {
       value: `${vatCode.code} - ${vatCode.description}`,
       label: `${vatCode.code} - ${vatCode.description}`,
     }));
+  const costCenterOptions: SelectOption[] = (
+    state.exactMasterData?.costCenters ?? []
+  )
+    .filter((costCenter) => costCenter.isActive)
+    .map((costCenter) => ({
+      value: costCenter.code,
+      label: `${costCenter.code} - ${costCenter.description}`,
+    }));
+  const costUnitOptions: SelectOption[] = (state.exactMasterData?.costUnits ?? [])
+    .filter((costUnit) => costUnit.isActive)
+    .map((costUnit) => ({
+      value: costUnit.code,
+      label: `${costUnit.code} - ${costUnit.description}`,
+    }));
   const previewCanPan = previewFileStatus === "available";
   const pageCount = selectedInvoice?.fileName.toLowerCase().endsWith(".pdf") ? 3 : 1;
+  const bookingLinePayloads = bookingLineDrafts.map(toBookingLinePayload);
+  const hasBookingLineChanges = Boolean(
+    selectedInvoice &&
+      JSON.stringify(bookingLinePayloads) !==
+        JSON.stringify(selectedPurchaseJournal?.lines ?? [])
+  );
   const hasUnsavedChanges = Boolean(
     selectedInvoice &&
       draft &&
-      JSON.stringify(draft) !== JSON.stringify(selectedInvoice.extractedData)
+      (JSON.stringify(draft) !== JSON.stringify(selectedInvoice.extractedData) ||
+        hasBookingLineChanges)
   );
   const hasPermission = (permission: PermissionAction) =>
     state.permissions.includes(permission);
@@ -1089,34 +1260,6 @@ export function IntoWorkbench() {
   const invoiceDateIssue =
     requiredIssueFor(["invoiceDate"]) ?? validationIssueFor(["invoiceDate"]);
   const accrualRequired = bookingRequiresAccrual(selectedPurchaseJournal);
-  const glAccountIssue = validationIssueFor(
-    [],
-    [
-      firstBookingLine &&
-      confidenceThreshold &&
-      firstBookingLine.glConfidence < confidenceThreshold
-        ? "G/L account confidence is low. Review the suggested Exact account."
-        : undefined,
-    ]
-  );
-  const glAccountFieldIssue = requiredIssueFor(["glAccount"]) ?? glAccountIssue;
-  const accrualFromIssue = requiredIssueFor(["accrualFrom"]);
-  const accrualToIssue = requiredIssueFor(["accrualTo"]);
-  const vatCodeIssue = validationIssueFor(
-    [],
-    [
-      firstBookingLine?.vatCode === "6" &&
-      confidenceThreshold &&
-      firstBookingLine.vatConfidence < confidenceThreshold
-        ? "VAT code confidence is low. VAT code 6 was selected as safe fallback."
-        : firstBookingLine &&
-            confidenceThreshold &&
-            firstBookingLine.vatConfidence < confidenceThreshold
-          ? "VAT code confidence is low. Review the selected Exact VAT code."
-          : undefined,
-    ]
-  );
-  const vatCodeFieldIssue = requiredIssueFor(["vatCode"]) ?? vatCodeIssue;
   const totalAmountIssue = validationIssueFor(
     ["grossAmount"],
     [
@@ -1127,6 +1270,140 @@ export function IntoWorkbench() {
   );
   const totalAmountFieldIssue =
     requiredIssueFor(["grossAmount"]) ?? totalAmountIssue;
+  const bookingLineTotals = useMemo(() => {
+    const lineAmount = roundMoney(
+      bookingLineDrafts.reduce(
+        (sum, line) => sum + (amountFromInput(line.amountInput) ?? 0),
+        0
+      )
+    );
+    const vatAmount = roundMoney(
+      bookingLineDrafts.reduce(
+        (sum, line) => sum + (amountFromInput(line.vatAmountInput) ?? 0),
+        0
+      )
+    );
+    const grossAmount = roundMoney(lineAmount + vatAmount);
+    const invoiceTotal = roundMoney(draft?.grossAmount ?? 0);
+
+    return {
+      lineAmount,
+      vatAmount,
+      grossAmount,
+      invoiceTotal,
+      difference: roundMoney(invoiceTotal - grossAmount),
+    };
+  }, [bookingLineDrafts, draft?.grossAmount]);
+  const selectedBookingLineIssues = useMemo<BookingLineIssue[]>(() => {
+    const issues: BookingLineIssue[] = [];
+
+    if (!selectedInvoice) {
+      return issues;
+    }
+
+    if (!bookingLineDrafts.length) {
+      issues.push({
+        id: "booking-lines-required",
+        message: "At least one booking line is required.",
+      });
+    }
+
+    bookingLineDrafts.forEach((line, index) => {
+      const lineNumber = index + 1;
+      const requiresAccrualDates = accrualRequired || Boolean(line.accrualReason);
+
+      if (!line.glAccount.trim()) {
+        issues.push({
+          id: `line-${line.id}-gl`,
+          lineIndex: index,
+          field: "glAccount",
+          message: `Line ${lineNumber}: G/L Account is required.`,
+        });
+      }
+
+      if (!line.description.trim()) {
+        issues.push({
+          id: `line-${line.id}-description`,
+          lineIndex: index,
+          field: "description",
+          message: `Line ${lineNumber}: Description is required.`,
+        });
+      }
+
+      if (requiresAccrualDates && !line.from) {
+        issues.push({
+          id: `line-${line.id}-from`,
+          lineIndex: index,
+          field: "from",
+          message: `Line ${lineNumber}: Accrual From is required.`,
+        });
+      }
+
+      if (requiresAccrualDates && !line.to) {
+        issues.push({
+          id: `line-${line.id}-to`,
+          lineIndex: index,
+          field: "to",
+          message: `Line ${lineNumber}: Accrual To is required.`,
+        });
+      }
+
+      if (!line.vatCode) {
+        issues.push({
+          id: `line-${line.id}-vat`,
+          lineIndex: index,
+          field: "vatCode",
+          message: `Line ${lineNumber}: VAT code is required.`,
+        });
+      }
+
+      if (amountFromInput(line.amountInput) === null) {
+        issues.push({
+          id: `line-${line.id}-amount`,
+          lineIndex: index,
+          field: "amount",
+          message: `Line ${lineNumber}: Amount is required.`,
+        });
+      }
+
+      if (amountFromInput(line.vatAmountInput) === null) {
+        issues.push({
+          id: `line-${line.id}-vat-amount`,
+          lineIndex: index,
+          field: "vatAmount",
+          message: `Line ${lineNumber}: VAT amount is required.`,
+        });
+      }
+    });
+
+    if (bookingLineDrafts.length && bookingLineTotals.difference !== 0) {
+      issues.push({
+        id: "booking-lines-difference",
+        message: "Booking line totals must match the invoice total before booking.",
+      });
+    }
+
+    return issues;
+  }, [
+    accrualRequired,
+    bookingLineDrafts,
+    bookingLineTotals.difference,
+    selectedInvoice,
+  ]);
+  const selectedBookingLineDisabledReason = selectedBookingLineIssues.length
+    ? selectedBookingLineIssues.some((issue) => issue.id === "booking-lines-difference")
+      ? "Booking line totals must match the invoice total before booking."
+      : "Complete all booking line required fields before booking to Exact Online."
+    : "";
+  const bookingLineIssueFor = (
+    lineIndex: number,
+    field: BookingLineIssue["field"]
+  ): FieldIssue | undefined => {
+    const issue = selectedBookingLineIssues.find(
+      (item) => item.lineIndex === lineIndex && item.field === field
+    );
+    return issue ? { tone: "error", message: issue.message } : undefined;
+  };
   const visibleValidationMessages = selectedInvoice
     ? [
         ...selectedInvoice.validationErrors.map((item) => ({
@@ -1144,6 +1421,10 @@ export function IntoWorkbench() {
             id: `required-${String(issue.field)}`,
             message: issue.message,
           })),
+        ...selectedBookingLineIssues.map((issue) => ({
+          id: issue.id,
+          message: issue.message,
+        })),
       ]
     : [];
 
@@ -1165,6 +1446,13 @@ export function IntoWorkbench() {
       booked,
     };
   }, [state.invoices]);
+  const bookAllLineBlockedInvoice = state.invoices.find(
+    (invoice) =>
+      invoice.status === "Ready to Book" && bookingLineDisabledReason(invoice)
+  );
+  const bookAllLineDisabledReason = bookAllLineBlockedInvoice
+    ? `${bookAllLineBlockedInvoice.fileName}: ${bookingLineDisabledReason(bookAllLineBlockedInvoice)}`
+    : "";
 
   const canApproveSelectedIntelligence = Boolean(
     selectedPurchaseJournal &&
@@ -1520,8 +1808,13 @@ export function IntoWorkbench() {
   useEffect(() => {
     if (selectedInvoice) {
       const nextDraft = { ...selectedInvoice.extractedData };
+      const nextBookingLines =
+        selectedInvoice.purchaseJournal?.lines.length
+          ? selectedInvoice.purchaseJournal.lines.map(toBookingLineDraft)
+          : [fallbackBookingLineDraft(nextDraft)];
       const timeoutId = window.setTimeout(() => {
         setDraft(nextDraft);
+        setBookingLineDrafts(nextBookingLines);
         setPreviewPage(1);
         setPreviewZoom(defaultPreviewZoom);
         setPreviewRotation(0);
@@ -1532,6 +1825,13 @@ export function IntoWorkbench() {
 
       return () => window.clearTimeout(timeoutId);
     }
+
+    const timeoutId = window.setTimeout(() => {
+      setDraft(null);
+      setBookingLineDrafts([]);
+    }, 0);
+
+    return () => window.clearTimeout(timeoutId);
   }, [selectedInvoice, resetPreviewScroll]);
 
   useEffect(() => {
@@ -1908,7 +2208,10 @@ export function IntoWorkbench() {
       const response = await fetch(`/api/invoices/${selectedInvoice.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(draft),
+        body: JSON.stringify({
+          extractedData: draft,
+          bookingLines: bookingLinePayloads,
+        }),
       });
       const data = await response.json();
 
@@ -2196,6 +2499,18 @@ export function IntoWorkbench() {
   }
 
   async function bookAllReady() {
+    const blockedReadyInvoice = state.invoices.find(
+      (invoice) =>
+        invoice.status === "Ready to Book" && bookingLineDisabledReason(invoice)
+    );
+    if (blockedReadyInvoice) {
+      setMessage(
+        `${blockedReadyInvoice.fileName}: ${bookingLineDisabledReason(blockedReadyInvoice)}`
+      );
+      flashButton("book-all", "error");
+      return;
+    }
+
     setBusy("book-all");
     try {
       const response = await fetch("/api/invoices/book-ready", { method: "POST" });
@@ -2228,6 +2543,70 @@ export function IntoWorkbench() {
 
       return { ...current, [field]: value };
     });
+  }
+
+  function updateBookingLine(
+    index: number,
+    patch: Partial<BookingLineDraft>
+  ) {
+    setBookingLineDrafts((current) =>
+      current.map((line, lineIndex) =>
+        lineIndex === index ? { ...line, ...patch } : line
+      )
+    );
+  }
+
+  function updateBookingLineGl(index: number, value: string) {
+    const exactAccount = state.exactMasterData?.glAccounts.find(
+      (account) => `${account.code} - ${account.name}` === value
+    );
+    const parsed = splitExactOption(value);
+    const code = exactAccount?.code ?? parsed.code;
+    const name = exactAccount?.name ?? parsed.name;
+
+    updateBookingLine(index, {
+      glAccount: code,
+      glAccountName: name,
+      finalSelectedAccount: code,
+    });
+  }
+
+  function updateBookingLineVat(index: number, value: string) {
+    const exactVat = state.exactMasterData?.vatCodes.find(
+      (vatCode) => `${vatCode.code} - ${vatCode.description}` === value
+    );
+    const parsed = splitExactOption(value);
+
+    updateBookingLine(index, {
+      vatCode: (exactVat?.code ?? parsed.code) as PurchaseJournalLine["vatCode"],
+      vatCodeName: exactVat?.description ?? parsed.name,
+      percentage: exactVat?.percentage ?? bookingLineDrafts[index]?.percentage ?? 0,
+    });
+  }
+
+  function updateBookingLineAmount(
+    index: number,
+    field: "amount" | "vatAmount",
+    value: string
+  ) {
+    const amount = amountFromInput(value) ?? 0;
+    updateBookingLine(index, {
+      [field]: amount,
+      [`${field}Input`]: value,
+    } as Partial<BookingLineDraft>);
+  }
+
+  function addBookingLine() {
+    setBookingLineDrafts((current) => [
+      ...current,
+      blankBookingLineDraft(current[0]),
+    ]);
+  }
+
+  function deleteBookingLine(index: number) {
+    setBookingLineDrafts((current) =>
+      current.filter((_, lineIndex) => lineIndex !== index)
+    );
   }
 
   function downloadOriginal() {
@@ -2336,6 +2715,48 @@ export function IntoWorkbench() {
     return "";
   }
 
+  function bookingLineDisabledReason(invoice: UploadedInvoice) {
+    if (selectedInvoice?.id === invoice.id) {
+      return selectedBookingLineDisabledReason;
+    }
+
+    const lines = invoice.purchaseJournal?.lines ?? [];
+    if (!lines.length) {
+      return "At least one booking line is required before booking to Exact Online.";
+    }
+
+    const requiresAccrualDates = bookingRequiresAccrual(invoice.purchaseJournal);
+    const hasMissingRequiredLineField = lines.some(
+      (line) =>
+        !line.glAccount ||
+        !line.description ||
+        !line.vatCode ||
+        typeof line.amount !== "number" ||
+        (requiresAccrualDates && (!line.from || !line.to))
+    );
+
+    if (hasMissingRequiredLineField) {
+      return "Complete all booking line required fields before booking to Exact Online.";
+    }
+
+    const savedLineAmount = roundMoney(
+      lines.reduce((sum, line) => sum + line.amount, 0)
+    );
+    const savedVatAmount = roundMoney(
+      lines.reduce((sum, line) => sum + line.vatAmount, 0)
+    );
+    const savedDifference = roundMoney(
+      (invoice.extractedData.grossAmount ?? 0) -
+        roundMoney(savedLineAmount + savedVatAmount)
+    );
+
+    if (savedDifference !== 0) {
+      return "Booking line totals must match the invoice total before booking.";
+    }
+
+    return "";
+  }
+
   function bookDisabledReason(invoice: UploadedInvoice) {
     if (!hasPermission("book")) {
       return "Your INTO account is not verified for invoice booking.";
@@ -2347,6 +2768,11 @@ export function IntoWorkbench() {
 
     if (hasUnsavedChanges) {
       return "Save changes before booking so validation uses your latest values.";
+    }
+
+    const bookingLineReason = bookingLineDisabledReason(invoice);
+    if (bookingLineReason) {
+      return bookingLineReason;
     }
 
     if (!state.exactConnection) {
@@ -3216,6 +3642,7 @@ export function IntoWorkbench() {
                 !state.exactConnection ||
                 !state.exactMasterData ||
                 state.exactMasterDataStale ||
+                Boolean(bookAllLineDisabledReason) ||
                 busy === "book-all"
               }
               disabledReason={
@@ -3225,6 +3652,8 @@ export function IntoWorkbench() {
                   ? "Connect the company Exact account before booking ready invoices."
                   : !state.exactMasterData || state.exactMasterDataStale
                     ? "Sync Exact data before booking ready invoices."
+                  : bookAllLineDisabledReason
+                    ? bookAllLineDisabledReason
                   : "Book All Ready Invoices is disabled because no invoices are ready."
               }
             >
@@ -3363,6 +3792,7 @@ export function IntoWorkbench() {
                             `book-${invoice.id}`
                           )}
                           disabled={
+                            Boolean(disabledReason) ||
                             invoice.status !== "Ready to Book" ||
                             !hasPermission("book") ||
                             !state.exactConnection ||
@@ -3567,6 +3997,13 @@ export function IntoWorkbench() {
               <div className="flex flex-col gap-3 bg-stone-50/40 p-3 sm:p-4">
                 <section className="grid gap-3">
                   <ReviewSection title="Required data">
+                    {selectedPurchaseJournal?.learningSummary.includes(
+                      learnedCorrectionNote
+                    ) ? (
+                      <p className="sm:col-span-2 text-xs font-medium text-emerald-700">
+                        {learnedCorrectionNote}
+                      </p>
+                    ) : null}
                     <SelectField
                       label="Supplier"
                       required
@@ -3637,78 +4074,337 @@ export function IntoWorkbench() {
                       disabled={!hasPermission("edit")}
                       issue={invoiceDateIssue}
                     />
-                    <SelectField
-                      label="G/L Account"
-                      required
-                      value={
-                        firstBookingLine
-                          ? `${firstBookingLine.glAccount} - ${firstBookingLine.glAccountName}`
-                          : ""
-                      }
-                      options={glAccountOptions}
-                      listId={`gl-options-${selectedInvoice.id}`}
-                      readOnly
-                      issue={glAccountFieldIssue}
-                      helper="Selected from synced Exact G/L accounts."
-                      confidence={firstBookingLine?.glConfidence}
-                      threshold={confidenceThreshold}
-                    />
-                      <DateField
-                        label="Accrual From"
-                        required={accrualRequired}
-                        value={firstBookingLine?.from ?? ""}
-                        onChange={() => undefined}
-                        disabled
-                        issue={accrualFromIssue}
-                      />
-                      <DateField
-                        label="Accrual To"
-                        required={accrualRequired}
-                        value={firstBookingLine?.to ?? ""}
-                        onChange={() => undefined}
-                        disabled
-                        issue={accrualToIssue}
-                      />
-                    <SelectField
-                      label="VAT code"
-                      required
-                      value={
-                        firstBookingLine
-                          ? `${firstBookingLine.vatCode} - ${firstBookingLine.vatCodeName}`
-                          : ""
-                      }
-                      options={vatCodeOptions}
-                      listId={`vat-options-${selectedInvoice.id}`}
-                      readOnly
-                      issue={vatCodeFieldIssue}
-                      helper="Selected from synced Exact purchase VAT codes."
-                      confidence={firstBookingLine?.vatConfidence}
-                      threshold={confidenceThreshold}
-                    />
-                      <AmountField
-                        label="Net amount"
-                        required
-                        value={draft.netAmount}
-                        currency={currentCurrency}
-                        onChange={(value) => updateDraft("netAmount", value)}
-                        disabled={!hasPermission("edit")}
-                        issue={
-                          requiredIssueFor(["netAmount"]) ??
-                          validationIssueFor(["netAmount"])
-                        }
-                      />
-                      <AmountField
-                        label="VAT amount"
-                        required
-                        value={draft.vatAmount}
-                        currency={currentCurrency}
-                        onChange={(value) => updateDraft("vatAmount", value)}
-                        disabled={!hasPermission("edit")}
-                        issue={
-                          requiredIssueFor(["vatAmount"]) ??
-                          validationIssueFor(["vatAmount"])
-                        }
-                      />
+                    <div className="sm:col-span-2 rounded-lg border border-stone-200 bg-stone-50/60 p-3">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <h4 className="text-sm font-semibold text-stone-900">
+                            Booking lines
+                            <span className="ml-1 text-rose-600" aria-hidden="true">
+                              *
+                            </span>
+                            <span className="sr-only"> required</span>
+                          </h4>
+                          <p className="mt-1 text-xs leading-5 text-stone-500">
+                            Split the invoice into one or more Exact purchase journal
+                            lines.
+                          </p>
+                        </div>
+                        <ActionButton
+                          variant="ghost"
+                          onClick={addBookingLine}
+                          disabled={!hasPermission("edit")}
+                          disabledReason="Your INTO account is not verified for invoice edits."
+                          className="min-h-9 px-3 py-1.5 text-xs"
+                        >
+                          Add line
+                        </ActionButton>
+                      </div>
+
+                      <div className="mt-3 overflow-x-auto rounded-lg border border-stone-200 bg-white">
+                        <table className="w-full min-w-[980px] border-collapse text-left text-xs">
+                          <thead className="bg-stone-100 text-stone-600">
+                            <tr>
+                              <th className="px-2 py-2">
+                                G/L Account <span className="text-rose-600">*</span>
+                              </th>
+                              <th className="px-2 py-2">
+                                Description <span className="text-rose-600">*</span>
+                              </th>
+                              <th className="px-2 py-2">From</th>
+                              <th className="px-2 py-2">To</th>
+                              <th className="px-2 py-2">Cost center</th>
+                              <th className="px-2 py-2">Cost unit</th>
+                              <th className="px-2 py-2">
+                                VAT code <span className="text-rose-600">*</span>
+                              </th>
+                              <th className="px-2 py-2 text-right">
+                                Amount <span className="text-rose-600">*</span>
+                              </th>
+                              <th className="px-2 py-2 text-right">
+                                VAT amount <span className="text-rose-600">*</span>
+                              </th>
+                              <th className="px-2 py-2 text-right">Actions</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {bookingLineDrafts.length ? (
+                              bookingLineDrafts.map((line, index) => (
+                                <tr
+                                  key={line.id}
+                                  className="border-t border-stone-200 align-top"
+                                >
+                                  <td className="w-[150px] px-2 py-2">
+                                    <input
+                                      className={compactLineInputClass(
+                                        bookingLineIssueFor(index, "glAccount")
+                                      )}
+                                      list={`line-gl-options-${selectedInvoice.id}`}
+                                      value={bookingLineGlValue(line)}
+                                      onChange={(event) =>
+                                        updateBookingLineGl(index, event.target.value)
+                                      }
+                                      disabled={!hasPermission("edit")}
+                                    />
+                                    <ValidationMessage
+                                      issue={bookingLineIssueFor(index, "glAccount")}
+                                    />
+                                  </td>
+                                  <td className="w-[190px] px-2 py-2">
+                                    <input
+                                      className={compactLineInputClass(
+                                        bookingLineIssueFor(index, "description")
+                                      )}
+                                      value={line.description}
+                                      onChange={(event) =>
+                                        updateBookingLine(index, {
+                                          description: event.target.value,
+                                        })
+                                      }
+                                      disabled={!hasPermission("edit")}
+                                    />
+                                    <ValidationMessage
+                                      issue={bookingLineIssueFor(index, "description")}
+                                    />
+                                  </td>
+                                  <td className="w-[110px] px-2 py-2">
+                                    <input
+                                      className={compactLineInputClass(
+                                        bookingLineIssueFor(index, "from")
+                                      )}
+                                      type="date"
+                                      value={line.from}
+                                      onChange={(event) =>
+                                        updateBookingLine(index, {
+                                          from: event.target.value,
+                                        })
+                                      }
+                                      disabled={!hasPermission("edit")}
+                                    />
+                                    <ValidationMessage
+                                      issue={bookingLineIssueFor(index, "from")}
+                                    />
+                                  </td>
+                                  <td className="w-[110px] px-2 py-2">
+                                    <input
+                                      className={compactLineInputClass(
+                                        bookingLineIssueFor(index, "to")
+                                      )}
+                                      type="date"
+                                      value={line.to}
+                                      onChange={(event) =>
+                                        updateBookingLine(index, {
+                                          to: event.target.value,
+                                        })
+                                      }
+                                      disabled={!hasPermission("edit")}
+                                    />
+                                    <ValidationMessage
+                                      issue={bookingLineIssueFor(index, "to")}
+                                    />
+                                  </td>
+                                  <td className="w-[110px] px-2 py-2">
+                                    <input
+                                      className={compactLineInputClass()}
+                                      list={`line-cost-center-options-${selectedInvoice.id}`}
+                                      value={line.costCentre}
+                                      onChange={(event) =>
+                                        updateBookingLine(index, {
+                                          costCentre: event.target.value,
+                                        })
+                                      }
+                                      disabled={!hasPermission("edit")}
+                                    />
+                                  </td>
+                                  <td className="w-[110px] px-2 py-2">
+                                    <input
+                                      className={compactLineInputClass()}
+                                      list={`line-cost-unit-options-${selectedInvoice.id}`}
+                                      value={line.costUnit}
+                                      onChange={(event) =>
+                                        updateBookingLine(index, {
+                                          costUnit: event.target.value,
+                                        })
+                                      }
+                                      disabled={!hasPermission("edit")}
+                                    />
+                                  </td>
+                                  <td className="w-[130px] px-2 py-2">
+                                    <input
+                                      className={compactLineInputClass(
+                                        bookingLineIssueFor(index, "vatCode")
+                                      )}
+                                      list={`line-vat-options-${selectedInvoice.id}`}
+                                      value={bookingLineVatValue(line)}
+                                      onChange={(event) =>
+                                        updateBookingLineVat(index, event.target.value)
+                                      }
+                                      disabled={!hasPermission("edit")}
+                                    />
+                                    <ValidationMessage
+                                      issue={bookingLineIssueFor(index, "vatCode")}
+                                    />
+                                  </td>
+                                  <td className="w-[100px] px-2 py-2">
+                                    <input
+                                      className={`${compactLineInputClass(
+                                        bookingLineIssueFor(index, "amount")
+                                      )} text-right`}
+                                      type="number"
+                                      step="0.01"
+                                      value={moneyInputValue(
+                                        line.amountInput,
+                                        line.amount
+                                      )}
+                                      onChange={(event) =>
+                                        updateBookingLineAmount(
+                                          index,
+                                          "amount",
+                                          event.target.value
+                                        )
+                                      }
+                                      disabled={!hasPermission("edit")}
+                                    />
+                                    <ValidationMessage
+                                      issue={bookingLineIssueFor(index, "amount")}
+                                    />
+                                  </td>
+                                  <td className="w-[100px] px-2 py-2">
+                                    <input
+                                      className={`${compactLineInputClass(
+                                        bookingLineIssueFor(index, "vatAmount")
+                                      )} text-right`}
+                                      type="number"
+                                      step="0.01"
+                                      value={moneyInputValue(
+                                        line.vatAmountInput,
+                                        line.vatAmount
+                                      )}
+                                      onChange={(event) =>
+                                        updateBookingLineAmount(
+                                          index,
+                                          "vatAmount",
+                                          event.target.value
+                                        )
+                                      }
+                                      disabled={!hasPermission("edit")}
+                                    />
+                                    <ValidationMessage
+                                      issue={bookingLineIssueFor(index, "vatAmount")}
+                                    />
+                                  </td>
+                                  <td className="w-[80px] px-2 py-2 text-right">
+                                    <button
+                                      type="button"
+                                      onClick={() => deleteBookingLine(index)}
+                                      disabled={!hasPermission("edit")}
+                                      className="cursor-pointer rounded-md border border-rose-200 bg-white px-2 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:border-stone-200 disabled:bg-stone-100 disabled:text-stone-400"
+                                    >
+                                      Delete
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))
+                            ) : (
+                              <tr>
+                                <td
+                                  className="px-3 py-4 text-center text-sm text-rose-700"
+                                  colSpan={10}
+                                >
+                                  At least one booking line is required.
+                                </td>
+                              </tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      <datalist id={`line-gl-options-${selectedInvoice.id}`}>
+                        {glAccountOptions.map((option) => (
+                          <option
+                            key={`line-gl-${option.value}`}
+                            value={option.value}
+                          >
+                            {option.label ?? option.value}
+                          </option>
+                        ))}
+                      </datalist>
+                      <datalist id={`line-vat-options-${selectedInvoice.id}`}>
+                        {vatCodeOptions.map((option) => (
+                          <option
+                            key={`line-vat-${option.value}`}
+                            value={option.value}
+                          >
+                            {option.label ?? option.value}
+                          </option>
+                        ))}
+                      </datalist>
+                      <datalist id={`line-cost-center-options-${selectedInvoice.id}`}>
+                        {costCenterOptions.map((option) => (
+                          <option
+                            key={`line-cost-center-${option.value}`}
+                            value={option.value}
+                          >
+                            {option.label ?? option.value}
+                          </option>
+                        ))}
+                      </datalist>
+                      <datalist id={`line-cost-unit-options-${selectedInvoice.id}`}>
+                        {costUnitOptions.map((option) => (
+                          <option
+                            key={`line-cost-unit-${option.value}`}
+                            value={option.value}
+                          >
+                            {option.label ?? option.value}
+                          </option>
+                        ))}
+                      </datalist>
+
+                      <div className="mt-3 grid gap-2 rounded-lg border border-stone-200 bg-white p-3 text-sm sm:grid-cols-4">
+                        <div>
+                          <div className="text-xs font-semibold text-stone-500">
+                            Line amount
+                          </div>
+                          <div className="mt-1 font-semibold text-stone-900">
+                            {formatMoney(bookingLineTotals.lineAmount, currentCurrency)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-xs font-semibold text-stone-500">
+                            VAT amount
+                          </div>
+                          <div className="mt-1 font-semibold text-stone-900">
+                            {formatMoney(bookingLineTotals.vatAmount, currentCurrency)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-xs font-semibold text-stone-500">
+                            Invoice total
+                          </div>
+                          <div className="mt-1 font-semibold text-stone-900">
+                            {formatMoney(bookingLineTotals.invoiceTotal, currentCurrency)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-xs font-semibold text-stone-500">
+                            Difference
+                          </div>
+                          <div
+                            className={`mt-1 font-semibold ${
+                              bookingLineTotals.difference === 0
+                                ? "text-emerald-700"
+                                : "text-rose-700"
+                            }`}
+                          >
+                            {formatMoney(bookingLineTotals.difference, currentCurrency)}
+                          </div>
+                        </div>
+                      </div>
+                      {selectedBookingLineDisabledReason ? (
+                        <p className="mt-2 text-xs font-medium leading-5 text-rose-700">
+                          {selectedBookingLineDisabledReason}
+                        </p>
+                      ) : null}
+                    </div>
                     <AmountField
                       label="Total Amount"
                       required

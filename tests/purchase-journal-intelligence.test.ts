@@ -169,6 +169,11 @@ test("requires booking data fields but ignores empty additional and removed fiel
   const errors = purchaseJournalValidationErrors(booking, invoice.extractedData);
   const errorFields = new Set(errors.map((error) => String(error.field)));
 
+  assert.equal(
+    errors.some((error) => error.message.includes("Duplicate invoices cannot be booked")),
+    false
+  );
+
   for (const field of [
     "supplierName",
     "expenseDescription",
@@ -246,6 +251,35 @@ test("requires accrual dates only when accrual applies", () => {
 
   assert.equal(errorFields.has("accrualFrom"), true);
   assert.equal(errorFields.has("accrualTo"), true);
+});
+
+test("blocks a duplicate Your ref for the same supplier with the required message", () => {
+  const previous = uploadedInvoice(
+    { id: "invoice_previous" },
+    { invoiceNumber: "AH-2026-004821", referenceCode: "AH-2026-004821" }
+  );
+  const current = uploadedInvoice(
+    { id: "invoice_current" },
+    { invoiceNumber: "AH-2026-004821", referenceCode: "AH-2026-004821" }
+  );
+  const booking = generatePurchaseJournalBooking(
+    current,
+    [previous, current],
+    createInitialLearningStore(),
+    exactMasterData
+  );
+  const errors = purchaseJournalValidationErrors(booking, current.extractedData);
+
+  assert.equal(booking.yourRefUnique, false);
+  assert.equal(
+    errors.some(
+      (error) =>
+        error.field === "yourRef" &&
+        error.message ===
+          "This invoice reference already exists for this supplier. Duplicate invoices cannot be booked."
+    ),
+    true
+  );
 });
 
 test("marks multiple matching suppliers for manual supplier review", () => {
@@ -413,7 +447,7 @@ test("moves closed invoice periods to the first available open period", () => {
   assert.equal(booking.periodAdjusted, true);
 });
 
-test("blocks booking when Exact already has the same reference and amount", async () => {
+test("blocks booking when Exact already has the same supplier reference with a different amount", async () => {
   const invoice = uploadedInvoice(
     {
       fileName: "google-duplicate.pdf",
@@ -429,9 +463,9 @@ test("blocks booking when Exact already has the same reference and amount", asyn
       invoiceNumber: "GOOGLE-2026-06",
       referenceCode: "GOOGLE-2026-06",
       paymentTerms: "30 days",
-      netAmount: 121,
+      netAmount: 200,
       vatAmount: 0,
-      grossAmount: 121,
+      grossAmount: 200,
       iban: "IE29AIBK93115212345678",
       expenseDescription: "Google Workspace",
       companyVatNumber: "NL857017263B01",
@@ -442,11 +476,11 @@ test("blocks booking when Exact already has the same reference and amount", asyn
           id: "line_google",
           description: "Google Workspace",
           quantity: 1,
-          unitPrice: 121,
-          netAmount: 121,
+          unitPrice: 200,
+          netAmount: 200,
           vatRate: 0,
           vatAmount: 0,
-          grossAmount: 121,
+          grossAmount: 200,
         },
       ],
     }
@@ -472,6 +506,6 @@ test("blocks booking when Exact already has the same reference and amount", asyn
         invoice,
         exactMasterData
       ),
-    /Duplicate invoice blocked.*GOOGLE-2026-06.*121\.00/
+    /This invoice reference already exists for this supplier\. Duplicate invoices cannot be booked\./
   );
 });

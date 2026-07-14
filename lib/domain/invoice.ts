@@ -422,6 +422,8 @@ export type UploadedInvoice = {
   duplicateResolutionDecision?: DuplicateResolutionDecision;
   extractedData: ExtractedInvoiceData;
   extractionHistory: ExtractionVersion[];
+  bookingLineOverrides?: PurchaseJournalLine[];
+  learnedFieldsApplied?: LearnableCorrectionField[];
   purchaseJournal: PurchaseJournalBooking | null;
   validationErrors: ValidationError[];
   bookingAttempts: BookingAttempt[];
@@ -514,6 +516,36 @@ export type GlAccountLearningDecision = {
   decidedAt: string;
 };
 
+export type LearnableCorrectionField =
+  | "supplier"
+  | "yourRefPattern"
+  | "glAccount"
+  | "vatCode"
+  | "costCentre"
+  | "costUnit"
+  | "expenseDescription"
+  | "paymentCondition"
+  | "accrualPeriod"
+  | "bookingLineSplit";
+
+export type LearnedCorrection = {
+  id: string;
+  field: LearnableCorrectionField;
+  supplierIdentity: string;
+  supplierName: string;
+  supplierAccountId?: string;
+  matchKey: string;
+  originalValue: unknown;
+  correctedValue: unknown;
+  invoiceTextContext?: string;
+  filenamePattern?: string;
+  confidence: number;
+  correctedAt: string;
+  correctedByUserId: string;
+  correctedByUserName: string;
+  metadata?: Record<string, unknown>;
+};
+
 export type BookingLearningStore = {
   supplierSelections: SupplierLearningDecision[];
   glAccountSelections: GlAccountLearningDecision[];
@@ -535,6 +567,7 @@ export type BookingLearningStore = {
     costUnit: string;
     decidedAt: string;
   }>;
+  corrections: LearnedCorrection[];
 };
 
 export const emptyExtractedInvoiceData = (): ExtractedInvoiceData => ({

@@ -11,8 +11,17 @@ import type {
   ValidationError,
 } from "../domain/invoice";
 import { createId } from "../utils/id";
-import { isValidIsoDate, normalizeText } from "./invoice-validation";
+import {
+  DUPLICATE_INVOICE_REFERENCE_MESSAGE,
+  isValidIsoDate,
+  normalizeText,
+} from "./invoice-validation";
 import { requiredBookingDataValidationErrors } from "./required-booking-data";
+import {
+  LEARNED_CORRECTION_NOTE,
+  learnedBookingLinesForInvoice,
+  learningDescriptionKey,
+} from "./correction-learning";
 
 type VatCode = PurchaseJournalLine["vatCode"];
 
@@ -108,7 +117,7 @@ function primarySupplierIdentity(data: ExtractedInvoiceData) {
 }
 
 function descriptionKey(value: string) {
-  return normalizeText(value).replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  return learningDescriptionKey(value);
 }
 
 function mergeCandidate(
@@ -737,6 +746,7 @@ function suggestVatCode(
   data: ExtractedInvoiceData,
   lineDescriptionText: string,
   line: { netAmount: number; vatAmount: number; grossAmount: number; vatRate?: number },
+  learning: BookingLearningStore,
   exactMasterData: ExactMasterDataCache | null
 ): VatSuggestion {
   const country = supplierCountry(supplier, data);
@@ -787,6 +797,29 @@ function suggestVatCode(
       reasoning,
     };
   };
+
+  const key = descriptionKey(lineDescriptionText || humanDescription(data));
+  const learned = supplier
+    ? learning.vatCodeSelections.find(
+        (decision) =>
+          decision.supplierAccountId === supplier.id &&
+          decision.descriptionKey === key
+      )
+    : undefined;
+
+  if (learned) {
+    const vatInclusive =
+      learned.vatCode === "7" ||
+      learned.vatCode === "8" ||
+      (learned.vatCode === "6" && Math.abs(line.vatAmount) < 0.005);
+    return suggestionForCode(
+      learned.vatCode,
+      0.97,
+      0,
+      vatInclusive ? "vat_inclusive" : "vat_excluded",
+      [LEARNED_CORRECTION_NOTE]
+    );
+  }
 
   if (
     companyVatPresent &&
@@ -982,15 +1015,79 @@ function costSelection(
             ? 0.88
             : 0
           : 0.9,
+    learnedApplied: Boolean(learnedCentre || learnedUnit),
   };
 }
 
 function buildLines(
+  invoice: UploadedInvoice,
   supplier: ExactSupplierAccount | undefined,
   data: ExtractedInvoiceData,
   learning: BookingLearningStore,
   exactMasterData: ExactMasterDataCache | null
 ) {
+  const learnedLines = learnedBookingLinesForInvoice(
+    invoice,
+    supplier?.id,
+    learning
+  );
+  const overrideLines = invoice.bookingLineOverrides?.length
+    ? { lines: invoice.bookingLineOverrides, confidence: 1, learned: false }
+    : learnedLines
+      ? { ...learnedLines, learned: true }
+      : null;
+
+  if (overrideLines) {
+    return overrideLines.lines.map((source) => {
+      const gl = exactGlAccount(
+        exactMasterData,
+        source.finalSelectedAccount || source.glAccount
+      );
+      const vat = exactVatCode(exactMasterData, source.vatCode);
+      const centre = source.costCentre
+        ? exactCostCenter(exactMasterData, source.costCentre)
+        : undefined;
+      const unit = source.costUnit
+        ? exactCostUnit(exactMasterData, source.costUnit)
+        : undefined;
+      const exactValuesReady = Boolean(
+        gl && vat && (!source.costCentre || centre) && (!source.costUnit || unit)
+      );
+      const reasoning = [
+        ...(source.reasoning ?? []),
+        ...(overrideLines.learned ? [LEARNED_CORRECTION_NOTE] : []),
+      ];
+
+      return {
+        ...source,
+        id: createId("pj_line"),
+        glAccount: source.finalSelectedAccount || source.glAccount,
+        glAccountName: gl?.name ?? source.glAccountName,
+        suggestedGlAccount: source.finalSelectedAccount || source.glAccount,
+        finalSelectedAccount: source.finalSelectedAccount || source.glAccount,
+        glConfidence: exactValuesReady ? overrideLines.confidence : 0,
+        costCentreConfidence: source.costCentre
+          ? centre
+            ? overrideLines.confidence
+            : 0
+          : overrideLines.confidence,
+        costUnitConfidence: source.costUnit
+          ? unit
+            ? overrideLines.confidence
+            : 0
+          : overrideLines.confidence,
+        vatCodeName: vat?.description ?? source.vatCodeName,
+        vatConfidence: vat ? overrideLines.confidence : 0,
+        vatReasoning: [
+          ...(source.vatReasoning ?? []),
+          ...(overrideLines.learned ? [LEARNED_CORRECTION_NOTE] : []),
+        ],
+        reviewRequired: !exactValuesReady,
+        reasoning: [...new Set(reasoning)],
+      };
+    });
+  }
+
   const accrual = determineAccrual(data);
   const lines: PurchaseJournalLine[] = sourceLines(data).map((line) => {
     const gl = suggestGlAccount(
@@ -1005,6 +1102,7 @@ function buildLines(
       data,
       line.description,
       line,
+      learning,
       exactMasterData
     );
     const costs = costSelection(
@@ -1052,7 +1150,11 @@ function buildLines(
       intercompany: supplier?.isInBodyEntity ? "Yes" : "",
       roundingAdjustment: 0,
       reviewRequired,
-      reasoning: [gl.reason, ...vat.reasoning],
+      reasoning: [
+        gl.reason,
+        ...vat.reasoning,
+        ...(costs.learnedApplied ? [LEARNED_CORRECTION_NOTE] : []),
+      ],
     };
   });
 
@@ -1197,6 +1299,7 @@ export function createInitialLearningStore(): BookingLearningStore {
     vatCodeSelections: [],
     costCentreSelections: [],
     costUnitSelections: [],
+    corrections: [],
   };
 }
 
@@ -1216,7 +1319,7 @@ export function generatePurchaseJournalBooking(
   const supplier = selectedSupplierAccount(supplierResolution, exactMasterData);
   const payment = paymentConditionFor(supplier, data, exactMasterData);
   const period = determineFinancialPeriod(data);
-  const lines = buildLines(supplier, data, learning, exactMasterData);
+  const lines = buildLines(invoice, supplier, data, learning, exactMasterData);
   const totals = totalsFor(lines, data.grossAmount);
   const yourRef = yourRefValue(data);
   const yourRefUnique = isYourRefUnique(invoice, allInvoices, supplier);
@@ -1242,7 +1345,7 @@ export function generatePurchaseJournalBooking(
     !attachmentPresent ? "Original invoice attachment is required before booking." : "",
     supplierResolution.reviewRequired ? "Supplier review required before automation can continue." : "",
     !yourRef ? "Your ref. must contain the invoice number or invoice reference." : "",
-    !yourRefUnique ? "Your ref. is already used for this supplier." : "",
+    yourRef && !yourRefUnique ? DUPLICATE_INVOICE_REFERENCE_MESSAGE : "",
     Math.abs(totals.difference) > 0.005
       ? "Booking line total does not match the invoice total."
       : "",
@@ -1262,6 +1365,12 @@ export function generatePurchaseJournalBooking(
     ...criticalReasons,
     ...(userApproved ? [] : reviewableReasons),
   ];
+  const learnedCorrectionApplied = Boolean(
+    invoice.learnedFieldsApplied?.length ||
+      lines.some((line) =>
+        line.reasoning.some((reason) => reason === LEARNED_CORRECTION_NOTE)
+      )
+  );
 
   return {
     attachmentRequired: true,
@@ -1311,9 +1420,11 @@ export function generatePurchaseJournalBooking(
         ? `Exact master data synced at ${exactMasterData.lastSyncedAt}.`
         : "Exact master data is not synced.",
       ...lines.flatMap((line) => line.reasoning),
+      ...(learnedCorrectionApplied ? [LEARNED_CORRECTION_NOTE] : []),
     ],
     learningSummary: [
       "Supplier, G/L, VAT, cost centre, cost unit, and accrual decisions are captured for future learning once approved or booked.",
+      ...(learnedCorrectionApplied ? [LEARNED_CORRECTION_NOTE] : []),
     ],
   };
 }
@@ -1375,11 +1486,11 @@ export function purchaseJournalValidationErrors(
     );
   }
 
-  if (!booking.yourRefUnique) {
+  if (booking.yourRef && !booking.yourRefUnique) {
     errors.push(
       purchaseError(
         "yourRef",
-        "Your ref. must be unique for the selected supplier to prevent duplicate bookings."
+        DUPLICATE_INVOICE_REFERENCE_MESSAGE
       )
     );
   }
@@ -1395,6 +1506,9 @@ export function purchaseJournalValidationErrors(
 
   if (booking.reviewRequired) {
     for (const reason of booking.reviewReasons) {
+      if (reason === DUPLICATE_INVOICE_REFERENCE_MESSAGE) {
+        continue;
+      }
       errors.push(
         purchaseError(
           isExactMasterDataReason(reason) ? "exactMasterData" : "purchaseJournal",

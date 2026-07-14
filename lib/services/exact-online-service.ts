@@ -10,6 +10,7 @@ import {
   REQUIRED_BOOKING_DISABLED_REASON,
   getRequiredBookingDataIssues,
 } from "./required-booking-data";
+import { DUPLICATE_INVOICE_REFERENCE_MESSAGE } from "./invoice-validation";
 import {
   type ExactDuplicatePurchaseBooking,
   createRealExactPurchaseBooking,
@@ -76,12 +77,6 @@ export async function refreshExactTokenIfNeeded(
   };
 }
 
-function moneyCents(value: number | undefined | null) {
-  return typeof value === "number" && Number.isFinite(value)
-    ? Math.round(Math.abs(value) * 100)
-    : null;
-}
-
 function duplicateReferenceForInvoice(invoice: UploadedInvoice) {
   return (
     invoice.purchaseJournal?.yourRef ||
@@ -99,16 +94,13 @@ function findMockExactDuplicatePurchaseBooking(
   const totalAmount = invoice.extractedData.grossAmount || invoice.purchaseJournal?.totals.grossAmount || 0;
   const expectedSupplier = invoice.purchaseJournal?.supplierResolution.selectedAccountId;
 
-  if (!yourRef || moneyCents(totalAmount) === null) {
+  if (!yourRef) {
     return null;
   }
 
   const match = masterData.historicalPurchaseBookings.find((booking) => {
     const bookingRef = booking.yourRef || booking.invoiceNumber || "";
     if (bookingRef.trim().toLowerCase() !== yourRef.toLowerCase()) {
-      return false;
-    }
-    if (moneyCents(booking.totalAmount) !== moneyCents(totalAmount)) {
       return false;
     }
     return !expectedSupplier || booking.supplierAccountId === expectedSupplier;
@@ -126,9 +118,8 @@ function findMockExactDuplicatePurchaseBooking(
 
 function duplicateBookingMessage(duplicate: ExactDuplicatePurchaseBooking) {
   return [
-    "Duplicate invoice blocked.",
-    `Exact Online already has a purchase booking with reference ${duplicate.yourRef}`,
-    `and amount ${duplicate.totalAmount.toFixed(2)}.`,
+    DUPLICATE_INVOICE_REFERENCE_MESSAGE,
+    `Exact Online already has a purchase booking with reference ${duplicate.yourRef}.`,
     `Existing Exact reference: ${duplicate.exactBookingId}.`,
   ].join(" ");
 }

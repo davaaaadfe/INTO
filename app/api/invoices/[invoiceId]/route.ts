@@ -1,11 +1,12 @@
-import type { ExtractedInvoiceData } from "../../../../lib/domain/invoice";
+import type {
+  ExtractedInvoiceData,
+  PurchaseJournalLine,
+} from "../../../../lib/domain/invoice";
 import {
-  auditInvoiceFieldChanges,
   getInvoice,
   listInvoices,
-  recomputeInvoiceState,
   requirePermission,
-  updateInvoiceExtraction,
+  saveInvoiceReview,
 } from "../../../../lib/repository/invoice-store";
 import { withPersistentStore } from "../../../../lib/repository/persistent-request";
 import { logger } from "../../../../lib/utils/logger";
@@ -49,16 +50,33 @@ export async function PATCH(request: Request, context: RouteContext) {
         return Response.json({ error: "Invoice not found." }, { status: 404 });
       }
 
-      const payload = (await request.json()) as Partial<ExtractedInvoiceData>;
+      const payload = (await request.json()) as
+        | Partial<ExtractedInvoiceData>
+        | {
+            extractedData?: Partial<ExtractedInvoiceData>;
+            bookingLines?: PurchaseJournalLine[];
+          };
+      const wrappedPayload =
+        "extractedData" in payload || "bookingLines" in payload;
+      const extractedPatch = wrappedPayload
+        ? payload.extractedData ?? {}
+        : payload;
+      const bookingLines = wrappedPayload && Array.isArray(payload.bookingLines)
+        ? payload.bookingLines
+        : undefined;
       const nextData: ExtractedInvoiceData = {
         ...invoice.extractedData,
-        ...payload,
-        currency: (payload.currency ?? invoice.extractedData.currency).toUpperCase(),
+        ...extractedPatch,
+        currency: (
+          extractedPatch.currency ?? invoice.extractedData.currency
+        ).toUpperCase(),
       };
 
-      auditInvoiceFieldChanges(invoiceId, invoice.extractedData, nextData);
-      updateInvoiceExtraction(invoiceId, nextData);
-      const updatedInvoice = recomputeInvoiceState(invoiceId);
+      const updatedInvoice = saveInvoiceReview(
+        invoiceId,
+        nextData,
+        bookingLines
+      );
 
       logger.info("invoice.review_saved", {
         invoiceId,

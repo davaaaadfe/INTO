@@ -5,6 +5,7 @@ export type ExtractionFileInput = {
   name: string;
   type: string;
   size: number;
+  text?: () => Promise<string>;
 };
 
 type MockSupplierProfile = {
@@ -189,7 +190,7 @@ function looksLikeForbiddenReference(value: string, context = "") {
     return true;
   }
 
-  return /\b(vat|btw|iban|supplier|customer|debtor|creditor|order|po)\b/.test(
+  return /\b(vat|btw|iban|supplier|customer|debtor|creditor|order|po|payment)\b/.test(
     normalizedContext
   );
 }
@@ -204,7 +205,9 @@ export function detectInvoiceReference(
 
   if (labelledReference?.[1]) {
     const value = cleanInvoiceReferenceValue(labelledReference[1]);
-    if (!looksLikeForbiddenReference(value)) {
+    const lineStart = input.lastIndexOf("\n", labelledReference.index) + 1;
+    const labelContext = input.slice(lineStart, labelledReference.index);
+    if (!looksLikeForbiddenReference(value, labelContext)) {
       return { value, confidence: 0.94 };
     }
   }
@@ -223,6 +226,18 @@ export function detectInvoiceReference(
   }
 
   return null;
+}
+
+async function invoiceText(file: ExtractionFileInput) {
+  if (!file.text) {
+    return "";
+  }
+
+  try {
+    return await file.text();
+  } catch {
+    return "";
+  }
 }
 
 function addDays(date: Date, days: number) {
@@ -327,9 +342,15 @@ export async function extractInvoiceData(
   const beneficiary = /david|kwon|flight|hotel|booking/i.test(file.name)
     ? "David Kwon"
     : "";
-  const detectedReference = detectInvoiceReference(file.name);
-  const invoiceNumber = detectedReference?.value ?? "";
-  const referenceCode = invalidByName ? "" : invoiceNumber;
+  const documentText = await invoiceText(file);
+  const detectedReference =
+    detectInvoiceReference(documentText) ?? detectInvoiceReference(file.name);
+  const confidentReference =
+    !invalidByName && detectedReference && detectedReference.confidence >= 0.8
+      ? detectedReference
+      : null;
+  const invoiceNumber = confidentReference?.value ?? "";
+  const referenceCode = invoiceNumber;
 
   return {
     supplierName: profile.name,
@@ -339,7 +360,7 @@ export async function extractInvoiceData(
     supplierCountry: profile.country,
     invoiceNumber,
     referenceCode,
-    referenceCodeConfidence: invalidByName ? 0 : (detectedReference?.confidence ?? 0.82),
+    referenceCodeConfidence: confidentReference?.confidence ?? 0,
     invoiceDate: isoDate(invoiceDate),
     dueDate: invalidByName ? "" : isoDate(addDays(invoiceDate, 30)),
     paymentTerms: paymentMismatch ? "immediately" : profile.paymentTerms,

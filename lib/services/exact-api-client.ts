@@ -448,12 +448,6 @@ function numberValueOf(record: Record<string, unknown>, keys: string[]) {
   return undefined;
 }
 
-function exactMoneyCents(value: number | undefined | null) {
-  return typeof value === "number" && Number.isFinite(value)
-    ? Math.round(Math.abs(value) * 100)
-    : null;
-}
-
 function normalizeRecord(value: unknown) {
   return (value && typeof value === "object" ? value : {}) as Record<
     string,
@@ -665,10 +659,7 @@ function mapDuplicateCandidate(
   if (yourRef.trim().toLowerCase() !== expectedRef.trim().toLowerCase()) {
     return null;
   }
-  if (exactMoneyCents(totalAmount) !== exactMoneyCents(expectedAmount)) {
-    return null;
-  }
-  if (expectedSupplier && supplierAccountId && supplierAccountId !== expectedSupplier) {
+  if (expectedSupplier && supplierAccountId !== expectedSupplier) {
     return null;
   }
 
@@ -688,8 +679,7 @@ export async function findRealExactPurchaseBookingDuplicate(
 ): Promise<ExactDuplicatePurchaseBooking | null> {
   const yourRef = duplicateReferenceForInvoice(invoice);
   const totalAmount = duplicateAmountForInvoice(invoice);
-  const expectedAmountCents = exactMoneyCents(totalAmount);
-  if (!yourRef || expectedAmountCents === null) {
+  if (!yourRef) {
     return null;
   }
 

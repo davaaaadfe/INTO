@@ -10,6 +10,9 @@ type AmountValue = number | string | null | undefined;
 const currencyPattern = /^[A-Z]{3}$/;
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
 
+export const DUPLICATE_INVOICE_REFERENCE_MESSAGE =
+  "This invoice reference already exists for this supplier. Duplicate invoices cannot be booked.";
+
 function error(
   field: ValidationError["field"],
   message: string,
@@ -171,7 +174,7 @@ export function validateInvoiceData(
       errors.push(
         error(
           "referenceCode",
-          "This invoice reference already exists for this supplier. Duplicate invoices cannot be booked."
+          DUPLICATE_INVOICE_REFERENCE_MESSAGE
         )
       );
     }

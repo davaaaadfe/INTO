@@ -75,7 +75,7 @@ export async function POST(request: Request, context: RouteContext) {
           extractedData,
           "re_read"
         );
-        resolveDuplicateDecision({
+        await resolveDuplicateDecision({
           invoiceId: invoice.id,
           source: invoice.source,
           fileName: invoice.fileName,
@@ -94,7 +94,7 @@ export async function POST(request: Request, context: RouteContext) {
         return Response.json({ invoice: updatedInvoice, invoices: listInvoices() });
       }
 
-      const result = resolveDuplicateDecision({
+      const result = await resolveDuplicateDecision({
         invoiceId: invoice.id,
         source: invoice.source,
         fileName: invoice.fileName,

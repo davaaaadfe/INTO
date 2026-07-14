@@ -77,6 +77,17 @@ CREATE TABLE uploaded_invoices (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE into_temp_invoice_files (
+  storage_key text PRIMARY KEY,
+  original_file_name text NOT NULL,
+  stored_file_name text NOT NULL,
+  file_type text NOT NULL,
+  file_size bigint NOT NULL,
+  checksum text NOT NULL,
+  content_base64 text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE audit_events (
   id uuid PRIMARY KEY,
   invoice_id uuid REFERENCES uploaded_invoices(id) ON DELETE SET NULL,

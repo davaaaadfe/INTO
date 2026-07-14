@@ -77,3 +77,36 @@ export function exactOAuthCallbackUrl() {
 export function exactRedirectUri() {
   return envValue("EXACT_ONLINE_REDIRECT_URI") || exactOAuthCallbackUrl();
 }
+
+export type ExactOAuthConfigurationStatus = {
+  ready: boolean;
+  missingEnv: string[];
+  clientIdLooksLikeEmail: boolean;
+  redirectUri: string;
+};
+
+export function exactOAuthConfigurationStatus(): ExactOAuthConfigurationStatus {
+  const clientId = envValue("EXACT_ONLINE_CLIENT_ID");
+  const missingEnv = [
+    ["EXACT_ONLINE_CLIENT_ID", clientId],
+    ["EXACT_ONLINE_CLIENT_SECRET", envValue("EXACT_ONLINE_CLIENT_SECRET")],
+    ["EXACT_ONLINE_REDIRECT_URI", envValue("EXACT_ONLINE_REDIRECT_URI")],
+    [
+      "OAUTH_TOKEN_ENCRYPTION_KEY",
+      envValue("OAUTH_TOKEN_ENCRYPTION_KEY") ||
+        envValue("EXACT_TOKEN_ENCRYPTION_KEY"),
+    ],
+  ]
+    .filter(([, value]) => !value)
+    .map(([key]) => key);
+  const clientIdLooksLikeEmail = Boolean(
+    clientId && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clientId)
+  );
+
+  return {
+    ready: missingEnv.length === 0 && !clientIdLooksLikeEmail,
+    missingEnv,
+    clientIdLooksLikeEmail,
+    redirectUri: exactRedirectUri(),
+  };
+}

@@ -29,7 +29,6 @@ import {
 } from "../services/exact-master-data-service";
 import {
   deleteStoredInvoiceFile,
-  deleteStoredInvoiceFileSync,
   storeMockInvoiceFile,
   temporaryInvoiceRetentionDays,
 } from "../services/storage-service";
@@ -70,6 +69,13 @@ const systemOwnerPermissions: PermissionAction[] = [
   "manage_settings",
 ];
 
+const sharedUserPermissions: PermissionAction[] = [
+  ...verifiedUserPermissions,
+  ...systemOwnerPermissions,
+];
+
+export const SHARED_USER_ID = "shared_user";
+
 export const COMPANY_CONNECTION_USER_ID = "company_connection";
 
 export function getCompanyConnectionUserId() {
@@ -98,47 +104,18 @@ function exactMasterDataForUser(store: IntoStore, userId: string) {
   return store.exactMasterDataCaches.find((item) => item.userId === userId)?.cache ?? null;
 }
 
-function createSeedUsers(): IntoUser[] {
+function createSharedUser(): IntoUser {
   const timestamp = now();
 
-  return [
-    {
-      id: "user_admin",
-      email: "david.kwon@inbody.com",
-      name: "David Kwon",
-      status: "active",
-      isSystemOwner: true,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    },
-    {
-      id: "user_accountant",
-      email: "tammy.park@inbody.com",
-      name: "Tammy Park",
-      status: "active",
-      isSystemOwner: false,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    },
-    {
-      id: "user_reviewer",
-      email: "reviewer@inbody.com",
-      name: "Verified Finance User",
-      status: "active",
-      isSystemOwner: false,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    },
-    {
-      id: "user_viewer",
-      email: "viewer@inbody.com",
-      name: "Verified Archive User",
-      status: "active",
-      isSystemOwner: false,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    },
-  ];
+  return {
+    id: SHARED_USER_ID,
+    email: "shared_user@internal",
+    name: SHARED_USER_ID,
+    status: "active",
+    isSystemOwner: true,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
 }
 
 function userDisplayName(user: IntoUser | null | undefined) {
@@ -147,10 +124,8 @@ function userDisplayName(user: IntoUser | null | undefined) {
 
 function createSeedInvoice(overrides: Partial<UploadedInvoice>): UploadedInvoice {
   const createdAt = now();
-  const ownerId = overrides.userId ?? "user_accountant";
-  const ownerName =
-    overrides.uploadedByName ??
-    (ownerId === "user_admin" ? "David Kwon" : "Tammy Park");
+  const ownerId = overrides.userId ?? SHARED_USER_ID;
+  const ownerName = overrides.uploadedByName ?? SHARED_USER_ID;
   const invoice: UploadedInvoice = {
     id: createId("invoice"),
     userId: ownerId,
@@ -231,14 +206,14 @@ function createSeedInvoice(overrides: Partial<UploadedInvoice>): UploadedInvoice
 }
 
 function createInitialStore(): IntoStore {
-  const users = createSeedUsers();
+  const sharedUser = createSharedUser();
   const seedDemoInvoices = process.env.NODE_ENV !== "production";
   const readyInvoice = seedDemoInvoices ? createSeedInvoice({}) : null;
   const checkInvoice = seedDemoInvoices
     ? createSeedInvoice({
-        userId: "user_admin",
-        uploadedByUserId: "user_admin",
-        uploadedByName: "David Kwon",
+        userId: SHARED_USER_ID,
+        uploadedByUserId: SHARED_USER_ID,
+        uploadedByName: SHARED_USER_ID,
         fileName: "missing-due-date-invoice.png",
         fileType: "image/png",
         checksum: "missing-due-date-checksum",
@@ -274,8 +249,8 @@ function createInitialStore(): IntoStore {
       })
     : null;
   const store: IntoStore = {
-    users,
-    currentUserId: "user_accountant",
+    users: [sharedUser],
+    currentUserId: SHARED_USER_ID,
     invoices: [checkInvoice, readyInvoice].filter(
       (invoice): invoice is UploadedInvoice => Boolean(invoice)
     ),
@@ -329,6 +304,12 @@ export function getStore() {
   ) {
     globalStore.__INTO_STORE = createInitialStore();
   }
+
+  const sharedUser = globalStore.__INTO_STORE.users.find(
+    (user) => user.id === SHARED_USER_ID
+  );
+  globalStore.__INTO_STORE.users = [sharedUser ?? createSharedUser()];
+  globalStore.__INTO_STORE.currentUserId = SHARED_USER_ID;
 
   for (const invoice of globalStore.__INTO_STORE.invoices) {
     if (!invoice.localFileStatus) {
@@ -403,9 +384,7 @@ export function permissionsForUser(user = getCurrentUser()) {
     return [];
   }
 
-  return user.isSystemOwner
-    ? [...verifiedUserPermissions, ...systemOwnerPermissions]
-    : [...verifiedUserPermissions];
+  return [...sharedUserPermissions];
 }
 
 export function canUser(action: PermissionAction, user = getCurrentUser()) {
@@ -418,17 +397,6 @@ export function currentUserContext(): CurrentUserContext {
     user,
     permissions: permissionsForUser(user),
   };
-}
-
-export function switchCurrentUser(userId: string) {
-  const store = getStore();
-  const user = store.users.find((item) => item.id === userId && item.status === "active");
-  if (!user) {
-    return null;
-  }
-
-  store.currentUserId = user.id;
-  return currentUserContext();
 }
 
 export function requirePermission(action: PermissionAction) {
@@ -1104,7 +1072,7 @@ export function replaceInvoiceExtractionFromReread(
   return recomputeInvoiceState(invoiceId);
 }
 
-export function resolveDuplicateDecision(input: {
+export async function resolveDuplicateDecision(input: {
   invoiceId?: string;
   duplicateInvoiceId?: string;
   source: UploadedInvoice["source"];
@@ -1133,7 +1101,7 @@ export function resolveDuplicateDecision(input: {
 
   if (invoice) {
     if (input.decision === "cancel_upload" && invoice.status === "Possible Duplicate") {
-      deleteStoredInvoiceFileSync(invoice.storageKey);
+      await deleteStoredInvoiceFile(invoice.storageKey);
       invoice.localFileStatus = "deleted_by_cleanup";
       const store = getStore();
       store.invoices = store.invoices.filter((item) => item.id !== invoice.id);

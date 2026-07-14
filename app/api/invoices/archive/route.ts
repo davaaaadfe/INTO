@@ -4,7 +4,6 @@ import type {
   InvoiceSource,
 } from "../../../../lib/domain/invoice";
 import {
-  listUsers,
   requirePermission,
   searchInvoiceArchive,
 } from "../../../../lib/repository/invoice-store";
@@ -57,7 +56,6 @@ export async function GET(request: Request) {
 
       return Response.json({
         archive: searchInvoiceArchive(filters),
-        users: listUsers(),
       });
     } catch (error) {
       const message =

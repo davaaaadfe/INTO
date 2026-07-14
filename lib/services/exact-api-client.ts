@@ -19,7 +19,10 @@ import {
   encryptExactSecret,
   signExactState,
 } from "./exact-token-crypto";
-import { exactRedirectUri } from "./app-config-service";
+import {
+  exactOAuthConfigurationStatus,
+  exactRedirectUri,
+} from "./app-config-service";
 
 type ExactTokenResponse = {
   access_token: string;
@@ -75,19 +78,22 @@ const exactMasterDataResourcePatterns = [
 ];
 
 function cleanBaseUrl(value: string | undefined) {
-  return (value || exactDefaultBaseUrl).replace(/\/+$/, "");
+  return (value?.trim() || exactDefaultBaseUrl).replace(/\/+$/, "");
 }
 
 export function exactIntegrationMode() {
-  const explicit = process.env.EXACT_ONLINE_MODE?.toLowerCase();
+  const clientId = process.env.EXACT_ONLINE_CLIENT_ID?.trim();
+  const clientSecret = process.env.EXACT_ONLINE_CLIENT_SECRET?.trim();
+  if (clientId && clientSecret) {
+    return "real";
+  }
+
+  const explicit = process.env.EXACT_ONLINE_MODE?.trim().toLowerCase();
   if (explicit === "real" || explicit === "mock") {
     return explicit;
   }
 
-  return process.env.EXACT_ONLINE_CLIENT_ID &&
-    process.env.EXACT_ONLINE_CLIENT_SECRET
-    ? "real"
-    : "mock";
+  return "mock";
 }
 
 export function isRealExactMode() {
@@ -129,13 +135,20 @@ export function assertExactMasterDataReadOnlyRequest(
 
 function exactConfig() {
   const baseUrl = cleanBaseUrl(process.env.EXACT_ONLINE_BASE_URL);
-  const clientId = process.env.EXACT_ONLINE_CLIENT_ID || "";
-  const clientSecret = process.env.EXACT_ONLINE_CLIENT_SECRET || "";
+  const clientId = process.env.EXACT_ONLINE_CLIENT_ID?.trim() || "";
+  const clientSecret = process.env.EXACT_ONLINE_CLIENT_SECRET?.trim() || "";
   const redirectUri = exactRedirectUri();
+  const configuration = exactOAuthConfigurationStatus();
 
-  if (isRealExactMode() && (!clientId || !clientSecret || !redirectUri)) {
+  if (configuration.clientIdLooksLikeEmail) {
     throw new Error(
-      "EXACT_ONLINE_CLIENT_ID, EXACT_ONLINE_CLIENT_SECRET, and EXACT_ONLINE_REDIRECT_URI are required for real Exact Online."
+      "EXACT_ONLINE_CLIENT_ID must be the Exact OAuth app Client ID, not an email address."
+    );
+  }
+
+  if (isRealExactMode() && !configuration.ready) {
+    throw new Error(
+      `${configuration.missingEnv.join(", ")} must be configured for real Exact Online OAuth.`
     );
   }
 

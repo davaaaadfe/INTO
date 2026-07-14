@@ -133,6 +133,35 @@ test("setup status reports friendly readiness without exposing secret values", a
   );
 });
 
+test("recognizes the four configured Vercel Exact OAuth variables", async () => {
+  await withEnv(
+    {
+      NODE_ENV: "production",
+      APP_URL: "https://into.example.com",
+      EXACT_ONLINE_CLIENT_ID: "exact-oauth-app-client-id",
+      EXACT_ONLINE_CLIENT_SECRET: "exact-client-secret-value",
+      EXACT_ONLINE_REDIRECT_URI:
+        "https://into.example.com/api/exact/callback",
+      OAUTH_TOKEN_ENCRYPTION_KEY: "token-encryption-secret-value",
+    },
+    async () => {
+      resetSharedConnections();
+      const status = await getSetupStatus();
+      const exact = status.checks.find((check) => check.id === "shared-exact");
+      const serialized = JSON.stringify(status);
+
+      assert.deepEqual(exact?.missingEnv, []);
+      assert.match(
+        exact?.details.join(" ") ?? "",
+        /Exact OAuth server settings are configured in this deployment/
+      );
+      assert.doesNotMatch(serialized, /exact-client-secret-value/);
+      assert.doesNotMatch(serialized, /token-encryption-secret-value/);
+      resetSharedConnections();
+    }
+  );
+});
+
 test("setup status omits developer infrastructure checks from the user checklist", async () => {
   await withEnv({ APP_URL: "https://into.example.com" }, async () => {
     resetSharedConnections();
@@ -174,7 +203,6 @@ test("setup status does not mark shared integrations ready before they are conne
       "EXACT_ONLINE_CLIENT_SECRET",
       "EXACT_ONLINE_REDIRECT_URI",
       "OAUTH_TOKEN_ENCRYPTION_KEY",
-      "OAUTH_STATE_SECRET",
     ]);
     assert.equal(upload?.status, "ok");
     assert.equal(reviewQueue?.status, "ok");

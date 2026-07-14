@@ -8,11 +8,16 @@ import {
 } from "node:fs/promises";
 import {
   mkdirSync,
-  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import {
+  deletePostgresTemporaryInvoiceFile,
+  isPostgresPersistenceEnabled,
+  loadPostgresTemporaryInvoiceFile,
+  savePostgresTemporaryInvoiceFile,
+} from "../repository/postgres-store";
 import { createId } from "../utils/id";
 
 const supportedExtensions = new Set(["pdf", "jpg", "jpeg", "png", "xml", "ubl"]);
@@ -29,7 +34,9 @@ export type StoredInvoiceFile = StoredFile & {
   bytes: Uint8Array;
 };
 
-type StorageProvider = "local_temp";
+type StorageProvider = "local_temp" | "postgres_temp";
+
+const postgresStoragePrefix = "postgres-temp:";
 
 export function getFileExtension(fileName: string) {
   return fileName.split(".").pop()?.toLowerCase() ?? "";
@@ -48,7 +55,11 @@ function envValue(key: string) {
 }
 
 export function invoiceStorageProvider(): StorageProvider {
-  return "local_temp";
+  return isPostgresPersistenceEnabled() ? "postgres_temp" : "local_temp";
+}
+
+function isVercelRuntime() {
+  return Boolean(envValue("VERCEL") || envValue("VERCEL_ENV"));
 }
 
 function temporaryInvoiceStorageRoot() {
@@ -115,17 +126,53 @@ function localStorageKey(fileName: string) {
   );
 }
 
+function postgresStorageKey(fileName: string) {
+  return `${postgresStoragePrefix}${createId("file")}__${safeFileName(fileName)}`;
+}
+
+function isPostgresStorageKey(storageKey: string) {
+  return storageKey.startsWith(postgresStoragePrefix);
+}
+
 export async function storeInvoiceFile(file: File): Promise<StoredFile> {
   const bytes = new Uint8Array(await file.arrayBuffer());
+  const fileType = contentTypeFor(file.name, file.type);
+  const checksum = checksumFor(bytes);
+
+  if (invoiceStorageProvider() === "postgres_temp") {
+    const storageKey = postgresStorageKey(file.name);
+    await savePostgresTemporaryInvoiceFile({
+      storageKey,
+      originalFileName: file.name,
+      storedFileName: storageKey.slice(postgresStoragePrefix.length),
+      fileType,
+      fileSize: bytes.byteLength,
+      checksum,
+      bytes,
+    });
+    return {
+      storageKey,
+      fileType,
+      fileSize: bytes.byteLength,
+      checksum,
+    };
+  }
+
+  if (process.env.NODE_ENV === "production" && isVercelRuntime()) {
+    throw new Error(
+      "Shared temporary invoice storage is not configured. Ask the system owner to configure production storage before uploading invoices."
+    );
+  }
+
   const storageKey = localStorageKey(file.name);
   await mkdir(path.dirname(storageKey), { recursive: true });
   await writeFile(storageKey, bytes);
 
   return {
     storageKey,
-    fileType: contentTypeFor(file.name, file.type),
+    fileType,
     fileSize: bytes.byteLength,
-    checksum: checksumFor(bytes),
+    checksum,
   };
 }
 
@@ -157,6 +204,22 @@ export async function getStoredInvoiceFile(
   fallback?: { fileName?: string; fileType?: string }
 ) {
   try {
+    if (isPostgresStorageKey(storageKey)) {
+      const storedFile = await loadPostgresTemporaryInvoiceFile(storageKey);
+      if (!storedFile) {
+        return null;
+      }
+
+      return {
+        storageKey,
+        fileName: fallback?.fileName || storedFile.originalFileName,
+        fileType: fallback?.fileType || storedFile.fileType,
+        fileSize: storedFile.fileSize,
+        checksum: storedFile.checksum,
+        bytes: storedFile.bytes,
+      };
+    }
+
     const bytes = await readFile(storageKey);
     const metadata = await stat(storageKey);
     const fileName = fallback?.fileName || fileNameFromStorageKey(storageKey);
@@ -177,16 +240,11 @@ export async function getStoredInvoiceFile(
 
 export async function deleteStoredInvoiceFile(storageKey: string) {
   try {
-    await unlink(storageKey);
-    return true;
-  } catch {
-    return false;
-  }
-}
+    if (isPostgresStorageKey(storageKey)) {
+      return await deletePostgresTemporaryInvoiceFile(storageKey);
+    }
 
-export function deleteStoredInvoiceFileSync(storageKey: string) {
-  try {
-    unlinkSync(storageKey);
+    await unlink(storageKey);
     return true;
   } catch {
     return false;
@@ -195,18 +253,22 @@ export function deleteStoredInvoiceFileSync(storageKey: string) {
 
 export async function verifyInvoiceStorageWorks() {
   const content = "INTO storage readiness check";
-  const stored = await storeInvoiceFile(
-    new File([content], "storage-check.txt", { type: "text/plain" })
-  );
-  const storedAgain = await getStoredInvoiceFile(stored.storageKey, {
-    fileName: "storage-check.txt",
-    fileType: "text/plain",
-  });
-  await deleteStoredInvoiceFile(stored.storageKey);
+  try {
+    const stored = await storeInvoiceFile(
+      new File([content], "storage-check.txt", { type: "text/plain" })
+    );
+    const storedAgain = await getStoredInvoiceFile(stored.storageKey, {
+      fileName: "storage-check.txt",
+      fileType: "text/plain",
+    });
+    await deleteStoredInvoiceFile(stored.storageKey);
 
-  return Boolean(
-    storedAgain &&
-      storedAgain.fileSize === content.length &&
-      new TextDecoder().decode(storedAgain.bytes) === content
-  );
+    return Boolean(
+      storedAgain &&
+        storedAgain.fileSize === content.length &&
+        new TextDecoder().decode(storedAgain.bytes) === content
+    );
+  } catch {
+    return false;
+  }
 }

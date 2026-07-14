@@ -18,6 +18,7 @@ async function withEnv(
 ) {
   const keys = [
     "NODE_ENV",
+    "DATABASE_URL",
     "VERCEL",
     "VERCEL_ENV",
     "STORAGE_MODE",
@@ -101,7 +102,7 @@ test("does not require S3 settings in production when using local temp storage",
   );
   await rm(storagePath, { recursive: true, force: true });
 });
-test("uses writable tmp storage for relative paths on Vercel", async () => {
+test("does not report per-instance Vercel tmp storage as ready", async () => {
   const storagePath = testStoragePath("vercel-local");
   let resolvedStoragePath = "";
 
@@ -116,9 +117,41 @@ test("uses writable tmp storage for relative paths on Vercel", async () => {
       resolvedStoragePath = temporaryInvoiceStoragePath();
       assert.equal(resolvedStoragePath.startsWith(tmpdir()), true);
       assert.equal(resolvedStoragePath.includes("storage"), true);
-      assert.equal(await verifyInvoiceStorageWorks(), true);
+      assert.equal(await verifyInvoiceStorageWorks(), false);
     }
   );
 
   await rm(resolvedStoragePath, { recursive: true, force: true });
+});
+
+test("uses shared PostgreSQL temporary file storage on Vercel", async () => {
+  await withEnv(
+    {
+      NODE_ENV: "production",
+      VERCEL: "1",
+      VERCEL_ENV: "production",
+      DATABASE_URL: "postgresql://example.invalid/into",
+    },
+    async () => {
+      assert.equal(invoiceStorageProvider(), "postgres_temp");
+    }
+  );
+});
+
+test("does not accept uploads into per-instance Vercel temporary storage", async () => {
+  await withEnv(
+    {
+      NODE_ENV: "production",
+      VERCEL: "1",
+      VERCEL_ENV: "production",
+    },
+    async () => {
+      await assert.rejects(
+        storeInvoiceFile(
+          new File(["invoice"], "invoice.pdf", { type: "application/pdf" })
+        ),
+        /shared temporary invoice storage is not configured/i
+      );
+    }
+  );
 });

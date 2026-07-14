@@ -4,30 +4,37 @@ import {
   createUploadedInvoice,
   disconnectExactConnection,
   getCompanyConnectionUserId,
+  getCurrentUser,
   getExactConnection,
+  listUsers,
   listAuditEvents,
+  permissionsForUser,
   publicExactConnection,
   requirePermission,
   requireSystemOwner,
   searchInvoiceArchive,
-  switchCurrentUser,
   setExactConnection,
 } from "../lib/repository/invoice-store";
 import { createMockExactConnection } from "../lib/services/exact-online-service";
 
+test("uses one shared internal user with access to all INTO functions", () => {
+  const user = getCurrentUser();
+
+  assert.equal(user.id, "shared_user");
+  assert.deepEqual(listUsers().map((item) => item.id), ["shared_user"]);
+  assert.equal(permissionsForUser(user).includes("book"), true);
+  assert.equal(permissionsForUser(user).includes("manage_connections"), true);
+});
+
 test("stores Exact credentials as a shared company connection", () => {
-  switchCurrentUser("user_admin");
   const connectionOwnerId = getCompanyConnectionUserId();
   setExactConnection(createMockExactConnection(connectionOwnerId));
 
   assert.equal(getExactConnection()?.userId, connectionOwnerId);
-  assert.equal(getExactConnection("user_accountant"), null);
-
-  switchCurrentUser("user_accountant");
+  assert.equal(getExactConnection("another_user"), null);
 });
 
 test("does not expose encrypted OAuth token fields in public connection metadata", () => {
-  switchCurrentUser("user_admin");
   const connectionOwnerId = getCompanyConnectionUserId();
   setExactConnection(createMockExactConnection(connectionOwnerId));
 
@@ -35,54 +42,37 @@ test("does not expose encrypted OAuth token fields in public connection metadata
 
   assert.equal("accessTokenCiphertext" in (exact ?? {}), false);
   assert.equal("refreshTokenCiphertext" in (exact ?? {}), false);
-
-  switchCurrentUser("user_accountant");
 });
 
 test("disconnect removes stored company Exact connection", () => {
-  switchCurrentUser("user_admin");
   const connectionOwnerId = getCompanyConnectionUserId();
   setExactConnection(createMockExactConnection(connectionOwnerId));
 
   disconnectExactConnection();
 
   assert.equal(publicExactConnection(), null);
-
-  switchCurrentUser("user_accountant");
 });
 
-test("verified users share invoice permissions and system owner manages connections", () => {
-  switchCurrentUser("user_viewer");
-
+test("shared access includes invoice and connection management permissions", () => {
   assert.doesNotThrow(() => requirePermission("book"));
   assert.doesNotThrow(() => requirePermission("upload"));
   assert.doesNotThrow(() => requirePermission("edit"));
   assert.doesNotThrow(() => requirePermission("search_archive"));
-
-  switchCurrentUser("user_accountant");
-  assert.doesNotThrow(() => requirePermission("book"));
-  assert.throws(() => requireSystemOwner(), /not allowed to manage shared/);
-
-  switchCurrentUser("user_admin");
-  assert.doesNotThrow(() => requirePermission("book"));
   assert.doesNotThrow(() => requireSystemOwner());
-
-  switchCurrentUser("user_accountant");
 });
 
-test("archive search can retrieve invoices uploaded by another user", () => {
+test("archive search can retrieve invoices uploaded by the shared user", () => {
   const result = searchInvoiceArchive({
-    uploadedByUserId: "user_admin",
+    uploadedByUserId: "shared_user",
     keyword: "missing-due-date",
     pageSize: 20,
   });
 
   assert.equal(result.total >= 1, true);
-  assert.equal(result.invoices[0]?.uploadedByUserId, "user_admin");
+  assert.equal(result.invoices[0]?.uploadedByUserId, "shared_user");
 });
 
 test("invoice creation records uploader metadata and audit event", () => {
-  switchCurrentUser("user_admin");
   const invoice = createUploadedInvoice({
     source: "manual_upload",
     fileName: "audit-test.pdf",
@@ -94,9 +84,7 @@ test("invoice creation records uploader metadata and audit event", () => {
 
   const auditEvents = listAuditEvents(invoice.id);
 
-  assert.equal(invoice.uploadedByUserId, "user_admin");
+  assert.equal(invoice.uploadedByUserId, "shared_user");
   assert.equal(auditEvents[0]?.type, "invoice_uploaded");
   assert.match(auditEvents[0]?.message ?? "", /uploaded audit-test.pdf/);
-
-  switchCurrentUser("user_accountant");
 });

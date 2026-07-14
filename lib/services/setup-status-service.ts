@@ -13,6 +13,7 @@ import {
 import {
   applicationBaseUrl,
   currentDeploymentUrl,
+  exactOAuthConfigurationStatus,
   exactRedirectUri,
   isPreviewDeployment,
   previewDeploymentMessage,
@@ -93,54 +94,26 @@ function missingDatabaseSettings() {
   return missingRequiredEnv(["DATABASE_URL"]);
 }
 
-function missingOAuthSecurityEnv() {
-  const missing: string[] = [];
-
-  if (!["OAUTH_TOKEN_ENCRYPTION_KEY", "EXACT_TOKEN_ENCRYPTION_KEY"].some(hasEnv)) {
-    missing.push("OAUTH_TOKEN_ENCRYPTION_KEY");
-  }
-
-  if (
-    ![
-      "OAUTH_STATE_SECRET",
-      "EXACT_OAUTH_STATE_SECRET",
-      "OAUTH_TOKEN_ENCRYPTION_KEY",
-    ].some(hasEnv)
-  ) {
-    missing.push("OAUTH_STATE_SECRET");
-  }
-
-  return missing;
-}
-
-function exactClientIdLooksLikeEmail() {
-  const clientId = process.env.EXACT_ONLINE_CLIENT_ID?.trim() ?? "";
-  return Boolean(clientId && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clientId));
-}
-
 function exactSetupGuidance(details: string[] = []) {
+  const configuration = exactOAuthConfigurationStatus();
   return [
     ...details,
+    ...(configuration.ready
+      ? ["Exact OAuth server settings are configured in this deployment."]
+      : []),
     "Local development: put Exact OAuth details in .env or .env.local.",
     "Vercel production: put Exact OAuth details in Vercel Project Settings > Environment Variables, then redeploy.",
     "Required Exact settings: EXACT_ONLINE_CLIENT_ID, EXACT_ONLINE_CLIENT_SECRET, EXACT_ONLINE_REDIRECT_URI, and OAUTH_TOKEN_ENCRYPTION_KEY.",
     "EXACT_ONLINE_CLIENT_ID must be the Exact OAuth app Client ID, not an email address.",
     "INTO never asks for or stores Exact usernames or passwords; users authenticate on Exact Online's OAuth page.",
-    ...(exactClientIdLooksLikeEmail()
+    ...(configuration.clientIdLooksLikeEmail
       ? ["The configured EXACT_ONLINE_CLIENT_ID looks like an email address. Replace it with the Client ID from the Exact OAuth app."]
       : []),
   ];
 }
 
 function missingExactServerSettings() {
-  return [
-    ...missingRequiredEnv([
-      "EXACT_ONLINE_CLIENT_ID",
-      "EXACT_ONLINE_CLIENT_SECRET",
-      "EXACT_ONLINE_REDIRECT_URI",
-    ]),
-    ...missingOAuthSecurityEnv(),
-  ];
+  return exactOAuthConfigurationStatus().missingEnv;
 }
 
 function needsSetup(
@@ -239,6 +212,7 @@ async function exactConnectionReadiness(): Promise<ExactReadiness> {
 
 async function uploadReadiness() {
   const supportedExtensions = supportedInvoiceFileExtensions();
+  const storageProvider = invoiceStorageProvider();
   const requiredExtensions = ["pdf", "jpg", "jpeg", "png", "xml", "ubl"];
   const supportedTypesConfigured = requiredExtensions.every((extension) =>
     supportedExtensions.includes(extension)
@@ -254,19 +228,21 @@ async function uploadReadiness() {
           : "Supported invoice file types are incomplete.",
         storageWorks
           ? "Invoice file storage is working."
-          : "Temporary local invoice storage could not save and read a test file.",
+          : "Shared temporary invoice storage could not save and read a test file.",
       ]
     );
   }
 
   const details = [
     "Users can upload PDF, JPG, PNG, XML, and UBL invoice files.",
-    "Temporary local invoice storage is ready.",
+    storageProvider === "postgres_temp"
+      ? "Temporary shared invoice storage is ready."
+      : "Temporary local invoice storage is ready.",
   ];
 
-  if (runtimeEnvironment() === "production" && invoiceStorageProvider() === "local_temp") {
+  if (runtimeEnvironment() === "production" && storageProvider === "local_temp") {
     details.push(
-      "Temporary local storage on Vercel is suitable only for short-lived processing. Files may not survive redeploys. This is acceptable only if invoices are processed and booked quickly."
+      "A single long-running server can use local temporary storage. Vercel requires shared temporary storage so uploads remain available to preview and download requests."
     );
   }
 

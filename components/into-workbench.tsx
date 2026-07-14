@@ -16,7 +16,6 @@ import type {
   DuplicateDetectionResult,
   ExactMasterDataCache,
   ExtractedInvoiceData,
-  IntoUser,
   InvoiceArchiveResult,
   PermissionAction,
   PurchaseJournalLine,
@@ -36,14 +35,19 @@ import {
 } from "../lib/services/preview-pan";
 
 type ApiState = {
-  users: IntoUser[];
-  currentUser: IntoUser | null;
   permissions: PermissionAction[];
   invoices: UploadedInvoice[];
   exactConnection: PublicExactConnection | null;
   exactMasterData: ExactMasterDataCache | null;
   exactMasterDataStale: boolean;
   exactMasterDataReadOnly: boolean;
+  exactConfiguration: {
+    ready: boolean;
+    missingEnv: string[];
+    clientIdLooksLikeEmail: boolean;
+    redirectUri: string;
+    mode: "real" | "mock";
+  } | null;
 };
 
 type UploadItemStatus =
@@ -119,7 +123,6 @@ type ArchiveFilterState = {
   bookingStatus: string;
   validationStatus: string;
   source: string;
-  uploadedByUserId: string;
   exactBookingReference: string;
   journal: string;
   glAccount: string;
@@ -187,7 +190,6 @@ const defaultArchiveFilters: ArchiveFilterState = {
   bookingStatus: "",
   validationStatus: "",
   source: "",
-  uploadedByUserId: "",
   exactBookingReference: "",
   journal: "",
   glAccount: "",
@@ -322,6 +324,15 @@ function formatTimestamp(value: string | undefined) {
 
 function numberValue(value: number | null) {
   return typeof value === "number" ? String(value) : "";
+}
+
+function auditMessageWithoutActor(event: AuditEvent) {
+  const actorPrefix = `${event.userName} `;
+  const message = event.message.startsWith(actorPrefix)
+    ? event.message.slice(actorPrefix.length)
+    : event.message;
+
+  return message ? `${message[0].toUpperCase()}${message.slice(1)}` : message;
 }
 
 function moneyValue(value: number) {
@@ -1072,14 +1083,13 @@ export function IntoWorkbench() {
     scrollTop: number;
   } | null>(null);
   const [state, setState] = useState<ApiState>({
-    users: [],
-    currentUser: null,
     permissions: [],
     invoices: [],
     exactConnection: null,
     exactMasterData: null,
     exactMasterDataStale: true,
     exactMasterDataReadOnly: true,
+    exactConfiguration: null,
   });
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<string>("");
   const [draft, setDraft] = useState<ExtractedInvoiceData | null>(null);
@@ -1189,7 +1199,6 @@ export function IntoWorkbench() {
   );
   const hasPermission = (permission: PermissionAction) =>
     state.permissions.includes(permission);
-  const isSystemOwner = Boolean(state.currentUser?.isSystemOwner);
   const hasFieldValidationWarning = (fields: (keyof ExtractedInvoiceData)[]) =>
     Boolean(
       selectedInvoice?.validationErrors.some((error) =>
@@ -1665,22 +1674,20 @@ export function IntoWorkbench() {
       masterData: ExactMasterDataCache | null;
       masterDataStale: boolean;
       masterDataReadOnly: boolean;
+      configuration: NonNullable<ApiState["exactConfiguration"]>;
     };
     const userData = (await userResponse.json()) as {
-      users: IntoUser[];
-      currentUser: IntoUser | null;
       permissions: PermissionAction[];
     };
 
     setState({
-      users: userData.users,
-      currentUser: userData.currentUser,
       permissions: userData.permissions,
       invoices: invoiceData.invoices,
       exactConnection: exactData.connection,
       exactMasterData: exactData.masterData,
       exactMasterDataStale: exactData.masterDataStale,
       exactMasterDataReadOnly: exactData.masterDataReadOnly,
+      exactConfiguration: exactData.configuration,
     });
 
     if (!selectedInvoiceId && invoiceData.invoices[0]) {
@@ -1723,32 +1730,20 @@ export function IntoWorkbench() {
     setAuditEvents(response.ok ? data.events ?? [] : []);
   }
 
-  async function switchUser(userId: string) {
-    setBusy("switch-user");
+  async function lockInto() {
+    setBusy("lock-into");
     try {
-      const response = await fetch("/api/users", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId }),
-      });
-      const data = await response.json();
-
+      const response = await fetch("/api/access/logout", { method: "POST" });
       if (!response.ok) {
-        throw new Error(data.error ?? "Could not switch user.");
+        throw new Error("INTO could not be locked. Please try again.");
       }
-
-      setState((current) => ({
-        ...current,
-        users: data.users,
-        currentUser: data.currentUser,
-        permissions: data.permissions,
-      }));
-      await refreshAll();
-      setArchive(null);
-      setMessage(`Signed in as ${data.currentUser.name}.`);
+      window.location.replace("/");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Could not switch user.");
-    } finally {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "INTO could not be locked. Please try again."
+      );
       setBusy("");
     }
   }
@@ -2932,22 +2927,17 @@ export function IntoWorkbench() {
                 </div>
               ))}
             </div>
-            <label className="flex flex-col gap-1 text-xs font-semibold text-stone-600">
-              Signed in as
-              <select
-                className="rounded-md border border-stone-300 bg-white px-3 py-2 text-sm font-semibold text-stone-900"
-                value={state.currentUser?.id ?? ""}
-                onChange={(event) => switchUser(event.target.value)}
-                disabled={busy === "switch-user"}
+            <div className="flex justify-end">
+              <ActionButton
+                variant="ghost"
+                onClick={lockInto}
+                loading={busy === "lock-into"}
+                disabled={busy === "lock-into"}
+                disabledReason="INTO is being locked."
               >
-                {state.users.map((user) => (
-                  <option key={user.id} value={user.id}>
-                    {user.name}
-                    {user.isSystemOwner ? " - System owner" : ""}
-                  </option>
-                ))}
-              </select>
-            </label>
+                Lock INTO
+              </ActionButton>
+            </div>
           </div>
         </header>
 
@@ -3015,7 +3005,7 @@ export function IntoWorkbench() {
             <UploadProgressList items={uploadItems} />
           </div>
 
-          {isSystemOwner ? (
+          {hasPermission("manage_connections") ? (
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-1">
                 <div className="rounded-lg border border-stone-300 bg-white p-4">
                   <h2 className="text-lg font-semibold">Company Exact Online</h2>
@@ -3026,7 +3016,7 @@ export function IntoWorkbench() {
                   </p>
                   <div className="mt-3 rounded-md border border-sky-200 bg-sky-50 p-3 text-xs text-sky-950">
                     <div className="font-semibold text-sky-950">
-                      Exact OAuth setup for system owners
+                      Exact OAuth setup
                     </div>
                     <ul className="mt-2 list-disc space-y-1 pl-4">
                       <li>
@@ -3058,6 +3048,28 @@ export function IntoWorkbench() {
                       </li>
                     </ul>
                   </div>
+                  {state.exactConfiguration ? (
+                    state.exactConfiguration.ready &&
+                    state.exactConfiguration.mode === "real" ? (
+                      <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-xs font-semibold text-emerald-900">
+                        Exact OAuth credentials are configured on the server.
+                      </div>
+                    ) : (
+                      <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-950">
+                        <div className="font-semibold">
+                          {state.exactConfiguration.clientIdLooksLikeEmail
+                            ? "EXACT_ONLINE_CLIENT_ID must be the Exact OAuth app Client ID, not an email address."
+                            : "Exact OAuth setup is incomplete."}
+                        </div>
+                        {state.exactConfiguration.missingEnv.length ? (
+                          <div className="mt-1">
+                            Add these server settings in Vercel, then redeploy:{" "}
+                            {state.exactConfiguration.missingEnv.join(", ")}.
+                          </div>
+                        ) : null}
+                      </div>
+                    )
+                  ) : null}
                   {state.exactMasterDataReadOnly ? (
                     <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-xs font-semibold text-emerald-900">
                       Exact master data is read-only in INTO. Suppliers, journals, G/L
@@ -3092,8 +3104,15 @@ export function IntoWorkbench() {
                       onClick={connectExact}
                       loading={busy === "exact"}
                       feedback={buttonFeedbackFor("exact", "exact")}
-                      disabled={busy === "exact"}
-                      disabledReason="Company Exact Online connection is in progress."
+                      disabled={
+                        busy === "exact" ||
+                        state.exactConfiguration?.ready !== true
+                      }
+                      disabledReason={
+                        busy === "exact"
+                          ? "Company Exact Online connection is in progress."
+                          : "Configure the required Exact OAuth server settings first."
+                      }
                     >
                       {state.exactConnection
                         ? "Reconnect Company Exact"
@@ -3111,7 +3130,7 @@ export function IntoWorkbench() {
                       }
                       disabledReason="Connect the company Exact account before syncing Exact data."
                     >
-                      Sync Exact Data Now
+                      Sync Exact master data
                     </ActionButton>
                     <ActionButton
                       variant="danger"
@@ -3437,27 +3456,6 @@ export function IntoWorkbench() {
                 </select>
               </label>
               <label className="flex flex-col gap-1 text-sm">
-                <span className="font-semibold text-stone-700">Uploaded by</span>
-                <select
-                  className="rounded-md border border-stone-300 px-3 py-2"
-                  value={archiveFilters.uploadedByUserId}
-                  onChange={(event) =>
-                    setArchiveFilters((current) => ({
-                      ...current,
-                      uploadedByUserId: event.target.value,
-                      page: 1,
-                    }))
-                  }
-                >
-                  <option value="">All users</option>
-                  {state.users.map((user) => (
-                    <option key={user.id} value={user.id}>
-                      {user.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="flex flex-col gap-1 text-sm">
                 <span className="font-semibold text-stone-700">Sort by</span>
                 <select
                   className="rounded-md border border-stone-300 px-3 py-2"
@@ -3475,7 +3473,6 @@ export function IntoWorkbench() {
                   <option value="supplier">Supplier</option>
                   <option value="amount">Amount</option>
                   <option value="status">Status</option>
-                  <option value="uploader">Uploader</option>
                 </select>
               </label>
               <label className="flex flex-col gap-1 text-sm">
@@ -3498,7 +3495,7 @@ export function IntoWorkbench() {
             </div>
 
             <div className="mt-4 overflow-x-auto rounded-md border border-stone-200">
-              <table className="w-full min-w-[1160px] border-collapse text-left text-sm">
+              <table className="w-full min-w-[1040px] border-collapse text-left text-sm">
                 <thead className="bg-stone-100 text-xs font-semibold text-stone-600">
                   <tr>
                     <th className="px-3 py-2">Invoice date</th>
@@ -3507,7 +3504,6 @@ export function IntoWorkbench() {
                     <th className="px-3 py-2">Total</th>
                     <th className="px-3 py-2">Status</th>
                     <th className="px-3 py-2">Source</th>
-                    <th className="px-3 py-2">Uploaded by</th>
                     <th className="px-3 py-2">Exact ref.</th>
                     <th className="px-3 py-2">Last updated</th>
                   </tr>
@@ -3550,14 +3546,13 @@ export function IntoWorkbench() {
                         </span>
                       </td>
                       <td className="px-3 py-2">{invoice.source}</td>
-                      <td className="px-3 py-2">{invoice.uploadedByName}</td>
                       <td className="px-3 py-2">{invoice.exactBookingId ?? "-"}</td>
                       <td className="px-3 py-2">{formatTimestamp(invoice.updatedAt)}</td>
                     </tr>
                   ))}
                   {!archive?.invoices.length ? (
                     <tr>
-                      <td className="px-3 py-8 text-center text-stone-500" colSpan={9}>
+                      <td className="px-3 py-8 text-center text-stone-500" colSpan={8}>
                         No archived invoices match the current filters.
                       </td>
                     </tr>
@@ -4573,10 +4568,10 @@ export function IntoWorkbench() {
                               className="border-l-2 border-stone-300 pl-3"
                             >
                               <div className="font-semibold text-stone-700">
-                                {event.message}
+                                {auditMessageWithoutActor(event)}
                               </div>
                               <div className="mt-1 text-xs text-stone-500">
-                                {event.userName} - {formatTimestamp(event.createdAt)}
+                                {formatTimestamp(event.createdAt)}
                                 {event.field ? ` - ${event.field}` : ""}
                               </div>
                               {event.field ? (

@@ -206,8 +206,34 @@ export type ExactCostUnit = {
   isActive: boolean;
 };
 
+export const INTO_PURCHASE_VAT_CODES = ["4", "5", "6", "7", "8"] as const;
+
+export type IntoPurchaseVatCode = (typeof INTO_PURCHASE_VAT_CODES)[number];
+
+export const INTO_PURCHASE_VAT_CODE_LABELS: Record<IntoPurchaseVatCode, string> = {
+  "4": "Domestic_High (21%)",
+  "5": "Domestic_Low (9%)",
+  "6": "0% VAT",
+  "7": "Reverse Charge_INSIDE EU",
+  "8": "Reverse Charge_OUTSIDE EU",
+};
+
+export const UNSUPPORTED_VAT_CODE_WARNING =
+  "Unsupported VAT code detected. VAT code 6 was selected as the safe fallback.";
+
+export function isIntoPurchaseVatCode(value: unknown): value is IntoPurchaseVatCode {
+  return (
+    typeof value === "string" &&
+    (INTO_PURCHASE_VAT_CODES as readonly string[]).includes(value)
+  );
+}
+
+export function intoPurchaseVatCodeOrFallback(value: unknown): IntoPurchaseVatCode {
+  return isIntoPurchaseVatCode(value) ? value : "6";
+}
+
 export type ExactVatCode = {
-  code: "4" | "5" | "6" | "7" | "8" | string;
+  code: IntoPurchaseVatCode | string;
   description: string;
   percentage: number;
   type: "purchase" | "sales";
@@ -216,10 +242,19 @@ export type ExactVatCode = {
 
 export type ExactHistoricalPurchaseBooking = {
   id: string;
+  entryId?: string;
+  lineId?: string;
   supplierAccountId: string;
   yourRef?: string;
   invoiceNumber?: string;
+  invoiceDate?: string;
+  description?: string;
   totalAmount?: number;
+  lineAmount?: number;
+  vatAmount?: number;
+  vatPercentage?: number;
+  currency?: string;
+  paymentConditionCode?: string;
   descriptionKey: string;
   glAccount: string;
   vatCode: "4" | "5" | "6" | "7" | "8" | string;
@@ -291,7 +326,7 @@ export type PurchaseJournalLine = {
   costCentreConfidence: number;
   costUnit: string;
   costUnitConfidence: number;
-  vatCode: "4" | "5" | "6" | "7" | "8";
+  vatCode: IntoPurchaseVatCode;
   vatCodeName: string;
   vatConfidence: number;
   vatReasoning: string[];
@@ -533,17 +568,24 @@ export type GlAccountLearningDecision = {
 export type LearnableCorrectionField =
   | "supplier"
   | "yourRefPattern"
+  | "invoiceDate"
+  | "netAmount"
+  | "vatAmount"
+  | "totalAmount"
   | "glAccount"
   | "vatCode"
   | "costCentre"
   | "costUnit"
   | "expenseDescription"
   | "paymentCondition"
+  | "accrualFrom"
+  | "accrualTo"
   | "accrualPeriod"
   | "bookingLineSplit";
 
 export type LearnedCorrection = {
   id: string;
+  invoiceId: string;
   field: LearnableCorrectionField;
   supplierIdentity: string;
   supplierName: string;
@@ -554,6 +596,8 @@ export type LearnedCorrection = {
   invoiceTextContext?: string;
   filenamePattern?: string;
   confidence: number;
+  confidenceBefore: number;
+  confidenceAfter: number;
   correctedAt: string;
   correctedByUserId: string;
   correctedByUserName: string;
@@ -566,7 +610,7 @@ export type BookingLearningStore = {
   vatCodeSelections: Array<{
     supplierAccountId: string;
     descriptionKey: string;
-    vatCode: "4" | "5" | "6" | "7" | "8";
+    vatCode: IntoPurchaseVatCode;
     decidedAt: string;
   }>;
   costCentreSelections: Array<{

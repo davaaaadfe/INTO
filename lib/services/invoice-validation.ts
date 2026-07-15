@@ -12,6 +12,8 @@ const datePattern = /^\d{4}-\d{2}-\d{2}$/;
 
 export const DUPLICATE_INVOICE_REFERENCE_MESSAGE =
   "This invoice reference already exists for this supplier. Duplicate invoices cannot be booked.";
+export const BOOKING_TOTAL_MISMATCH_MESSAGE =
+  "Booking total does not match the invoice total. Difference must be 0.00 before booking to Exact Online.";
 
 function error(
   field: ValidationError["field"],
@@ -48,16 +50,73 @@ export function amountToMinorUnits(value: AmountValue) {
     return null;
   }
 
-  const normalized = String(value).trim().replace(",", ".");
-  if (!/^-?\d+(\.\d{1,2})?$/.test(normalized)) {
+  const cleaned = String(value)
+    .trim()
+    .replace(/\u00a0/g, " ")
+    .replace(/\b(?:EUR|USD|GBP|CHF|AUD|CAD)\b/gi, "")
+    .replace(/[€$£¥]/g, "")
+    .replace(/[\s']/g, "");
+  const negative = cleaned.startsWith("-");
+  const unsigned = negative ? cleaned.slice(1) : cleaned;
+
+  if (!/^\d+(?:[.,]\d+)*$/.test(unsigned)) {
     return null;
   }
 
-  const [whole, fractional = ""] = normalized.split(".");
-  const sign = whole.startsWith("-") ? -1 : 1;
-  const absoluteWhole = whole.replace("-", "");
+  const lastComma = unsigned.lastIndexOf(",");
+  const lastDot = unsigned.lastIndexOf(".");
+  const decimalSeparator =
+    lastComma >= 0 && lastDot >= 0
+      ? lastComma > lastDot
+        ? ","
+        : "."
+      : lastComma >= 0
+        ? ","
+        : lastDot >= 0
+          ? "."
+          : "";
+  const separatorIndex = decimalSeparator
+    ? unsigned.lastIndexOf(decimalSeparator)
+    : -1;
+  const fractional = separatorIndex >= 0 ? unsigned.slice(separatorIndex + 1) : "";
+
+  if (fractional.length > 2) {
+    return null;
+  }
+
+  const whole = (separatorIndex >= 0 ? unsigned.slice(0, separatorIndex) : unsigned)
+    .replace(/[.,]/g, "");
+  if (!whole || !/^\d+$/.test(whole) || (fractional && !/^\d{1,2}$/.test(fractional))) {
+    return null;
+  }
+
+  const sign = negative ? -1 : 1;
   const cents = fractional.padEnd(2, "0");
-  return sign * (Number(absoluteWhole) * 100 + Number(cents));
+  return sign * (Number(whole) * 100 + Number(cents));
+}
+
+export function calculateBookingTotals(
+  lines: Array<{ amount: number; vatAmount: number }>,
+  invoiceTotal: number | null | undefined
+) {
+  const lineAmountCents = lines.reduce(
+    (sum, line) => sum + (amountToMinorUnits(line.amount) ?? 0),
+    0
+  );
+  const vatAmountCents = lines.reduce(
+    (sum, line) => sum + (amountToMinorUnits(line.vatAmount) ?? 0),
+    0
+  );
+  const grossAmountCents = lineAmountCents + vatAmountCents;
+  const invoiceTotalCents = amountToMinorUnits(invoiceTotal) ?? 0;
+
+  return {
+    lineAmount: lineAmountCents / 100,
+    vatAmount: vatAmountCents / 100,
+    grossAmount: grossAmountCents / 100,
+    invoiceTotal: invoiceTotalCents / 100,
+    difference: (invoiceTotalCents - grossAmountCents) / 100,
+  };
 }
 
 function validateRequiredString(

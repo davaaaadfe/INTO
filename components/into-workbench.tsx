@@ -11,7 +11,13 @@ import {
   useRef,
   useState,
 } from "react";
-import { SHARED_ACCESS_PERMISSIONS } from "../lib/domain/invoice";
+import {
+  INTO_PURCHASE_VAT_CODE_LABELS,
+  SHARED_ACCESS_PERMISSIONS,
+  UNSUPPORTED_VAT_CODE_WARNING,
+  intoPurchaseVatCodeOrFallback,
+  isIntoPurchaseVatCode,
+} from "../lib/domain/invoice";
 import type {
   AuditEvent,
   DuplicateDetectionResult,
@@ -26,9 +32,14 @@ import type {
 } from "../lib/domain/invoice";
 import {
   REQUIRED_BOOKING_DISABLED_REASON,
-  bookingRequiresAccrual,
+  bookingLineRequiresAccrual,
+  getBookingBlockers,
   getRequiredBookingDataIssues,
 } from "../lib/services/required-booking-data";
+import {
+  BOOKING_TOTAL_MISMATCH_MESSAGE,
+  calculateBookingTotals,
+} from "../lib/services/invoice-validation";
 import {
   movePreviewPan,
   resetPreviewPan,
@@ -142,6 +153,7 @@ type ArchiveFilterState = {
 const missingInvoiceFileMessage =
   "Original invoice file could not be found. Please re-upload or re-read this invoice.";
 const learnedCorrectionNote = "Applied from previous user correction.";
+const exactHistorySuggestionNote = "Suggested from previous Exact bookings.";
 
 function invoiceFileCanBeRequested(invoice: UploadedInvoice) {
   return Boolean(
@@ -354,10 +366,6 @@ function amountFromInput(value: string | undefined) {
   return Number.isFinite(amount) ? amount : null;
 }
 
-function roundMoney(value: number) {
-  return Math.round((value + Number.EPSILON) * 100) / 100;
-}
-
 function percentScore(value: number) {
   return `${Math.round(value * 100)}%`;
 }
@@ -388,9 +396,29 @@ function bookingLineVatValue(line: BookingLineDraft) {
   return [line.vatCode, line.vatCodeName].filter(Boolean).join(" - ");
 }
 
+function normalizedVatFields(line?: PurchaseJournalLine | null) {
+  const unsupported = Boolean(line?.vatCode) && !isIntoPurchaseVatCode(line?.vatCode);
+  const vatCode = intoPurchaseVatCodeOrFallback(line?.vatCode);
+
+  return {
+    vatCode,
+    vatCodeName:
+      unsupported || !line?.vatCodeName
+        ? INTO_PURCHASE_VAT_CODE_LABELS[vatCode]
+        : line.vatCodeName,
+    vatConfidence: unsupported ? 0 : (line?.vatConfidence ?? 0),
+    vatReasoning: [
+      ...(line?.vatReasoning ?? []),
+      ...(unsupported ? [UNSUPPORTED_VAT_CODE_WARNING] : []),
+    ],
+    reviewRequired: unsupported || (line?.reviewRequired ?? true),
+  };
+}
+
 function toBookingLineDraft(line: PurchaseJournalLine): BookingLineDraft {
   return {
     ...line,
+    ...normalizedVatFields(line),
     amountInput: moneyValue(line.amount),
     vatAmountInput: moneyValue(line.vatAmount),
   };
@@ -411,6 +439,7 @@ function fallbackBookingLineDraft(
 ): BookingLineDraft {
   const amount = data.netAmount ?? data.grossAmount ?? 0;
   const vatAmount = data.vatAmount ?? 0;
+  const vatFields = normalizedVatFields(seed);
 
   return {
     id: `ui_line_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -426,10 +455,7 @@ function fallbackBookingLineDraft(
     costCentreConfidence: seed?.costCentreConfidence ?? 0,
     costUnit: seed?.costUnit ?? "",
     costUnitConfidence: seed?.costUnitConfidence ?? 0,
-    vatCode: seed?.vatCode ?? "6",
-    vatCodeName: seed?.vatCodeName ?? "",
-    vatConfidence: seed?.vatConfidence ?? 0,
-    vatReasoning: seed?.vatReasoning ?? [],
+    ...vatFields,
     percentage: seed?.percentage ?? 0,
     amount,
     vatAmount,
@@ -438,12 +464,14 @@ function fallbackBookingLineDraft(
     country: seed?.country ?? data.supplierCountry,
     intercompany: seed?.intercompany ?? "",
     roundingAdjustment: 0,
-    reviewRequired: true,
+    reviewRequired: vatFields.reviewRequired,
     reasoning: seed?.reasoning ?? [],
   };
 }
 
 function blankBookingLineDraft(seed?: BookingLineDraft): BookingLineDraft {
+  const vatFields = normalizedVatFields(seed);
+
   return {
     id: `ui_line_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     glAccount: "",
@@ -458,10 +486,7 @@ function blankBookingLineDraft(seed?: BookingLineDraft): BookingLineDraft {
     costCentreConfidence: seed?.costCentreConfidence ?? 0,
     costUnit: seed?.costUnit ?? "",
     costUnitConfidence: seed?.costUnitConfidence ?? 0,
-    vatCode: seed?.vatCode ?? "6",
-    vatCodeName: seed?.vatCodeName ?? "",
-    vatConfidence: seed?.vatConfidence ?? 0,
-    vatReasoning: seed?.vatReasoning ?? [],
+    ...vatFields,
     percentage: seed?.percentage ?? 0,
     amount: 0,
     vatAmount: 0,
@@ -470,7 +495,7 @@ function blankBookingLineDraft(seed?: BookingLineDraft): BookingLineDraft {
     country: seed?.country ?? "",
     intercompany: seed?.intercompany ?? "",
     roundingAdjustment: 0,
-    reviewRequired: true,
+    reviewRequired: vatFields.reviewRequired,
     reasoning: seed?.reasoning ?? [],
   };
 }
@@ -1165,11 +1190,17 @@ export function IntoWorkbench() {
       label: `${account.code} - ${account.name}`,
     }));
   const vatCodeOptions: SelectOption[] = (state.exactMasterData?.vatCodes ?? [])
-    .filter((vatCode) => vatCode.type === "purchase" && vatCode.isActive)
-    .map((vatCode) => ({
-      value: `${vatCode.code} - ${vatCode.description}`,
-      label: `${vatCode.code} - ${vatCode.description}`,
-    }));
+    .filter(
+      (vatCode) =>
+        vatCode.type === "purchase" &&
+        vatCode.isActive &&
+        isIntoPurchaseVatCode(vatCode.code)
+    )
+    .map((vatCode) => {
+      const code = intoPurchaseVatCodeOrFallback(vatCode.code);
+      const value = `${code} - ${INTO_PURCHASE_VAT_CODE_LABELS[code]}`;
+      return { value, label: value };
+    });
   const costCenterOptions: SelectOption[] = (
     state.exactMasterData?.costCenters ?? []
   )
@@ -1246,7 +1277,7 @@ export function IntoWorkbench() {
     ["supplier", "supplierName"],
     [
       selectedPurchaseJournal?.supplierResolution.reviewRequired
-        ? "Supplier has multiple possible Exact matches. Please select one."
+        ? selectedPurchaseJournal.supplierResolution.reasoning[0]
         : undefined,
     ]
   );
@@ -1269,7 +1300,6 @@ export function IntoWorkbench() {
     validationIssueFor(["yourRef", "referenceCode"]);
   const invoiceDateIssue =
     requiredIssueFor(["invoiceDate"]) ?? validationIssueFor(["invoiceDate"]);
-  const accrualRequired = bookingRequiresAccrual(selectedPurchaseJournal);
   const totalAmountIssue = validationIssueFor(
     ["grossAmount"],
     [
@@ -1280,30 +1310,17 @@ export function IntoWorkbench() {
   );
   const totalAmountFieldIssue =
     requiredIssueFor(["grossAmount"]) ?? totalAmountIssue;
-  const bookingLineTotals = useMemo(() => {
-    const lineAmount = roundMoney(
-      bookingLineDrafts.reduce(
-        (sum, line) => sum + (amountFromInput(line.amountInput) ?? 0),
-        0
-      )
-    );
-    const vatAmount = roundMoney(
-      bookingLineDrafts.reduce(
-        (sum, line) => sum + (amountFromInput(line.vatAmountInput) ?? 0),
-        0
-      )
-    );
-    const grossAmount = roundMoney(lineAmount + vatAmount);
-    const invoiceTotal = roundMoney(draft?.grossAmount ?? 0);
-
-    return {
-      lineAmount,
-      vatAmount,
-      grossAmount,
-      invoiceTotal,
-      difference: roundMoney(invoiceTotal - grossAmount),
-    };
-  }, [bookingLineDrafts, draft?.grossAmount]);
+  const bookingLineTotals = useMemo(
+    () =>
+      calculateBookingTotals(
+        bookingLineDrafts.map((line) => ({
+          amount: amountFromInput(line.amountInput) ?? 0,
+          vatAmount: amountFromInput(line.vatAmountInput) ?? 0,
+        })),
+        draft?.grossAmount
+      ),
+    [bookingLineDrafts, draft?.grossAmount]
+  );
   const selectedBookingLineIssues = useMemo<BookingLineIssue[]>(() => {
     const issues: BookingLineIssue[] = [];
 
@@ -1320,7 +1337,7 @@ export function IntoWorkbench() {
 
     bookingLineDrafts.forEach((line, index) => {
       const lineNumber = index + 1;
-      const requiresAccrualDates = accrualRequired || Boolean(line.accrualReason);
+      const requiresAccrualDates = bookingLineRequiresAccrual(line);
 
       if (!line.glAccount.trim()) {
         issues.push({
@@ -1365,6 +1382,13 @@ export function IntoWorkbench() {
           field: "vatCode",
           message: `Line ${lineNumber}: VAT code is required.`,
         });
+      } else if (!isIntoPurchaseVatCode(line.vatCode)) {
+        issues.push({
+          id: `line-${line.id}-vat-unsupported`,
+          lineIndex: index,
+          field: "vatCode",
+          message: `Line ${lineNumber}: Unsupported VAT code ${line.vatCode}. Only codes 4, 5, 6, 7, and 8 are allowed.`,
+        });
       }
 
       if (amountFromInput(line.amountInput) === null) {
@@ -1372,7 +1396,7 @@ export function IntoWorkbench() {
           id: `line-${line.id}-amount`,
           lineIndex: index,
           field: "amount",
-          message: `Line ${lineNumber}: Amount is required.`,
+          message: `Line ${lineNumber}: Net amount is required.`,
         });
       }
 
@@ -1389,20 +1413,19 @@ export function IntoWorkbench() {
     if (bookingLineDrafts.length && bookingLineTotals.difference !== 0) {
       issues.push({
         id: "booking-lines-difference",
-        message: "Booking line totals must match the invoice total before booking.",
+        message: BOOKING_TOTAL_MISMATCH_MESSAGE,
       });
     }
 
     return issues;
   }, [
-    accrualRequired,
     bookingLineDrafts,
     bookingLineTotals.difference,
     selectedInvoice,
   ]);
   const selectedBookingLineDisabledReason = selectedBookingLineIssues.length
     ? selectedBookingLineIssues.some((issue) => issue.id === "booking-lines-difference")
-      ? "Booking line totals must match the invoice total before booking."
+      ? BOOKING_TOTAL_MISMATCH_MESSAGE
       : "Complete all booking line required fields before booking to Exact Online."
     : "";
   const bookingLineIssueFor = (
@@ -1414,6 +1437,13 @@ export function IntoWorkbench() {
     );
     return issue ? { tone: "error", message: issue.message } : undefined;
   };
+  const bookingLineVatIssueFor = (lineIndex: number): FieldIssue | undefined =>
+    bookingLineIssueFor(lineIndex, "vatCode") ??
+    (bookingLineDrafts[lineIndex]?.vatReasoning.includes(
+      UNSUPPORTED_VAT_CODE_WARNING
+    )
+      ? { tone: "warning", message: UNSUPPORTED_VAT_CODE_WARNING }
+      : undefined);
   const visibleValidationMessages = selectedInvoice
     ? [
         ...selectedInvoice.validationErrors.map((item) => ({
@@ -2563,15 +2593,22 @@ export function IntoWorkbench() {
   }
 
   function updateBookingLineVat(index: number, value: string) {
-    const exactVat = state.exactMasterData?.vatCodes.find(
-      (vatCode) => `${vatCode.code} - ${vatCode.description}` === value
-    );
     const parsed = splitExactOption(value);
+    const exactVat = state.exactMasterData?.vatCodes.find(
+      (vatCode) =>
+        vatCode.code === parsed.code &&
+        vatCode.type === "purchase" &&
+        vatCode.isActive &&
+        isIntoPurchaseVatCode(vatCode.code)
+    );
 
     updateBookingLine(index, {
       vatCode: (exactVat?.code ?? parsed.code) as PurchaseJournalLine["vatCode"],
       vatCodeName: exactVat?.description ?? parsed.name,
       percentage: exactVat?.percentage ?? bookingLineDrafts[index]?.percentage ?? 0,
+      vatReasoning: (bookingLineDrafts[index]?.vatReasoning ?? []).filter(
+        (reason) => reason !== UNSUPPORTED_VAT_CODE_WARNING
+      ),
     });
   }
 
@@ -2688,7 +2725,10 @@ export function IntoWorkbench() {
     }
 
     if (selectedPurchaseJournal.supplierResolution.reviewRequired) {
-      return "Supplier has multiple possible Exact matches. Please select one.";
+      return (
+        selectedPurchaseJournal.supplierResolution.reasoning[0] ??
+        "Select the correct Exact supplier before marking this invoice as reviewed."
+      );
     }
 
     if (!selectedPurchaseJournal.attachmentPresent) {
@@ -2707,45 +2747,20 @@ export function IntoWorkbench() {
   }
 
   function bookingLineDisabledReason(invoice: UploadedInvoice) {
-    if (selectedInvoice?.id === invoice.id) {
+    if (
+      selectedInvoice?.id === invoice.id &&
+      selectedBookingLineDisabledReason
+    ) {
       return selectedBookingLineDisabledReason;
     }
 
-    const lines = invoice.purchaseJournal?.lines ?? [];
-    if (!lines.length) {
-      return "At least one booking line is required before booking to Exact Online.";
-    }
-
-    const requiresAccrualDates = bookingRequiresAccrual(invoice.purchaseJournal);
-    const hasMissingRequiredLineField = lines.some(
-      (line) =>
-        !line.glAccount ||
-        !line.description ||
-        !line.vatCode ||
-        typeof line.amount !== "number" ||
-        (requiresAccrualDates && (!line.from || !line.to))
+    return (
+      getBookingBlockers(
+        invoice.extractedData,
+        invoice.purchaseJournal,
+        state.exactMasterData
+      )[0]?.message ?? ""
     );
-
-    if (hasMissingRequiredLineField) {
-      return "Complete all booking line required fields before booking to Exact Online.";
-    }
-
-    const savedLineAmount = roundMoney(
-      lines.reduce((sum, line) => sum + line.amount, 0)
-    );
-    const savedVatAmount = roundMoney(
-      lines.reduce((sum, line) => sum + line.vatAmount, 0)
-    );
-    const savedDifference = roundMoney(
-      (invoice.extractedData.grossAmount ?? 0) -
-        roundMoney(savedLineAmount + savedVatAmount)
-    );
-
-    if (savedDifference !== 0) {
-      return "Booking line totals must match the invoice total before booking.";
-    }
-
-    return "";
   }
 
   function bookDisabledReason(invoice: UploadedInvoice) {
@@ -3988,13 +4003,18 @@ export function IntoWorkbench() {
               <div className="flex flex-col gap-3 bg-stone-50/40 p-3 sm:p-4">
                 <section className="grid gap-3">
                   <ReviewSection title="Required data">
-                    {selectedPurchaseJournal?.learningSummary.includes(
-                      learnedCorrectionNote
-                    ) ? (
-                      <p className="sm:col-span-2 text-xs font-medium text-emerald-700">
-                        {learnedCorrectionNote}
-                      </p>
-                    ) : null}
+                    {[learnedCorrectionNote, exactHistorySuggestionNote]
+                      .filter((note) =>
+                        selectedPurchaseJournal?.learningSummary.includes(note)
+                      )
+                      .map((note) => (
+                        <p
+                          key={note}
+                          className="sm:col-span-2 text-xs font-medium text-emerald-700"
+                        >
+                          {note}
+                        </p>
+                      ))}
                     <SelectField
                       label="Supplier"
                       required
@@ -4109,7 +4129,7 @@ export function IntoWorkbench() {
                                 VAT code <span className="text-rose-600">*</span>
                               </th>
                               <th className="px-2 py-2 text-right">
-                                Amount <span className="text-rose-600">*</span>
+                                Net amount <span className="text-rose-600">*</span>
                               </th>
                               <th className="px-2 py-2 text-right">
                                 VAT amount <span className="text-rose-600">*</span>
@@ -4222,7 +4242,7 @@ export function IntoWorkbench() {
                                   <td className="w-[130px] px-2 py-2">
                                     <input
                                       className={compactLineInputClass(
-                                        bookingLineIssueFor(index, "vatCode")
+                                        bookingLineVatIssueFor(index)
                                       )}
                                       list={`line-vat-options-${selectedInvoice.id}`}
                                       value={bookingLineVatValue(line)}
@@ -4232,7 +4252,7 @@ export function IntoWorkbench() {
                                       disabled={!hasPermission("edit")}
                                     />
                                     <ValidationMessage
-                                      issue={bookingLineIssueFor(index, "vatCode")}
+                                      issue={bookingLineVatIssueFor(index)}
                                     />
                                   </td>
                                   <td className="w-[100px] px-2 py-2">
@@ -4350,10 +4370,10 @@ export function IntoWorkbench() {
                         ))}
                       </datalist>
 
-                      <div className="mt-3 grid gap-2 rounded-lg border border-stone-200 bg-white p-3 text-sm sm:grid-cols-4">
+                      <div className="mt-3 grid gap-2 rounded-lg border border-stone-200 bg-white p-3 text-sm sm:grid-cols-2 xl:grid-cols-5">
                         <div>
                           <div className="text-xs font-semibold text-stone-500">
-                            Line amount
+                            Net total
                           </div>
                           <div className="mt-1 font-semibold text-stone-900">
                             {formatMoney(bookingLineTotals.lineAmount, currentCurrency)}
@@ -4361,10 +4381,18 @@ export function IntoWorkbench() {
                         </div>
                         <div>
                           <div className="text-xs font-semibold text-stone-500">
-                            VAT amount
+                            VAT total
                           </div>
                           <div className="mt-1 font-semibold text-stone-900">
                             {formatMoney(bookingLineTotals.vatAmount, currentCurrency)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-xs font-semibold text-stone-500">
+                            Booking calculated total
+                          </div>
+                          <div className="mt-1 font-semibold text-stone-900">
+                            {formatMoney(bookingLineTotals.grossAmount, currentCurrency)}
                           </div>
                         </div>
                         <div>
@@ -4680,6 +4708,9 @@ export function IntoWorkbench() {
                         <div className="text-sm font-semibold text-orange-950">
                           Supplier Review Required
                         </div>
+                        <p className="mt-1 text-xs leading-5 text-orange-900">
+                          {selectedPurchaseJournal.supplierResolution.reasoning[0]}
+                        </p>
                         <div className="mt-2 grid gap-2">
                           {selectedPurchaseJournal.supplierResolution.candidates.map(
                             (candidate) => (
@@ -4712,6 +4743,39 @@ export function IntoWorkbench() {
                             )
                           )}
                         </div>
+                        <label className="mt-3 block text-xs font-semibold text-orange-950">
+                          Choose from all Exact suppliers
+                          <select
+                            value=""
+                            onChange={(event) => {
+                              const accountId = event.target.value;
+                              if (accountId) {
+                                void applyIntelligenceAction(
+                                  "selectSupplier",
+                                  accountId
+                                );
+                              }
+                            }}
+                            disabled={
+                              !hasPermission("approve") ||
+                              busy.startsWith("supplier-") ||
+                              !state.exactMasterData?.suppliers.length
+                            }
+                            className="mt-1.5 w-full cursor-pointer rounded-md border border-orange-300 bg-white px-2 py-2 text-sm font-normal text-stone-900 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100 disabled:cursor-not-allowed disabled:bg-stone-100 disabled:text-stone-500"
+                          >
+                            <option value="">Select an Exact supplier...</option>
+                            {(state.exactMasterData?.suppliers ?? [])
+                              .slice()
+                              .sort((left, right) =>
+                                left.name.localeCompare(right.name)
+                              )
+                              .map((supplier) => (
+                                <option key={supplier.id} value={supplier.id}>
+                                  {supplier.code} - {supplier.name}
+                                </option>
+                              ))}
+                          </select>
+                        </label>
                       </div>
                     ) : null}
 

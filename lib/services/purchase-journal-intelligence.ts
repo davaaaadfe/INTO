@@ -1,5 +1,6 @@
 import type {
   BookingLearningStore,
+  ExactHistoricalPurchaseBooking,
   ExactMasterDataCache,
   ExactSupplierAccount,
   ExtractedInvoiceData,
@@ -10,13 +11,24 @@ import type {
   UploadedInvoice,
   ValidationError,
 } from "../domain/invoice";
+import {
+  INTO_PURCHASE_VAT_CODES,
+  UNSUPPORTED_VAT_CODE_WARNING,
+  intoPurchaseVatCodeOrFallback,
+  isIntoPurchaseVatCode,
+} from "../domain/invoice";
 import { createId } from "../utils/id";
 import {
+  BOOKING_TOTAL_MISMATCH_MESSAGE,
   DUPLICATE_INVOICE_REFERENCE_MESSAGE,
+  calculateBookingTotals,
   isValidIsoDate,
   normalizeText,
 } from "./invoice-validation";
-import { requiredBookingDataValidationErrors } from "./required-booking-data";
+import {
+  getBookingLineDataIssues,
+  requiredBookingDataValidationErrors,
+} from "./required-booking-data";
 import {
   LEARNED_CORRECTION_NOTE,
   learnedBookingLinesForInvoice,
@@ -41,6 +53,15 @@ type VatSuggestion = {
   reasoning: string[];
 };
 
+type ExactHistorySuggestion = {
+  entryId: string;
+  lines: ExactHistoricalPurchaseBooking[];
+  confidence: number;
+  score: number;
+  reasoning: string[];
+  suggestedDescription?: string;
+};
+
 const companyConfig = {
   confidenceThreshold: 0.86,
   companyVatNumber: "NL857017263B01",
@@ -51,6 +72,13 @@ const companyConfig = {
   currentMockOpenYear: 2026,
   firstMockOpenPeriod: 6,
 };
+
+export const SUPPLIER_NOT_MATCHED_MESSAGE =
+  "Supplier could not be matched to Exact Online master data. Please select the supplier manually.";
+export const MULTIPLE_EXACT_SUPPLIERS_MESSAGE =
+  "Multiple Exact suppliers match this invoice. Please choose the correct supplier.";
+export const EXACT_HISTORY_SUGGESTION_NOTE =
+  "Suggested from previous Exact bookings.";
 
 const glRuleCodes = {
   office: "4400",
@@ -91,6 +119,7 @@ const euVatCountries = new Set([
   "SI",
   "SK",
 ]);
+const supportedHistoricalVatCodes = new Set<VatCode>(INTO_PURCHASE_VAT_CODES);
 
 function roundMoney(value: number) {
   return Math.round((value + Number.EPSILON) * 100) / 100;
@@ -100,10 +129,14 @@ function normalizedVat(value: string | null | undefined) {
   return (value ?? "").replace(/[^a-z0-9]/gi, "").toUpperCase();
 }
 
+function normalizedIban(value: string | null | undefined) {
+  return (value ?? "").replace(/[^a-z0-9]/gi, "").toUpperCase();
+}
+
 function supplierIdentityKeys(data: ExtractedInvoiceData) {
   return [
     data.supplierVatNumber ? `vat:${normalizedVat(data.supplierVatNumber)}` : "",
-    data.iban ? `iban:${normalizeText(data.iban)}` : "",
+    data.iban ? `iban:${normalizedIban(data.iban).toLowerCase()}` : "",
     data.supplierChamberOfCommerceNumber
       ? `coc:${normalizeText(data.supplierChamberOfCommerceNumber)}`
       : "",
@@ -142,11 +175,45 @@ function mergeCandidate(
 }
 
 function nameSimilarity(left: string, right: string) {
-  const leftWords = new Set(normalizeText(left).split(" ").filter(Boolean));
-  const rightWords = new Set(normalizeText(right).split(" ").filter(Boolean));
+  const legalSuffixes = new Set([
+    "ag",
+    "bv",
+    "b",
+    "v",
+    "co",
+    "corp",
+    "corporation",
+    "gmbh",
+    "inc",
+    "incorporated",
+    "limited",
+    "llc",
+    "ltd",
+    "nv",
+    "plc",
+    "sa",
+    "sas",
+    "spa",
+    "srl",
+  ]);
+  const words = (value: string) =>
+    normalizeText(value)
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]+/g, " ")
+      .split(" ")
+      .filter((word) => word && !legalSuffixes.has(word));
+  const leftList = words(left);
+  const rightList = words(right);
+  const leftWords = new Set(leftList);
+  const rightWords = new Set(rightList);
 
   if (!leftWords.size || !rightWords.size) {
     return 0;
+  }
+
+  if (leftList.join(" ") === rightList.join(" ")) {
+    return 1;
   }
 
   const overlap = [...leftWords].filter((word) => rightWords.has(word)).length;
@@ -201,21 +268,231 @@ function exactCostUnit(
   );
 }
 
-function exactHistoricalBooking(
+function similarityTokens(value: string) {
+  const ignored = new Set([
+    "and",
+    "charge",
+    "expenses",
+    "invoice",
+    "monthly",
+    "the",
+  ]);
+  return new Set(
+    descriptionKey(value)
+      .split("-")
+      .filter((token) => token.length > 1 && !ignored.has(token))
+  );
+}
+
+function textSimilarity(left: string, right: string) {
+  const leftKey = descriptionKey(left);
+  const rightKey = descriptionKey(right);
+  if (!leftKey || !rightKey) {
+    return 0;
+  }
+  if (leftKey === rightKey) {
+    return 1;
+  }
+  if (leftKey.includes(rightKey) || rightKey.includes(leftKey)) {
+    return 0.94;
+  }
+
+  const leftTokens = similarityTokens(left);
+  const rightTokens = similarityTokens(right);
+  if (!leftTokens.size || !rightTokens.size) {
+    return 0;
+  }
+
+  const overlap = [...leftTokens].filter((token) => rightTokens.has(token)).length;
+  if (!overlap) {
+    return 0;
+  }
+
+  const jaccard = overlap / (leftTokens.size + rightTokens.size - overlap);
+  const smallerCoverage = overlap / Math.min(leftTokens.size, rightTokens.size);
+  return Math.max(jaccard, smallerCoverage * 0.88);
+}
+
+function amountSimilarity(current: number | null, historical: number | undefined) {
+  if (!current || !historical) {
+    return 0.5;
+  }
+
+  return Math.min(Math.abs(current), Math.abs(historical)) /
+    Math.max(Math.abs(current), Math.abs(historical));
+}
+
+function historicalGroupTotal(lines: ExactHistoricalPurchaseBooking[]) {
+  const explicit = lines.find((line) => typeof line.totalAmount === "number")
+    ?.totalAmount;
+  if (typeof explicit === "number") {
+    return explicit;
+  }
+
+  const total = lines.reduce(
+    (sum, line) => sum + (line.lineAmount ?? 0) + (line.vatAmount ?? 0),
+    0
+  );
+  return total || undefined;
+}
+
+function currentVatRate(data: ExtractedInvoiceData) {
+  if (!data.netAmount || data.vatAmount === null) {
+    return undefined;
+  }
+  return roundMoney((data.vatAmount / data.netAmount) * 100);
+}
+
+function historicalVatSimilarity(
+  lines: ExactHistoricalPurchaseBooking[],
+  data: ExtractedInvoiceData
+) {
+  const currentRate = currentVatRate(data);
+  const historicalRates = lines
+    .map((line) => line.vatPercentage)
+    .filter((rate): rate is number => typeof rate === "number");
+  if (typeof currentRate === "number" && historicalRates.length) {
+    const closest = Math.min(
+      ...historicalRates.map((rate) => Math.abs(rate - currentRate))
+    );
+    return closest < 0.01 ? 1 : closest <= 1 ? 0.8 : 0;
+  }
+
+  const currentHasVat = Math.abs(data.vatAmount ?? 0) >= 0.005;
+  const historyHasVat = lines.some((line) => Math.abs(line.vatAmount ?? 0) >= 0.005);
+  return currentHasVat === historyHasVat ? 0.8 : 0;
+}
+
+function cleanHistoricalDescription(line: ExactHistoricalPurchaseBooking) {
+  const source = line.description || line.descriptionKey.replace(/-/g, " ");
+  return source
+    .replace(/^\d{4}[.-]\d{2}[ ._-]*/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function exactHistoricalSuggestion(
+  invoice: UploadedInvoice,
   exactMasterData: ExactMasterDataCache | null,
   supplier: ExactSupplierAccount | undefined,
-  description: string
-) {
-  if (!supplier) {
+  data: ExtractedInvoiceData
+): ExactHistorySuggestion | undefined {
+  if (!supplier || !exactMasterData) {
     return undefined;
   }
 
-  const key = descriptionKey(description);
-  return exactMasterData?.historicalPurchaseBookings.find(
-    (booking) =>
-      booking.supplierAccountId === supplier.id &&
-      (booking.descriptionKey === key || key.includes(booking.descriptionKey))
+  const supplierHistory = exactMasterData.historicalPurchaseBookings.filter(
+    (booking) => booking.supplierAccountId === supplier.id
   );
+  const groups = new Map<string, ExactHistoricalPurchaseBooking[]>();
+  for (const booking of supplierHistory) {
+    const entryId = booking.entryId || booking.id;
+    const group = groups.get(entryId) ?? [];
+    group.push(booking);
+    groups.set(entryId, group);
+  }
+
+  const primaryText = [
+    humanDescription(data),
+    ...data.lineItems.map((line) => line.description),
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const contextText = [invoice.fileName, data.rawText ?? ""].join(" ");
+  const scored = [...groups.entries()].map(([entryId, lines]) => {
+    const historicalText = lines
+      .flatMap((line) => [line.description ?? "", line.descriptionKey])
+      .filter(Boolean)
+      .join(" ");
+    const descriptionScore = textSimilarity(primaryText, historicalText);
+    const contextScore = textSimilarity(contextText, historicalText);
+    const textScore = Math.max(descriptionScore, contextScore * 0.9);
+    const amountScore = amountSimilarity(
+      data.grossAmount,
+      historicalGroupTotal(lines)
+    );
+    const vatScore = historicalVatSimilarity(lines, data);
+    const recurringCount = [...groups.values()].filter((candidateLines) => {
+      const candidateText = candidateLines
+        .flatMap((line) => [line.description ?? "", line.descriptionKey])
+        .filter(Boolean)
+        .join(" ");
+      return textSimilarity(historicalText, candidateText) >= 0.8;
+    }).length;
+    const recurringScore = recurringCount >= 2 ? 1 : 0;
+    const score =
+      descriptionScore * 0.5 +
+      contextScore * 0.2 +
+      amountScore * 0.15 +
+      vatScore * 0.1 +
+      recurringScore * 0.05;
+    const confidence = Math.min(0.98, 0.78 + score * 0.22);
+    const reasoning = [
+      "Same supplier in Exact Online history.",
+      descriptionScore >= 0.5 || contextScore >= 0.5
+        ? "Similar invoice description, line text, filename, or OCR text."
+        : "",
+      amountScore >= 0.75 ? "Similar invoice amount range." : "",
+      vatScore >= 0.8 ? "Similar VAT treatment." : "",
+      recurringScore ? "Recurring expense pattern found in Exact history." : "",
+    ].filter(Boolean);
+
+    return {
+      entryId,
+      lines,
+      confidence,
+      score,
+      textScore,
+      reasoning,
+      suggestedDescription: cleanHistoricalDescription(lines[0]),
+    };
+  });
+
+  const best = scored
+    .filter(
+      (candidate) =>
+        candidate.textScore >= 0.4 &&
+        candidate.confidence >= companyConfig.confidenceThreshold
+    )
+    .sort((left, right) => right.score - left.score)[0];
+
+  if (!best) {
+    return undefined;
+  }
+
+  return {
+    entryId: best.entryId,
+    lines: best.lines,
+    confidence: roundMoney(best.confidence),
+    score: roundMoney(best.score),
+    reasoning: best.reasoning,
+    suggestedDescription: best.suggestedDescription,
+  };
+}
+
+function historicalLineFor(
+  suggestion: ExactHistorySuggestion | undefined,
+  lineDescriptionText: string,
+  fallbackIndex = 0
+) {
+  if (!suggestion?.lines.length) {
+    return undefined;
+  }
+
+  return [...suggestion.lines]
+    .map((line, index) => ({
+      line,
+      index,
+      score: textSimilarity(
+        lineDescriptionText,
+        line.description || line.descriptionKey
+      ),
+    }))
+    .sort(
+      (left, right) =>
+        right.score - left.score ||
+        Math.abs(left.index - fallbackIndex) - Math.abs(right.index - fallbackIndex)
+    )[0]?.line;
 }
 
 function selectedSupplierFromBooking(
@@ -251,55 +528,120 @@ function resolveSupplier(
     };
   }
 
-  for (const decision of learning.supplierSelections) {
-    if (!identities.includes(decision.supplierIdentity)) {
-      continue;
+  const uniqueAccounts = (accounts: ExactSupplierAccount[]) => [
+    ...new Map(accounts.map((account) => [account.id, account])).values(),
+  ];
+  const sortedCandidates = (accountScope?: ExactSupplierAccount[]) => {
+    const allowedIds = accountScope
+      ? new Set(accountScope.map((account) => account.id))
+      : null;
+    return [...candidates.values()]
+      .filter((candidate) => !allowedIds || allowedIds.has(candidate.account.id))
+      .sort((left, right) => right.confidence - left.confidence);
+  };
+  const resolved = (
+    account: ExactSupplierAccount,
+    confidence: number,
+    method: SupplierMatchCandidate["method"],
+    reasoning: string
+  ) => {
+    mergeCandidate(candidates, account, confidence, method, reasoning);
+    return {
+      selectedAccountId: account.id,
+      selectedAccountCode: account.code,
+      selectedAccountName: account.name,
+      matchConfidence: confidence,
+      threshold: companyConfig.confidenceThreshold,
+      method,
+      reviewRequired: false,
+      candidates: sortedCandidates(),
+      reasoning: [...new Set(candidates.get(account.id)?.reasoning ?? [reasoning])],
+    };
+  };
+  const matchState: { unresolvedPool: ExactSupplierAccount[] | null } = {
+    unresolvedPool: null,
+  };
+  const considerTier = (
+    matches: ExactSupplierAccount[],
+    confidence: number | ((account: ExactSupplierAccount) => number),
+    method: SupplierMatchCandidate["method"],
+    reasoning: string
+  ) => {
+    const allowedIds = matchState.unresolvedPool
+      ? new Set(matchState.unresolvedPool.map((account) => account.id))
+      : null;
+    const scoped = uniqueAccounts(
+      matches.filter((account) => !allowedIds || allowedIds.has(account.id))
+    );
+    if (!scoped.length) {
+      return null;
     }
 
-    const account = suppliers.find(
-      (supplier) => supplier.id === decision.accountId
-    );
-    if (account) {
+    for (const account of scoped) {
       mergeCandidate(
         candidates,
         account,
-        1,
-        "Learned decision",
-        "Matched a previously approved supplier resolution."
+        typeof confidence === "function" ? confidence(account) : confidence,
+        method,
+        reasoning
       );
     }
-  }
+    matchState.unresolvedPool = scoped;
+
+    if (scoped.length !== 1) {
+      return null;
+    }
+
+    const account = scoped[0];
+    return resolved(
+      account,
+      typeof confidence === "function" ? confidence(account) : confidence,
+      method,
+      reasoning
+    );
+  };
 
   const dataVat = normalizedVat(data.supplierVatNumber);
   if (dataVat) {
-    for (const account of suppliers) {
-      if (normalizedVat(account.vatNumber) === dataVat) {
-        mergeCandidate(
-          candidates,
-          account,
-          0.99,
-          "VAT number",
-          "VAT number matched Exact supplier master data."
-        );
-      }
+    const vatResolution = considerTier(
+      suppliers.filter((account) => normalizedVat(account.vatNumber) === dataVat),
+      0.99,
+      "VAT number",
+      "VAT number matched Exact supplier master data."
+    );
+    if (vatResolution) {
+      return vatResolution;
     }
   }
 
-  const dataIban = normalizeText(data.iban);
+  const dataIban = normalizedIban(data.iban);
   if (dataIban) {
-    for (const account of suppliers) {
-      if (normalizeText(account.iban) === dataIban) {
-        mergeCandidate(
-          candidates,
-          account,
-          0.97,
-          "IBAN",
-          "IBAN matched Exact supplier master data."
-        );
-      }
+    const ibanResolution = considerTier(
+      suppliers.filter((account) => normalizedIban(account.iban) === dataIban),
+      0.98,
+      "IBAN",
+      "IBAN matched Exact supplier master data."
+    );
+    if (ibanResolution) {
+      return ibanResolution;
     }
   }
 
+  const learnedAccounts = learning.supplierSelections
+    .filter((decision) => identities.includes(decision.supplierIdentity))
+    .map((decision) => suppliers.find((supplier) => supplier.id === decision.accountId))
+    .filter((account): account is ExactSupplierAccount => Boolean(account));
+  const learnedResolution = considerTier(
+    learnedAccounts,
+    0.97,
+    "Learned decision",
+    "Matched a previously approved supplier resolution."
+  );
+  if (learnedResolution) {
+    return learnedResolution;
+  }
+
+  const historicalAccounts: ExactSupplierAccount[] = [];
   for (const previous of allInvoices) {
     if (previous.id === invoice.id || !previous.purchaseJournal) {
       continue;
@@ -308,22 +650,17 @@ function resolveSupplier(
     const previousSupplier = selectedSupplierFromBooking(previous, exactMasterData);
     if (
       previousSupplier &&
-      normalizeText(previous.extractedData.supplierName) ===
-        normalizeText(data.supplierName)
+      nameSimilarity(previous.extractedData.supplierName, data.supplierName) >=
+        companyConfig.confidenceThreshold
     ) {
-      mergeCandidate(
-        candidates,
-        previousSupplier,
-        0.94,
-        "Exact history",
-        "Same supplier name was previously booked to this Exact account."
-      );
+      historicalAccounts.push(previousSupplier);
     }
   }
 
   const invoiceDescriptionKey = descriptionKey(humanDescription(data));
   for (const historical of exactMasterData.historicalPurchaseBookings) {
     if (
+      historical.descriptionKey &&
       invoiceDescriptionKey &&
       (invoiceDescriptionKey === historical.descriptionKey ||
         invoiceDescriptionKey.includes(historical.descriptionKey))
@@ -332,57 +669,77 @@ function resolveSupplier(
         (supplier) => supplier.id === historical.supplierAccountId
       );
       if (account) {
-        mergeCandidate(
-          candidates,
-          account,
-          0.93,
-          "Exact history",
-          "Similar invoice description matched historical Exact purchase bookings."
-        );
+        historicalAccounts.push(account);
       }
     }
   }
+  const historyResolution = considerTier(
+    historicalAccounts,
+    0.93,
+    "Exact history",
+    "Matched historical Exact purchase bookings for this supplier."
+  );
+  if (historyResolution) {
+    return historyResolution;
+  }
+
+  const nameScores = new Map(
+    suppliers.map((account) => [account.id, nameSimilarity(data.supplierName, account.name)])
+  );
+  const nameResolution = considerTier(
+    suppliers.filter(
+      (account) =>
+        (nameScores.get(account.id) ?? 0) >= companyConfig.confidenceThreshold
+    ),
+    (account) => roundMoney(nameScores.get(account.id) ?? 0),
+    "Name similarity",
+    "Supplier name is similar to the Exact account name."
+  );
+  if (nameResolution) {
+    return nameResolution;
+  }
+
+  if (matchState.unresolvedPool && matchState.unresolvedPool.length > 1) {
+    const sorted = sortedCandidates(matchState.unresolvedPool);
+    return {
+      selectedAccountId: undefined,
+      selectedAccountCode: undefined,
+      selectedAccountName: undefined,
+      matchConfidence: sorted[0]?.confidence ?? 0,
+      threshold: companyConfig.confidenceThreshold,
+      method: "Multiple matches",
+      reviewRequired: true,
+      candidates: sorted,
+      reasoning: [
+        MULTIPLE_EXACT_SUPPLIERS_MESSAGE,
+        ...sorted.flatMap((candidate) => candidate.reasoning),
+      ],
+    };
+  }
 
   for (const account of suppliers) {
-    const score = nameSimilarity(data.supplierName, account.name);
+    const score = nameScores.get(account.id) ?? 0;
     if (score >= 0.55) {
       mergeCandidate(
         candidates,
         account,
-        roundMoney(0.5 + score * 0.35),
+        roundMoney(score),
         "Name similarity",
         "Supplier name is similar to the Exact account name."
       );
     }
   }
-
-  const sorted = [...candidates.values()].sort(
-    (a, b) => b.confidence - a.confidence
-  );
-  const learnedSelection = sorted.find(
-    (candidate) =>
-      candidate.method === "Learned decision" &&
-      candidate.confidence >= companyConfig.confidenceThreshold
-  );
-  const strong = sorted.filter(
-    (candidate) => candidate.confidence >= companyConfig.confidenceThreshold
-  );
-  const reviewRequired = learnedSelection ? false : strong.length !== 1;
-  const selected = learnedSelection ?? (reviewRequired ? undefined : strong[0]);
-
+  const sorted = sortedCandidates();
   return {
-    selectedAccountId: selected?.account.id,
-    selectedAccountCode: selected?.account.code,
-    selectedAccountName: selected?.account.name,
+    selectedAccountId: undefined,
+    selectedAccountCode: undefined,
+    selectedAccountName: undefined,
     matchConfidence: sorted[0]?.confidence ?? 0,
     threshold: companyConfig.confidenceThreshold,
-    method: selected?.method ?? sorted[0]?.method ?? "No match",
-    reviewRequired,
+    method: "No match",
+    reviewRequired: true,
     candidates: sorted,
-    reasoning:
-      sorted.length > 0
-        ? sorted.flatMap((candidate) => candidate.reasoning)
-        : ["No supplier account reached the configured confidence threshold."],
+    reasoning: [SUPPLIER_NOT_MATCHED_MESSAGE],
   };
 }
 
@@ -410,8 +767,17 @@ function humanDescription(data: ExtractedInvoiceData) {
   return source.trim().replace(/\s+/g, " ");
 }
 
-function headerDescription(data: ExtractedInvoiceData) {
-  return `${monthLabel(data.invoiceDate)}.${humanDescription(data)}`;
+function headerDescription(
+  data: ExtractedInvoiceData,
+  suggestedDescription?: string
+) {
+  const current = humanDescription(data);
+  const useHistorical =
+    Boolean(suggestedDescription) &&
+    /^(invoice expenses?|service charge)$/i.test(current);
+  return `${monthLabel(data.invoiceDate)}.${
+    useHistorical ? suggestedDescription : current
+  }`;
 }
 
 function lineDescription(data: ExtractedInvoiceData, lineDescriptionText: string) {
@@ -422,18 +788,28 @@ function lineDescription(data: ExtractedInvoiceData, lineDescriptionText: string
 function paymentConditionFor(
   supplier: ExactSupplierAccount | undefined,
   data: ExtractedInvoiceData,
-  exactMasterData: ExactMasterDataCache | null
+  exactMasterData: ExactMasterDataCache | null,
+  historicalSuggestion?: ExactHistorySuggestion
 ) {
   const extracted = (data.paymentTerms ?? "").trim();
+  const historicalCode = historicalSuggestion?.lines.find(
+    (line) => line.paymentConditionCode
+  )?.paymentConditionCode;
+  const preferredCode = supplier?.paymentConditionCode || historicalCode || "";
   const condition = exactMasterData?.paymentConditions.find(
-    (item) => item.code === supplier?.paymentConditionCode && item.isActive
+    (item) => item.code === preferredCode && item.isActive
   );
-  const conditionCode = condition?.code ?? supplier?.paymentConditionCode ?? "";
+  const conditionCode = condition?.code ?? preferredCode;
   const conditionLabel =
-    condition?.label ?? supplier?.paymentConditionLabel ?? "Unknown Exact payment condition";
+    condition?.label ??
+    supplier?.paymentConditionLabel ??
+    "Unknown Exact payment condition";
   const mismatch =
     Boolean(extracted) && normalizeText(extracted) !== normalizeText(conditionLabel);
-  const missing = Boolean(supplier?.paymentConditionCode && !condition);
+  const missing = Boolean(preferredCode && !condition);
+  const historyApplied = Boolean(
+    historicalCode && !supplier?.paymentConditionCode && condition
+  );
 
   return {
     conditionCode,
@@ -441,7 +817,16 @@ function paymentConditionFor(
     invoicePaymentTerms: extracted || conditionLabel,
     mismatch,
     missing,
-    confidence: missing ? 0 : mismatch ? 0.52 : extracted ? 0.94 : 0.78,
+    confidence: missing
+      ? 0
+      : mismatch
+        ? 0.52
+        : historyApplied
+          ? historicalSuggestion?.confidence ?? 0.9
+          : extracted
+            ? 0.94
+            : 0.78,
+    historyApplied,
   };
 }
 
@@ -601,6 +986,64 @@ function determineAccrual(data: ExtractedInvoiceData) {
   };
 }
 
+function accrualFor(
+  data: ExtractedInvoiceData,
+  historicalSuggestion?: ExactHistorySuggestion,
+  preferredHistoricalLine?: ExactHistoricalPurchaseBooking
+) {
+  const extracted = determineAccrual(data);
+  if (extracted.from && extracted.to) {
+    return { ...extracted, historyApplied: false };
+  }
+
+  const historical =
+    preferredHistoricalLine &&
+    isValidIsoDate(preferredHistoricalLine.accrualFrom) &&
+    isValidIsoDate(preferredHistoricalLine.accrualTo)
+      ? preferredHistoricalLine
+      : historicalSuggestion?.lines.find(
+          (line) =>
+            isValidIsoDate(line.accrualFrom) && isValidIsoDate(line.accrualTo)
+        );
+  if (!historical?.accrualFrom || !historical.accrualTo) {
+    return { ...extracted, historyApplied: false };
+  }
+
+  const historicalMonths = monthSpan(
+    historical.accrualFrom,
+    historical.accrualTo
+  );
+  if (historicalMonths <= 0 || !isValidIsoDate(data.invoiceDate)) {
+    return { ...extracted, historyApplied: false };
+  }
+
+  let from = firstDayOfMonth(data.invoiceDate);
+  const fromPeriod = yearMonth(from);
+  if (!isOpenPeriod(fromPeriod.year, fromPeriod.month)) {
+    const nextOpen = firstOpenPeriodOnOrAfter(fromPeriod.year, fromPeriod.month);
+    from = firstDayOfPeriod(nextOpen.year, nextOpen.period);
+  }
+  const start = new Date(`${from}T00:00:00.000Z`);
+  const to = new Date(
+    Date.UTC(
+      start.getUTCFullYear(),
+      start.getUTCMonth() + historicalMonths,
+      0
+    )
+  )
+    .toISOString()
+    .slice(0, 10);
+
+  return {
+    from,
+    to,
+    benefitStartDate: undefined,
+    benefitEndDate: undefined,
+    reason: `Previous Exact bookings use a ${historicalMonths}-month accrual period.`,
+    historyApplied: true,
+  };
+}
+
 function selectedSupplierAccount(
   candidates: ReturnType<typeof resolveSupplier>,
   exactMasterData: ExactMasterDataCache | null
@@ -615,7 +1058,10 @@ function suggestGlAccount(
   data: ExtractedInvoiceData,
   lineDescriptionText: string,
   learning: BookingLearningStore,
-  exactMasterData: ExactMasterDataCache | null
+  exactMasterData: ExactMasterDataCache | null,
+  historicalSuggestion?: ExactHistorySuggestion,
+  preferredHistoricalLine?: ExactHistoricalPurchaseBooking,
+  preferHistoricalPattern = false
 ): GlSuggestion {
   const text = normalizeText(
     `${supplier?.name ?? ""} ${data.expenseDescription} ${lineDescriptionText} ${
@@ -658,6 +1104,20 @@ function suggestGlAccount(
     );
   }
 
+  const historical =
+    preferredHistoricalLine ||
+    historicalLineFor(
+      historicalSuggestion,
+      lineDescriptionText || humanDescription(data)
+    );
+  if (preferHistoricalPattern && historical) {
+    return suggestionForCode(
+      historical.glAccount,
+      historicalSuggestion?.confidence ?? 0.9,
+      EXACT_HISTORY_SUGGESTION_NOTE
+    );
+  }
+
   if (supplier?.defaultGlAccount) {
     return suggestionForCode(
       supplier.defaultGlAccount,
@@ -666,16 +1126,11 @@ function suggestGlAccount(
     );
   }
 
-  const historical = exactHistoricalBooking(
-    exactMasterData,
-    supplier,
-    lineDescriptionText || humanDescription(data)
-  );
   if (historical) {
     return suggestionForCode(
       historical.glAccount,
-      0.96,
-      "Matched historical Exact purchase booking for this supplier and description."
+      historicalSuggestion?.confidence ?? 0.9,
+      EXACT_HISTORY_SUGGESTION_NOTE
     );
   }
 
@@ -747,7 +1202,9 @@ function suggestVatCode(
   lineDescriptionText: string,
   line: { netAmount: number; vatAmount: number; grossAmount: number; vatRate?: number },
   learning: BookingLearningStore,
-  exactMasterData: ExactMasterDataCache | null
+  exactMasterData: ExactMasterDataCache | null,
+  historicalSuggestion?: ExactHistorySuggestion,
+  preferredHistoricalLine?: ExactHistoricalPurchaseBooking
 ): VatSuggestion {
   const country = supplierCountry(supplier, data);
   const supplierVat = normalizedVat(data.supplierVatNumber || supplier?.vatNumber || "");
@@ -818,6 +1275,36 @@ function suggestVatCode(
       0,
       vatInclusive ? "vat_inclusive" : "vat_excluded",
       [LEARNED_CORRECTION_NOTE]
+    );
+  }
+
+  const historical =
+    preferredHistoricalLine ||
+    historicalLineFor(
+      historicalSuggestion,
+      lineDescriptionText || humanDescription(data)
+    );
+  if (historical && !isIntoPurchaseVatCode(historical.vatCode)) {
+    return suggestionForCode("6", 0, 0, "vat_inclusive", [
+      UNSUPPORTED_VAT_CODE_WARNING,
+    ]);
+  }
+  if (
+    historical &&
+    supportedHistoricalVatCodes.has(historical.vatCode as VatCode) &&
+    historicalVatSimilarity([historical], data) >= 0.8
+  ) {
+    const historicalCode = historical.vatCode as VatCode;
+    const vatInclusive = ["6", "7", "8"].includes(historicalCode);
+    return suggestionForCode(
+      historicalCode,
+      historicalSuggestion?.confidence ?? 0.9,
+      historical.vatPercentage ?? 0,
+      vatInclusive ? "vat_inclusive" : "vat_excluded",
+      [
+        EXACT_HISTORY_SUGGESTION_NOTE,
+        ...(historicalSuggestion?.reasoning ?? []),
+      ]
     );
   }
 
@@ -955,13 +1442,13 @@ function costSelection(
   glAccount: string,
   learning: BookingLearningStore,
   exactMasterData: ExactMasterDataCache | null,
-  lineDescriptionText: string
+  lineDescriptionText: string,
+  historicalSuggestion?: ExactHistorySuggestion,
+  preferredHistoricalLine?: ExactHistoricalPurchaseBooking
 ) {
-  const historical = exactHistoricalBooking(
-    exactMasterData,
-    supplier,
-    lineDescriptionText
-  );
+  const historical =
+    preferredHistoricalLine ||
+    historicalLineFor(historicalSuggestion, lineDescriptionText);
   const learnedCentre = supplier
     ? learning.costCentreSelections.find(
         (decision) =>
@@ -994,7 +1481,7 @@ function costSelection(
         : 0
       : historical?.costCentre
         ? centre
-          ? 0.92
+          ? historicalSuggestion?.confidence ?? 0.9
           : 0
         : supplier?.defaultCostCentre
           ? centre
@@ -1008,7 +1495,7 @@ function costSelection(
         : 0
       : historical?.costUnit
         ? unit
-          ? 0.92
+          ? historicalSuggestion?.confidence ?? 0.9
           : 0
         : supplier?.defaultCostUnit
           ? unit
@@ -1016,7 +1503,81 @@ function costSelection(
             : 0
           : 0.9,
     learnedApplied: Boolean(learnedCentre || learnedUnit),
+    historyApplied: Boolean(
+      historical && (historical.costCentre || historical.costUnit)
+    ),
   };
+}
+
+function allocateMoneyByWeights(total: number, weights: number[]) {
+  const totalCents = Math.round(total * 100);
+  const safeWeights = weights.map((weight) => Math.max(0, Math.abs(weight)));
+  const weightTotal = safeWeights.reduce((sum, weight) => sum + weight, 0);
+  if (!safeWeights.length || weightTotal <= 0) {
+    return [];
+  }
+
+  const rawShares = safeWeights.map((weight) => (totalCents * weight) / weightTotal);
+  const cents = rawShares.map((share) => Math.floor(share));
+  let remainder = totalCents - cents.reduce((sum, share) => sum + share, 0);
+  const order = rawShares
+    .map((share, index) => ({ index, fraction: share - Math.floor(share) }))
+    .sort((left, right) => right.fraction - left.fraction);
+  let cursor = 0;
+  while (remainder > 0 && order.length) {
+    cents[order[cursor % order.length].index] += 1;
+    remainder -= 1;
+    cursor += 1;
+  }
+
+  return cents.map((share) => share / 100);
+}
+
+function historicalSplitSourceLines(
+  data: ExtractedInvoiceData,
+  historicalSuggestion?: ExactHistorySuggestion
+) {
+  const historyLines = historicalSuggestion?.lines ?? [];
+  if (
+    data.lineItems.length > 1 ||
+    historyLines.length < 2 ||
+    typeof data.netAmount !== "number" ||
+    typeof data.vatAmount !== "number" ||
+    historyLines.some((line) => typeof line.lineAmount !== "number")
+  ) {
+    return undefined;
+  }
+
+  const amountWeights = historyLines.map((line) => line.lineAmount ?? 0);
+  const vatWeights = historyLines.map((line) => line.vatAmount ?? 0);
+  const amounts = allocateMoneyByWeights(data.netAmount, amountWeights);
+  const vatAmounts = allocateMoneyByWeights(
+    data.vatAmount,
+    vatWeights.some((amount) => Math.abs(amount) >= 0.005)
+      ? vatWeights
+      : amountWeights
+  );
+  if (
+    amounts.length !== historyLines.length ||
+    vatAmounts.length !== historyLines.length
+  ) {
+    return undefined;
+  }
+
+  return historyLines.map((historical, index) => ({
+    id: historical.lineId || historical.id,
+    description: cleanHistoricalDescription(historical),
+    netAmount: amounts[index],
+    vatAmount: vatAmounts[index],
+    grossAmount: roundMoney(amounts[index] + vatAmounts[index]),
+    vatRate:
+      typeof historical.vatPercentage === "number"
+        ? historical.vatPercentage / 100
+        : amounts[index]
+          ? roundMoney(vatAmounts[index] / amounts[index])
+          : 0,
+    historical,
+  }));
 }
 
 function buildLines(
@@ -1024,7 +1585,8 @@ function buildLines(
   supplier: ExactSupplierAccount | undefined,
   data: ExtractedInvoiceData,
   learning: BookingLearningStore,
-  exactMasterData: ExactMasterDataCache | null
+  exactMasterData: ExactMasterDataCache | null,
+  historicalSuggestion?: ExactHistorySuggestion
 ) {
   const learnedLines = learnedBookingLinesForInvoice(
     invoice,
@@ -1039,11 +1601,13 @@ function buildLines(
 
   if (overrideLines) {
     return overrideLines.lines.map((source) => {
+      const vatCode = intoPurchaseVatCodeOrFallback(source.vatCode);
+      const unsupportedVatCode = !isIntoPurchaseVatCode(source.vatCode);
       const gl = exactGlAccount(
         exactMasterData,
         source.finalSelectedAccount || source.glAccount
       );
-      const vat = exactVatCode(exactMasterData, source.vatCode);
+      const vat = exactVatCode(exactMasterData, vatCode);
       const centre = source.costCentre
         ? exactCostCenter(exactMasterData, source.costCentre)
         : undefined;
@@ -1057,6 +1621,36 @@ function buildLines(
         ...(source.reasoning ?? []),
         ...(overrideLines.learned ? [LEARNED_CORRECTION_NOTE] : []),
       ];
+      const glConfidence = gl
+        ? overrideLines.learned
+          ? source.glConfidence
+          : overrideLines.confidence
+        : 0;
+      const costCentreConfidence = source.costCentre
+        ? centre
+          ? overrideLines.learned
+            ? source.costCentreConfidence
+            : overrideLines.confidence
+          : 0
+        : 1;
+      const costUnitConfidence = source.costUnit
+        ? unit
+          ? overrideLines.learned
+            ? source.costUnitConfidence
+            : overrideLines.confidence
+          : 0
+        : 1;
+      const vatConfidence = vat && !unsupportedVatCode
+        ? overrideLines.learned
+          ? source.vatConfidence
+          : overrideLines.confidence
+        : 0;
+      const reviewRequired =
+        !exactValuesReady ||
+        glConfidence < companyConfig.confidenceThreshold ||
+        vatConfidence < companyConfig.confidenceThreshold ||
+        costCentreConfidence < companyConfig.confidenceThreshold ||
+        costUnitConfidence < companyConfig.confidenceThreshold;
 
       return {
         ...source,
@@ -1065,37 +1659,39 @@ function buildLines(
         glAccountName: gl?.name ?? source.glAccountName,
         suggestedGlAccount: source.finalSelectedAccount || source.glAccount,
         finalSelectedAccount: source.finalSelectedAccount || source.glAccount,
-        glConfidence: exactValuesReady ? overrideLines.confidence : 0,
-        costCentreConfidence: source.costCentre
-          ? centre
-            ? overrideLines.confidence
-            : 0
-          : overrideLines.confidence,
-        costUnitConfidence: source.costUnit
-          ? unit
-            ? overrideLines.confidence
-            : 0
-          : overrideLines.confidence,
-        vatCodeName: vat?.description ?? source.vatCodeName,
-        vatConfidence: vat ? overrideLines.confidence : 0,
+        glConfidence,
+        costCentreConfidence,
+        costUnitConfidence,
+        vatCode,
+        vatCodeName: vat?.description ?? (unsupportedVatCode ? "0% VAT" : source.vatCodeName),
+        vatConfidence,
         vatReasoning: [
           ...(source.vatReasoning ?? []),
+          ...(unsupportedVatCode ? [UNSUPPORTED_VAT_CODE_WARNING] : []),
           ...(overrideLines.learned ? [LEARNED_CORRECTION_NOTE] : []),
         ],
-        reviewRequired: !exactValuesReady,
+        reviewRequired: reviewRequired || unsupportedVatCode,
         reasoning: [...new Set(reasoning)],
       };
     });
   }
 
-  const accrual = determineAccrual(data);
-  const lines: PurchaseJournalLine[] = sourceLines(data).map((line) => {
+  const historicalSplit = historicalSplitSourceLines(data, historicalSuggestion);
+  const source = historicalSplit ?? sourceLines(data);
+  const lines: PurchaseJournalLine[] = source.map((line, lineIndex) => {
+    const historicalLine =
+      "historical" in line
+        ? (line.historical as ExactHistoricalPurchaseBooking)
+        : historicalLineFor(historicalSuggestion, line.description, lineIndex);
     const gl = suggestGlAccount(
       supplier,
       data,
       line.description,
       learning,
-      exactMasterData
+      exactMasterData,
+      historicalSuggestion,
+      historicalLine,
+      Boolean(historicalSplit)
     );
     const vat = suggestVatCode(
       supplier,
@@ -1103,15 +1699,20 @@ function buildLines(
       line.description,
       line,
       learning,
-      exactMasterData
+      exactMasterData,
+      historicalSuggestion,
+      historicalLine
     );
     const costs = costSelection(
       supplier,
       gl.account,
       learning,
       exactMasterData,
-      line.description
+      line.description,
+      historicalSuggestion,
+      historicalLine
     );
+    const accrual = accrualFor(data, historicalSuggestion, historicalLine);
     const amount =
       vat.amountMode === "vat_inclusive" ? line.grossAmount : line.netAmount;
     const vatAmount = vat.amountMode === "vat_inclusive" ? 0 : line.vatAmount;
@@ -1154,24 +1755,12 @@ function buildLines(
         gl.reason,
         ...vat.reasoning,
         ...(costs.learnedApplied ? [LEARNED_CORRECTION_NOTE] : []),
+        ...(costs.historyApplied || accrual.historyApplied
+          ? [EXACT_HISTORY_SUGGESTION_NOTE]
+          : []),
       ],
     };
   });
-
-  const invoiceGross = data.grossAmount ?? 0;
-  const lineGross = roundMoney(
-    lines.reduce((sum, line) => sum + line.amount + line.vatAmount, 0)
-  );
-  const difference = roundMoney(invoiceGross - lineGross);
-
-  if (lines.length > 0 && Math.abs(difference) > 0) {
-    const lastLine = lines[lines.length - 1];
-    lastLine.amount = roundMoney(lastLine.amount + difference);
-    lastLine.roundingAdjustment = difference;
-    lastLine.reasoning.push(
-      `Adjusted booking line by ${difference.toFixed(2)} so the booked total exactly matches the invoice total.`
-    );
-  }
 
   return lines;
 }
@@ -1216,16 +1805,7 @@ function confidenceScores(
 }
 
 function totalsFor(lines: PurchaseJournalLine[], invoiceGross: number | null) {
-  const lineAmount = roundMoney(lines.reduce((sum, line) => sum + line.amount, 0));
-  const vatAmount = roundMoney(lines.reduce((sum, line) => sum + line.vatAmount, 0));
-  const grossAmount = roundMoney(lineAmount + vatAmount);
-
-  return {
-    lineAmount,
-    vatAmount,
-    grossAmount,
-    difference: roundMoney((invoiceGross ?? 0) - grossAmount),
-  };
+  return calculateBookingTotals(lines, invoiceGross);
 }
 
 function exactMasterDataIssues(
@@ -1317,9 +1897,27 @@ export function generatePurchaseJournalBooking(
     exactMasterData
   );
   const supplier = selectedSupplierAccount(supplierResolution, exactMasterData);
-  const payment = paymentConditionFor(supplier, data, exactMasterData);
+  const historicalSuggestion = exactHistoricalSuggestion(
+    invoice,
+    exactMasterData,
+    supplier,
+    data
+  );
+  const payment = paymentConditionFor(
+    supplier,
+    data,
+    exactMasterData,
+    historicalSuggestion
+  );
   const period = determineFinancialPeriod(data);
-  const lines = buildLines(invoice, supplier, data, learning, exactMasterData);
+  const lines = buildLines(
+    invoice,
+    supplier,
+    data,
+    learning,
+    exactMasterData,
+    historicalSuggestion
+  );
   const totals = totalsFor(lines, data.grossAmount);
   const yourRef = yourRefValue(data);
   const yourRefUnique = isYourRefUnique(invoice, allInvoices, supplier);
@@ -1343,12 +1941,13 @@ export function generatePurchaseJournalBooking(
   const criticalReasons = [
     ...masterDataIssues,
     !attachmentPresent ? "Original invoice attachment is required before booking." : "",
-    supplierResolution.reviewRequired ? "Supplier review required before automation can continue." : "",
+    supplierResolution.reviewRequired
+      ? supplierResolution.reasoning[0] ??
+        "Supplier review required before automation can continue."
+      : "",
     !yourRef ? "Your ref. must contain the invoice number or invoice reference." : "",
     yourRef && !yourRefUnique ? DUPLICATE_INVOICE_REFERENCE_MESSAGE : "",
-    Math.abs(totals.difference) > 0.005
-      ? "Booking line total does not match the invoice total."
-      : "",
+    totals.difference !== 0 ? BOOKING_TOTAL_MISMATCH_MESSAGE : "",
   ].filter(Boolean);
   const reviewableReasons = [
     payment.mismatch
@@ -1372,12 +1971,23 @@ export function generatePurchaseJournalBooking(
         line.reasoning.some((reason) => reason === LEARNED_CORRECTION_NOTE)
       )
   );
+  const exactHistoryApplied = Boolean(
+    historicalSuggestion &&
+      (payment.historyApplied ||
+        lines.some((line) =>
+          line.reasoning.includes(EXACT_HISTORY_SUGGESTION_NOTE)
+        ) ||
+        /^(invoice expenses?|service charge)$/i.test(humanDescription(data)))
+  );
 
   return {
     attachmentRequired: true,
     attachmentPresent,
     attachmentStorageKey: invoice.storageKey || undefined,
-    description: headerDescription(data),
+    description: headerDescription(
+      data,
+      exactHistoryApplied ? historicalSuggestion?.suggestedDescription : undefined
+    ),
     descriptionTemplate: companyConfig.defaultDescriptionTemplate,
     paymentConditionCode: payment.conditionCode,
     paymentConditionLabel: payment.conditionLabel,
@@ -1421,10 +2031,12 @@ export function generatePurchaseJournalBooking(
         ? `Exact master data synced at ${exactMasterData.lastSyncedAt}.`
         : "Exact master data is not synced.",
       ...lines.flatMap((line) => line.reasoning),
+      ...(exactHistoryApplied ? [EXACT_HISTORY_SUGGESTION_NOTE] : []),
       ...(learnedCorrectionApplied ? [LEARNED_CORRECTION_NOTE] : []),
     ],
     learningSummary: [
       "User corrections are saved for future similar invoices and reinforced when the invoice is approved or booked.",
+      ...(exactHistoryApplied ? [EXACT_HISTORY_SUGGESTION_NOTE] : []),
       ...(learnedCorrectionApplied ? [LEARNED_CORRECTION_NOTE] : []),
     ],
   };
@@ -1473,7 +2085,8 @@ export function purchaseJournalValidationErrors(
     errors.push(
       purchaseError(
         "supplier",
-        "Supplier Review Required: select one of the matching Exact supplier accounts."
+        booking.supplierResolution.reasoning[0] ??
+          "Supplier Review Required: select an Exact supplier account."
       )
     );
   }
@@ -1503,6 +2116,20 @@ export function purchaseJournalValidationErrors(
         "Payment Condition Review Required: invoice payment terms differ from the Exact supplier default."
       )
     );
+  }
+
+  for (const issue of getBookingLineDataIssues(booking.lines)) {
+    const field =
+      issue.field === "glAccount"
+        ? "glAccount"
+        : issue.field === "from"
+          ? "accrualFrom"
+          : issue.field === "to"
+            ? "accrualTo"
+            : issue.field === "vatCode"
+              ? "vatCode"
+              : "purchaseJournal";
+    errors.push(purchaseError(field, issue.message));
   }
 
   if (booking.reviewRequired) {

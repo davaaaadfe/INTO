@@ -52,6 +52,59 @@ test("rejects amounts that need rounding instead of exact cents", () => {
   assert.equal(amountToMinorUnits("10.005"), null);
 });
 
+test("parses European and English invoice amounts as exact cents", () => {
+  assert.equal(amountToMinorUnits("€1.234,56"), 123456);
+  assert.equal(amountToMinorUnits("€1,234.56"), 123456);
+  assert.equal(amountToMinorUnits("1 234,56 EUR"), 123456);
+});
+
+test("extracts the exact European net, VAT, and printed invoice total", async () => {
+  const data = await extractInvoiceData({
+    name: "invoice-european.xml",
+    type: "application/xml",
+    size: 1000,
+    text: async () =>
+      [
+        "Factuurnummer: EU-2026-001",
+        "Netto bedrag: € 1.234,56",
+        "BTW 21%: € 259,26",
+        "Totaal factuur: € 1.493,82",
+      ].join("\n"),
+  });
+
+  assert.equal(data.netAmount, 1234.56);
+  assert.equal(data.vatAmount, 259.26);
+  assert.equal(data.grossAmount, 1493.82);
+  assert.equal(data.lineItems[0]?.netAmount, 1234.56);
+  assert.equal(data.lineItems[0]?.vatAmount, 259.26);
+  assert.equal(data.lineItems[0]?.grossAmount, 1493.82);
+});
+
+test("preserves an explicit English invoice total instead of recalculating it", async () => {
+  const data = await extractInvoiceData({
+    name: "invoice-english.xml",
+    type: "application/xml",
+    size: 1000,
+    text: async () =>
+      [
+        "Invoice number: EN-2026-001",
+        "Subtotal: €1,234.56",
+        "VAT amount 21%: €259.26",
+        "Invoice total: €1,493.83",
+      ].join("\n"),
+  });
+
+  assert.equal(data.netAmount, 1234.56);
+  assert.equal(data.vatAmount, 259.26);
+  assert.equal(data.grossAmount, 1493.83);
+  assert.equal(
+    validateInvoiceData("invoice_explicit_total", data, []).some(
+      (error) => error.field === "grossAmount"
+    ),
+    true
+  );
+});
+
 test("allows optional additional invoice data to be empty", () => {
   const errors = validateInvoiceData(
     "invoice_1",

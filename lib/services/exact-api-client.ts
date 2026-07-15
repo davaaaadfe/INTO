@@ -11,6 +11,7 @@ import type {
   ExactVatCode,
   UploadedInvoice,
 } from "../domain/invoice";
+import { isIntoPurchaseVatCode } from "../domain/invoice";
 import { Buffer } from "node:buffer";
 import { createId } from "../utils/id";
 import { getStoredInvoiceFile } from "./storage-service";
@@ -619,41 +620,100 @@ function mapVatCode(value: unknown): ExactVatCode {
   };
 }
 
-function mapHistory(value: unknown): ExactHistoricalPurchaseBooking | null {
+function normalizeExactDate(value: string) {
+  const exactTimestamp = value.match(/^\/Date\((\d+)(?:[+-]\d+)?\)\/$/);
+  if (exactTimestamp) {
+    return new Date(Number(exactTimestamp[1])).toISOString().slice(0, 10);
+  }
+
+  return /^\d{4}-\d{2}-\d{2}/.test(value) ? value.slice(0, 10) : value;
+}
+
+function mapHistory(
+  value: unknown,
+  headerValue?: unknown
+): ExactHistoricalPurchaseBooking | null {
   const record = normalizeRecord(value);
-  const supplierAccountId = valueOf(record, [
+  const header = normalizeRecord(headerValue);
+  const lineValue = (keys: string[]) => valueOf(record, keys);
+  const headerValueFor = (keys: string[]) => valueOf(header, keys);
+  const lineNumber = (keys: string[]) => numberValueOf(record, keys);
+  const headerNumber = (keys: string[]) => numberValueOf(header, keys);
+  const supplierAccountId = lineValue([
     "Supplier",
     "SupplierID",
     "Account",
     "AccountID",
-  ]);
-  const glAccount = valueOf(record, ["GLAccount", "GeneralLedgerAccount"]);
+  ]) || headerValueFor(["Supplier", "SupplierID", "Account", "AccountID"]);
+  const glAccount = lineValue(["GLAccount", "GeneralLedgerAccount"]);
   if (!supplierAccountId || !glAccount) {
     return null;
   }
 
+  const entryId =
+    lineValue(["EntryID", "Entry", "PurchaseEntry", "HeaderID"]) ||
+    headerValueFor(["EntryID", "ID", "EntryNumber"]);
+  const lineId = lineValue(["ID", "LineID"]);
+  const description =
+    lineValue(["Description", "LineDescription"]) ||
+    headerValueFor(["Description"]) ||
+    headerValueFor(["YourRef", "InvoiceNumber"]);
+  const invoiceDate = headerValueFor([
+    "EntryDate",
+    "InvoiceDate",
+    "DocumentDate",
+    "Date",
+  ]) || lineValue(["EntryDate", "InvoiceDate", "Date"]);
+  const accrualFrom = lineValue(["From", "DateFrom", "AccrualFrom"]);
+  const accrualTo = lineValue(["To", "DateTo", "AccrualTo"]);
+
   return {
-    id: valueOf(record, ["ID", "EntryID", "EntryNumber"]) || createId("exact_hist"),
+    id: lineId || entryId || createId("exact_hist"),
+    entryId: entryId || undefined,
+    lineId: lineId || undefined,
     supplierAccountId,
-    yourRef: valueOf(record, ["YourRef", "Reference", "InvoiceNumber"]),
-    invoiceNumber: valueOf(record, ["InvoiceNumber", "YourRef", "Reference"]),
-    totalAmount: numberValueOf(record, [
-      "AmountDC",
-      "AmountFC",
-      "Amount",
-      "TotalAmount",
-      "InvoiceAmount",
-      "AmountVATIncl",
-    ]),
-    descriptionKey: valueOf(record, ["Description", "YourRef", "InvoiceNumber"])
+    yourRef:
+      headerValueFor(["YourRef", "Reference", "InvoiceNumber"]) ||
+      lineValue(["YourRef", "Reference", "InvoiceNumber"]),
+    invoiceNumber:
+      headerValueFor(["InvoiceNumber", "YourRef", "Reference"]) ||
+      lineValue(["InvoiceNumber", "YourRef", "Reference"]),
+    invoiceDate: invoiceDate ? normalizeExactDate(invoiceDate) : undefined,
+    description: description || undefined,
+    totalAmount:
+      headerNumber([
+        "AmountDC",
+        "AmountFC",
+        "Amount",
+        "TotalAmount",
+        "InvoiceAmount",
+        "AmountVATIncl",
+      ]) ??
+      lineNumber(["TotalAmount", "InvoiceAmount", "AmountVATIncl"]),
+    lineAmount: lineNumber(["AmountFC", "AmountDC", "Amount"]),
+    vatAmount: lineNumber(["VATAmountFC", "VATAmountDC", "VATAmount"]),
+    vatPercentage: lineNumber(["VATPercentage", "VATRate", "Percentage"]),
+    currency:
+      headerValueFor(["Currency", "CurrencyCode"]) ||
+      lineValue(["Currency", "CurrencyCode"]) ||
+      undefined,
+    paymentConditionCode:
+      headerValueFor([
+        "PaymentCondition",
+        "PaymentConditionCode",
+        "PaymentConditionPurchase",
+      ]) ||
+      lineValue(["PaymentCondition", "PaymentConditionCode"]) ||
+      undefined,
+    descriptionKey: description
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-"),
     glAccount,
-    vatCode: valueOf(record, ["VATCode", "VatCode"]) || "6",
-    costCentre: valueOf(record, ["Costcenter", "CostCenter", "CostCentre"]),
-    costUnit: valueOf(record, ["Costunit", "CostUnit"]),
-    accrualFrom: valueOf(record, ["From", "DateFrom", "AccrualFrom"]),
-    accrualTo: valueOf(record, ["To", "DateTo", "AccrualTo"]),
+    vatCode: lineValue(["VATCode", "VatCode"]) || "6",
+    costCentre: lineValue(["Costcenter", "CostCenter", "CostCentre"]),
+    costUnit: lineValue(["Costunit", "CostUnit"]),
+    accrualFrom: accrualFrom ? normalizeExactDate(accrualFrom) : undefined,
+    accrualTo: accrualTo ? normalizeExactDate(accrualTo) : undefined,
   };
 }
 
@@ -785,7 +845,8 @@ export async function syncRealExactMasterData(
     costCentersRaw,
     costUnitsRaw,
     vatCodesRaw,
-    historicalRaw,
+    historicalLinesRaw,
+    historicalEntriesRaw,
   ] = await Promise.all([
     fetchFirstAvailable(connection, divisionCode, [
       "/crm/Accounts?$filter=IsSupplier eq true&$top=500",
@@ -819,16 +880,37 @@ export async function syncRealExactMasterData(
     fetchFirstAvailable(
       connection,
       divisionCode,
-      [
-        "/purchaseentry/PurchaseEntryLines?$top=500",
-        "/purchaseentry/PurchaseEntries?$top=500",
-      ],
+      ["/purchaseentry/PurchaseEntryLines?$top=500"],
+      { optional: true, maxPages: 3 }
+    ),
+    fetchFirstAvailable(
+      connection,
+      divisionCode,
+      ["/purchaseentry/PurchaseEntries?$top=500"],
       { optional: true, maxPages: 3 }
     ),
   ]);
 
-  const historicalPurchaseBookings = historicalRaw
-    .map(mapHistory)
+  const historicalHeaders = new Map(
+    historicalEntriesRaw
+      .map((entry) => {
+        const record = normalizeRecord(entry);
+        const id = valueOf(record, ["EntryID", "ID", "EntryNumber"]);
+        return id ? ([id, entry] as const) : null;
+      })
+      .filter((entry): entry is readonly [string, unknown] => Boolean(entry))
+  );
+  const historicalPurchaseBookings = historicalLinesRaw
+    .map((line) => {
+      const record = normalizeRecord(line);
+      const entryId = valueOf(record, [
+        "EntryID",
+        "Entry",
+        "PurchaseEntry",
+        "HeaderID",
+      ]);
+      return mapHistory(line, historicalHeaders.get(entryId));
+    })
     .filter((item): item is ExactHistoricalPurchaseBooking => Boolean(item));
   const paymentConditions = paymentConditionsRaw
     .map(mapPaymentCondition)
@@ -893,9 +975,8 @@ export async function createRealExactPurchaseBooking(
     throw new Error("A resolved Exact supplier is required for booking.");
   }
 
-  const allowedVatCodes = new Set(["4", "5", "6", "7", "8"]);
   const purchaseEntryLines = booking.lines.map((line) => {
-    if (!allowedVatCodes.has(line.vatCode)) {
+    if (!isIntoPurchaseVatCode(line.vatCode)) {
       throw new Error(`Unsupported purchase VAT code ${line.vatCode}.`);
     }
 

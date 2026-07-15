@@ -1,5 +1,6 @@
 import type { ExtractedInvoiceData } from "../domain/invoice";
 import { createId } from "../utils/id";
+import { amountToMinorUnits } from "./invoice-validation";
 
 export type ExtractionFileInput = {
   name: string;
@@ -319,6 +320,128 @@ function servicePeriodFor(fileName: string, invoiceDate: Date) {
   return { start: "", end: "" };
 }
 
+function parsedAmount(value: string | undefined) {
+  const minorUnits = amountToMinorUnits(value);
+  return minorUnits === null ? null : minorUnits / 100;
+}
+
+function xmlAmount(input: string, names: string[]) {
+  for (const name of names) {
+    const match = new RegExp(
+      `<(?:[a-z0-9_.-]+:)?${name}\\b[^>]*>\\s*([^<]+)`,
+      "i"
+    ).exec(input);
+    const amount = parsedAmount(match?.[1]);
+    if (amount !== null) {
+      return amount;
+    }
+  }
+
+  return null;
+}
+
+function lastAmountOnLine(value: string) {
+  const matches = [
+    ...value.matchAll(
+      /(?:EUR|USD|GBP|CHF|€|\$|£)?\s*-?\d[\d.,'\s\u00a0]*(?:\s*(?:EUR|USD|GBP|CHF))?/gi
+    ),
+  ];
+
+  for (const match of matches.reverse()) {
+    const suffix = value.slice((match.index ?? 0) + match[0].length).trimStart();
+    if (suffix.startsWith("%")) {
+      continue;
+    }
+    const amount = parsedAmount(match[0]);
+    if (amount !== null) {
+      return amount;
+    }
+  }
+
+  return null;
+}
+
+function labelledAmount(
+  input: string,
+  labels: RegExp[],
+  excludedLine?: RegExp
+) {
+  const candidates: number[] = [];
+
+  for (const line of input.replace(/\r/g, "\n").split(/\n+/)) {
+    if (excludedLine?.test(line)) {
+      continue;
+    }
+    for (const label of labels) {
+      const match = label.exec(line);
+      if (!match) {
+        continue;
+      }
+      const amount = lastAmountOnLine(line.slice(match.index + match[0].length));
+      if (amount !== null) {
+        candidates.push(amount);
+      }
+      break;
+    }
+  }
+
+  return candidates.at(-1) ?? null;
+}
+
+function extractInvoiceAmounts(input: string) {
+  const taxTotal = /<(?:[a-z0-9_.-]+:)?TaxTotal\b[^>]*>([\s\S]*?)<\/(?:[a-z0-9_.-]+:)?TaxTotal>/i.exec(
+    input
+  )?.[1];
+  const netAmount =
+    xmlAmount(input, ["TaxExclusiveAmount"]) ??
+    labelledAmount(input, [
+      /\bnet amount\b/i,
+      /\bsub\s*total\b/i,
+      /\bnetto(?:\s+bedrag)?\b/i,
+      /\bsubtotaal\b/i,
+      /\bbedrag\s+excl\.?\s*(?:btw|vat)\b/i,
+      /\btax\s+exclusive\s+amount\b/i,
+      /\bnetto\s*betrag\b/i,
+      /\bsous-total\b/i,
+      /\bimponibile\b/i,
+    ]);
+  const vatAmount =
+    (taxTotal ? xmlAmount(taxTotal, ["TaxAmount"]) : null) ??
+    labelledAmount(input, [
+      /\bvat\s+(?:amount|total)\b/i,
+      /\btax\s+amount\b/i,
+      /\bbtw(?:\s+bedrag)?\b/i,
+      /\bmwst\b/i,
+      /\bust\b/i,
+      /\btva\b/i,
+      /\biva\b/i,
+    ]);
+  const grossAmount =
+    xmlAmount(input, ["PayableAmount", "TaxInclusiveAmount"]) ??
+    labelledAmount(
+      input,
+      [
+        /\binvoice\s+total\b/i,
+        /\btotal\s+amount\b/i,
+        /\bgrand\s+total\b/i,
+        /\bamount\s+due\b/i,
+        /\bbalance\s+due\b/i,
+        /\bfactuurtotaal\b/i,
+        /\btotaal(?:\s+factuur|\s+te\s+betalen)?\b/i,
+        /\bte\s+betalen\b/i,
+        /\bgesamtbetrag\b/i,
+        /\brechnungsbetrag\b/i,
+        /\bmontant\s+total\b/i,
+        /\btotal\s+(?:facture|a\s+pagar|factura)\b/i,
+        /\btotale(?:\s+fattura|\s+da\s+pagare)?\b/i,
+        /\btotal\b/i,
+      ],
+      /\b(?:sub\s*total|subtotaal|vat|btw|tax|excl|exclusive|net)\b/i
+    );
+
+  return { netAmount, vatAmount, grossAmount };
+}
+
 export async function extractInvoiceData(
   file: ExtractionFileInput
 ): Promise<ExtractedInvoiceData> {
@@ -328,12 +451,8 @@ export async function extractInvoiceData(
   const invoiceDate = forcedClosedPeriod
     ? new Date(Date.UTC(2026, 0, (seed % 24) + 1))
     : new Date(Date.UTC(2026, 5 + (seed % 2), (seed % 24) + 1));
-  const netAmount = 100 + (seed % 840);
   const vatRate = vatRateForFile(file.name, profile);
-  const vatAmount = Number((netAmount * vatRate).toFixed(2));
-  const grossAmount = Number((netAmount + vatAmount).toFixed(2));
   const invalidByName = /invalid|missing|check/i.test(file.name);
-  const mismatchByName = /mismatch|round/i.test(file.name);
   const paymentMismatch = /payment-mismatch|immediate|already-paid|paid/i.test(file.name);
   const reverseCharge =
     /reverse|eu-acquisition|intra-community/i.test(file.name) ||
@@ -343,6 +462,7 @@ export async function extractInvoiceData(
     ? "David Kwon"
     : "";
   const documentText = await invoiceText(file);
+  const { netAmount, vatAmount, grossAmount } = extractInvoiceAmounts(documentText);
   const detectedReference =
     detectInvoiceReference(documentText) ?? detectInvoiceReference(file.name);
   const confidentReference =
@@ -367,7 +487,7 @@ export async function extractInvoiceData(
     currency: "EUR",
     netAmount,
     vatAmount,
-    grossAmount: mismatchByName ? grossAmount + 0.01 : grossAmount,
+    grossAmount,
     iban: profile.iban,
     expenseDescription: profile.expenseDescription,
     beneficiary,
@@ -385,17 +505,20 @@ export async function extractInvoiceData(
     ]
       .filter(Boolean)
       .join(" "),
-    lineItems: [
-      {
-        id: createId("line"),
-        description: profile.expenseDescription,
-        quantity: 1,
-        unitPrice: netAmount,
-        netAmount,
-        vatRate,
-        vatAmount,
-        grossAmount,
-      },
-    ],
+    lineItems:
+      netAmount !== null && vatAmount !== null && grossAmount !== null
+        ? [
+            {
+              id: createId("line"),
+              description: profile.expenseDescription,
+              quantity: 1,
+              unitPrice: netAmount,
+              netAmount,
+              vatRate,
+              vatAmount,
+              grossAmount,
+            },
+          ]
+        : [],
   };
 }

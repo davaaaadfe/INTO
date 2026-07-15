@@ -150,6 +150,212 @@ test("stores correction provenance and replaces an older rule", () => {
   assert.equal(storedGlRules[0].correctedByUserId, "user-owner");
 });
 
+test("a correction to a learned value replaces the original rule", () => {
+  const learning = createInitialLearningStore();
+  const original = invoice({}, {
+    supplierName: "Noordzee Office Supplys",
+    supplierVatNumber: "",
+  });
+  captureUserCorrections({
+    invoice: original,
+    nextExtractedData: {
+      ...original.extractedData,
+      supplierName: "Noordzee Office Supplies",
+    },
+    nextBookingLines: [],
+    learning,
+    user: { id: "shared_user", name: "Shared INTO User" },
+  });
+
+  const second = invoice(
+    { id: "invoice-second", fileName: "AH-invoice-002.pdf" },
+    { supplierName: "Noordzee Office Supplys", supplierVatNumber: "" }
+  );
+  const learned = applyLearnedExtractedData(
+    second,
+    second.extractedData,
+    learning
+  );
+  assert.equal(learned.data.supplierName, "Noordzee Office Supplies");
+  second.extractedData = learned.data;
+  second.learnedFieldsApplied = learned.appliedFields;
+
+  captureUserCorrections({
+    invoice: second,
+    nextExtractedData: {
+      ...second.extractedData,
+      supplierName: "Noordzee Office Supplies B.V.",
+    },
+    nextBookingLines: [],
+    learning,
+    user: { id: "shared_user", name: "Shared INTO User" },
+  });
+
+  const supplierRules = learning.corrections.filter(
+    (item) =>
+      item.field === "supplier" &&
+      item.metadata?.correctionKind === "extractedValue"
+  );
+  assert.equal(supplierRules.length, 1);
+  assert.equal(supplierRules[0].originalValue, "Noordzee Office Supplys");
+  assert.equal(supplierRules[0].correctedValue, "Noordzee Office Supplies B.V.");
+  assert.equal(supplierRules[0].invoiceId, "invoice-second");
+
+  const third = invoice(
+    { id: "invoice-third", fileName: "AH-invoice-003.pdf" },
+    { supplierName: "Noordzee Office Supplys", supplierVatNumber: "" }
+  );
+  assert.equal(
+    applyLearnedExtractedData(third, third.extractedData, learning).data
+      .supplierName,
+    "Noordzee Office Supplies B.V."
+  );
+});
+
+test("stores invoice field corrections with complete provenance and confidence", () => {
+  const learning = createInitialLearningStore();
+  const current = invoice({}, {
+    invoiceDate: "2026-06-15",
+    netAmount: 99,
+    vatAmount: 20.79,
+    grossAmount: 119.79,
+    confidence: 0.72,
+    rawText: [
+      "Invoice date: 16-06-2026",
+      "Net amount: EUR 100,00",
+      "VAT amount: EUR 21,00",
+      "Total amount: EUR 121,00",
+    ].join("\n"),
+  });
+  current.purchaseJournal = generatePurchaseJournalBooking(
+    current,
+    [current],
+    learning,
+    exactMasterData
+  );
+
+  const captured = captureUserCorrections({
+    invoice: current,
+    nextExtractedData: {
+      ...current.extractedData,
+      invoiceDate: "2026-06-16",
+      netAmount: 100,
+      vatAmount: 21,
+      grossAmount: 121,
+    },
+    nextBookingLines: current.purchaseJournal.lines,
+    learning,
+    user: { id: "shared_user", name: "Shared INTO User" },
+    correctedAt: "2026-06-16T10:00:00.000Z",
+  });
+
+  assert.deepEqual(
+    captured.map((item) => item.field).sort(),
+    ["invoiceDate", "netAmount", "totalAmount", "vatAmount"]
+  );
+  for (const correction of captured) {
+    assert.equal(correction.invoiceId, "invoice-learning");
+    assert.equal(correction.supplierName, "Noordzee Office Supplies");
+    assert.equal(correction.correctedAt, "2026-06-16T10:00:00.000Z");
+    assert.equal(correction.correctedByUserId, "shared_user");
+    assert.equal(correction.confidenceBefore, 0.72);
+    assert.equal(correction.confidenceAfter, 1);
+    assert.match(correction.invoiceTextContext ?? "", /amount|date/i);
+    assert.equal(correction.filenamePattern, "ah-invoice-#.pdf");
+  }
+});
+
+test("uses learned OCR labels for a future invoice date and amounts", () => {
+  const learning = createInitialLearningStore();
+  const original = invoice({}, {
+    invoiceDate: "2026-06-15",
+    netAmount: 99,
+    vatAmount: 20.79,
+    grossAmount: 119.79,
+    rawText: [
+      "Invoice date: 16-06-2026",
+      "Net amount: EUR 100,00",
+      "VAT amount: EUR 21,00",
+      "Total amount: EUR 121,00",
+    ].join("\n"),
+  });
+  captureUserCorrections({
+    invoice: original,
+    nextExtractedData: {
+      ...original.extractedData,
+      invoiceDate: "2026-06-16",
+      netAmount: 100,
+      vatAmount: 21,
+      grossAmount: 121,
+    },
+    nextBookingLines: [],
+    learning,
+    user: { id: "shared_user", name: "Shared INTO User" },
+  });
+
+  const future = invoice(
+    { id: "invoice-future", fileName: "AH-invoice-002.pdf" },
+    {
+      invoiceDate: "2026-07-16",
+      netAmount: 199,
+      vatAmount: 41.79,
+      grossAmount: 240.79,
+      rawText: [
+        "Invoice date: 17-07-2026",
+        "Net amount: EUR 200,00",
+        "VAT amount: EUR 42,00",
+        "Total amount: EUR 242,00",
+      ].join("\n"),
+    }
+  );
+  const result = applyLearnedExtractedData(future, future.extractedData, learning);
+
+  assert.equal(result.data.invoiceDate, "2026-07-17");
+  assert.equal(result.data.netAmount, 200);
+  assert.equal(result.data.vatAmount, 42);
+  assert.equal(result.data.grossAmount, 242);
+  assert.ok(result.appliedFields.includes("invoiceDate"));
+  assert.ok(result.appliedFields.includes("netAmount"));
+  assert.ok(result.appliedFields.includes("vatAmount"));
+  assert.ok(result.appliedFields.includes("totalAmount"));
+});
+
+test("does not treat a subtotal label as the learned invoice total", () => {
+  const learning = createInitialLearningStore();
+  const original = invoice({}, {
+    grossAmount: 119,
+    rawText: [
+      "Subtotal amount: EUR 100,00",
+      "VAT amount: EUR 21,00",
+      "Total amount: EUR 121,00",
+    ].join("\n"),
+  });
+  captureUserCorrections({
+    invoice: original,
+    nextExtractedData: { ...original.extractedData, grossAmount: 121 },
+    nextBookingLines: [],
+    learning,
+    user: { id: "shared_user", name: "Shared INTO User" },
+  });
+
+  const future = invoice(
+    { id: "invoice-future", fileName: "AH-invoice-002.pdf" },
+    {
+      grossAmount: 240,
+      rawText: [
+        "Subtotal amount: EUR 200,00",
+        "VAT amount: EUR 42,00",
+        "Total amount: EUR 242,00",
+      ].join("\n"),
+    }
+  );
+  assert.equal(
+    applyLearnedExtractedData(future, future.extractedData, learning).data
+      .grossAmount,
+    242
+  );
+});
+
 test("uses a learned Factuurnummer pattern for a future invoice", () => {
   const learning = createInitialLearningStore();
   const original = invoice({}, {
@@ -217,6 +423,33 @@ test("does not apply a learned rule to a different supplier", () => {
     learning
   );
 
+  assert.equal(result.data.paymentTerms, "7 days");
+  assert.deepEqual(result.appliedFields, []);
+});
+
+test("does not apply a contextless rule to an unrelated invoice", () => {
+  const learning = createInitialLearningStore();
+  const original = invoice(
+    { fileName: "first-document.pdf" },
+    { expenseDescription: "", lineItems: [], paymentTerms: "7 days" }
+  );
+  captureUserCorrections({
+    invoice: original,
+    nextExtractedData: { ...original.extractedData, paymentTerms: "30 days" },
+    nextBookingLines: [],
+    learning,
+    user: { id: "shared_user", name: "Shared INTO User" },
+  });
+
+  const unrelated = invoice(
+    { id: "invoice-unrelated", fileName: "different-document.pdf" },
+    { expenseDescription: "", lineItems: [], paymentTerms: "7 days" }
+  );
+  const result = applyLearnedExtractedData(
+    unrelated,
+    unrelated.extractedData,
+    learning
+  );
   assert.equal(result.data.paymentTerms, "7 days");
   assert.deepEqual(result.appliedFields, []);
 });
@@ -290,4 +523,169 @@ test("applies a learned booking-line split before default suggestions", () => {
   assert.ok(
     booking.reasoningLog.includes("Applied from previous user correction.")
   );
+});
+
+test("applies learned line allocation and accrual behavior to current invoice totals", () => {
+  const learning = createInitialLearningStore();
+  const original = invoice();
+  original.purchaseJournal = generatePurchaseJournalBooking(
+    original,
+    [original],
+    learning,
+    exactMasterData
+  );
+  const seedLine = original.purchaseJournal.lines[0];
+  const corrected = correctedLine(seedLine, {
+    description: "Software license",
+    glAccount: "4420",
+    finalSelectedAccount: "4420",
+    glAccountName: "Software subscriptions",
+    vatCode: "5",
+    vatCodeName: "VAT to claim 9%",
+    costCentre: "RTM",
+    costUnit: "IT",
+    from: "2026-07-01",
+    to: "2027-06-30",
+    amount: 100,
+    vatAmount: 21,
+  });
+  captureUserCorrections({
+    invoice: original,
+    nextExtractedData: original.extractedData,
+    nextBookingLines: [corrected],
+    learning,
+    user: { id: "shared_user", name: "Shared INTO User" },
+  });
+
+  const future = invoice(
+    { id: "invoice-future", fileName: "AH-invoice-002.pdf" },
+    {
+      invoiceNumber: "INV-002",
+      referenceCode: "INV-002",
+      invoiceDate: "2026-07-16",
+      netAmount: 200,
+      vatAmount: 18,
+      grossAmount: 218,
+    }
+  );
+  const booking = generatePurchaseJournalBooking(
+    future,
+    [future],
+    learning,
+    exactMasterData
+  );
+
+  assert.equal(booking.lines.length, 1);
+  assert.equal(booking.lines[0].finalSelectedAccount, "4420");
+  assert.equal(booking.lines[0].vatCode, "5");
+  assert.equal(booking.lines[0].costCentre, "RTM");
+  assert.equal(booking.lines[0].costUnit, "IT");
+  assert.equal(booking.lines[0].description, "Software license");
+  assert.equal(booking.lines[0].from, "2026-08-01");
+  assert.equal(booking.lines[0].to, "2027-07-31");
+  assert.equal(booking.lines[0].amount, 200);
+  assert.equal(booking.lines[0].vatAmount, 18);
+  assert.equal(booking.totals.difference, 0);
+  assert.ok(
+    booking.reasoningLog.includes("Applied from previous user correction.")
+  );
+});
+
+test("preserves negative discount lines in a learned split", () => {
+  const learning = createInitialLearningStore();
+  const original = invoice();
+  original.purchaseJournal = generatePurchaseJournalBooking(
+    original,
+    [original],
+    learning,
+    exactMasterData
+  );
+  const seedLine = original.purchaseJournal.lines[0];
+  captureUserCorrections({
+    invoice: original,
+    nextExtractedData: original.extractedData,
+    nextBookingLines: [
+      correctedLine(seedLine, { amount: 110, vatAmount: 21 }),
+      correctedLine(seedLine, {
+        id: "discount-line",
+        description: "Discount",
+        amount: -10,
+        vatAmount: 0,
+      }),
+    ],
+    learning,
+    user: { id: "shared_user", name: "Shared INTO User" },
+  });
+
+  const future = invoice(
+    { id: "invoice-future", fileName: "AH-invoice-002.pdf" },
+    {
+      invoiceNumber: "INV-002",
+      referenceCode: "INV-002",
+      netAmount: 180,
+      vatAmount: 37.8,
+      grossAmount: 217.8,
+    }
+  );
+  const booking = generatePurchaseJournalBooking(
+    future,
+    [future],
+    learning,
+    exactMasterData
+  );
+
+  assert.equal(booking.lines.length, 2);
+  assert.ok(booking.lines.some((line) => line.amount < 0));
+  assert.equal(
+    booking.lines.reduce((sum, line) => sum + line.amount, 0),
+    180
+  );
+  assert.equal(
+    booking.lines.reduce((sum, line) => sum + line.vatAmount, 0),
+    37.8
+  );
+});
+
+test("keeps untouched low-confidence line fields review-required", () => {
+  const learning = createInitialLearningStore();
+  const original = invoice();
+  original.purchaseJournal = generatePurchaseJournalBooking(
+    original,
+    [original],
+    learning,
+    exactMasterData
+  );
+  const seedLine = {
+    ...original.purchaseJournal.lines[0],
+    vatConfidence: 0.4,
+  };
+  original.purchaseJournal.lines = [seedLine];
+  captureUserCorrections({
+    invoice: original,
+    nextExtractedData: original.extractedData,
+    nextBookingLines: [
+      correctedLine(seedLine, {
+        glAccount: "4420",
+        finalSelectedAccount: "4420",
+        glAccountName: "Software subscriptions",
+      }),
+    ],
+    learning,
+    user: { id: "shared_user", name: "Shared INTO User" },
+  });
+
+  const future = invoice(
+    { id: "invoice-future", fileName: "AH-invoice-002.pdf" },
+    { invoiceNumber: "INV-002", referenceCode: "INV-002" }
+  );
+  const booking = generatePurchaseJournalBooking(
+    future,
+    [future],
+    learning,
+    exactMasterData
+  );
+
+  assert.equal(booking.lines[0].finalSelectedAccount, "4420");
+  assert.equal(booking.lines[0].vatConfidence, 0.4);
+  assert.equal(booking.lines[0].reviewRequired, true);
 });

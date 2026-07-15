@@ -9,7 +9,7 @@ import type {
 } from "../domain/invoice";
 import { createId } from "../utils/id";
 import { detectInvoiceReference } from "./invoice-extraction-service";
-import { normalizeText } from "./invoice-validation";
+import { amountToMinorUnits, normalizeText } from "./invoice-validation";
 
 export const LEARNED_CORRECTION_NOTE =
   "Applied from previous user correction.";
@@ -42,6 +42,40 @@ const referenceLabels = [
   "n fattura",
   "riferimento",
 ];
+
+const learnedFieldLabels: Partial<
+  Record<LearnableCorrectionField, string[]>
+> = {
+  invoiceDate: [
+    "invoice date",
+    "factuurdatum",
+    "rechnungsdatum",
+    "date de facture",
+    "fecha de factura",
+    "data fattura",
+  ],
+  netAmount: [
+    "net amount",
+    "netto bedrag",
+    "subtotal",
+    "subtotaal",
+    "net amount excl vat",
+  ],
+  vatAmount: [
+    "vat amount",
+    "btw bedrag",
+    "tax amount",
+    "mwst betrag",
+    "montant tva",
+  ],
+  totalAmount: [
+    "total amount",
+    "invoice total",
+    "factuurtotaal",
+    "totaal te betalen",
+    "amount due",
+  ],
+};
 
 type CorrectionUser = Pick<IntoUser, "id" | "name">;
 
@@ -128,6 +162,25 @@ function referenceLabel(data: ExtractedInvoiceData, correctedValue: string) {
   return referenceLabels.find((label) => normalizedLine.includes(label));
 }
 
+function containsLearnedLabel(line: string, label: string) {
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^a-z0-9])${escaped}(?=$|[^a-z0-9])`).test(
+    normalizeText(line)
+  );
+}
+
+function learnedFieldLabel(
+  data: ExtractedInvoiceData,
+  field: LearnableCorrectionField
+) {
+  const labels = learnedFieldLabels[field] ?? [];
+  const normalizedLines = (data.rawText ?? "")
+    .split(/\r?\n/);
+  return labels.find((label) =>
+    normalizedLines.some((line) => containsLearnedLabel(line, label))
+  );
+}
+
 function correctionKey(correction: Pick<LearnedCorrection, "field" | "supplierIdentity" | "matchKey" | "metadata">) {
   return [
     correction.field,
@@ -177,8 +230,83 @@ function lineComparable(line: PurchaseJournalLine) {
   };
 }
 
+function learnedSplitLine(
+  line: PurchaseJournalLine,
+  previousLine: PurchaseJournalLine | undefined
+) {
+  if (!previousLine) {
+    return {
+      ...line,
+      glConfidence: 1,
+      vatConfidence: 1,
+      costCentreConfidence: 1,
+      costUnitConfidence: 1,
+    };
+  }
+
+  const previousGl =
+    previousLine.finalSelectedAccount || previousLine.glAccount;
+  const nextGl = line.finalSelectedAccount || line.glAccount;
+  return {
+    ...line,
+    glConfidence:
+      previousGl === nextGl ? previousLine.glConfidence : 1,
+    vatConfidence:
+      previousLine.vatCode === line.vatCode ? previousLine.vatConfidence : 1,
+    costCentreConfidence:
+      previousLine.costCentre === line.costCentre
+        ? previousLine.costCentreConfidence
+        : 1,
+    costUnitConfidence:
+      previousLine.costUnit === line.costUnit
+        ? previousLine.costUnitConfidence
+        : 1,
+  };
+}
+
 function lineValuesEqual(left: PurchaseJournalLine[], right: PurchaseJournalLine[]) {
   return JSON.stringify(left.map(lineComparable)) === JSON.stringify(right.map(lineComparable));
+}
+
+function correctionConfidenceBefore(
+  input: CaptureInput,
+  field: LearnableCorrectionField,
+  metadata?: Record<string, unknown>
+) {
+  const lineIndex =
+    typeof metadata?.lineIndex === "number" ? metadata.lineIndex : undefined;
+  const line =
+    lineIndex === undefined
+      ? undefined
+      : (input.invoice.bookingLineOverrides ??
+          input.invoice.purchaseJournal?.lines ??
+          [])[lineIndex];
+  const scores = input.invoice.purchaseJournal?.confidenceScores;
+
+  switch (field) {
+    case "supplier":
+      return scores?.supplierMatch ?? input.invoice.extractedData.confidence ?? 0;
+    case "yourRefPattern":
+      return (
+        input.invoice.extractedData.referenceCodeConfidence ??
+        input.invoice.extractedData.confidence ??
+        0
+      );
+    case "paymentCondition":
+      return scores?.paymentCondition ?? input.invoice.extractedData.confidence ?? 0;
+    case "glAccount":
+      return line?.glConfidence ?? scores?.glAccount ?? 0;
+    case "vatCode":
+      return line?.vatConfidence ?? scores?.vatCode ?? 0;
+    case "costCentre":
+      return line?.costCentreConfidence ?? scores?.costCentre ?? 0;
+    case "costUnit":
+      return line?.costUnitConfidence ?? scores?.costUnit ?? 0;
+    case "bookingLineSplit":
+      return scores?.overall ?? input.invoice.extractedData.confidence ?? 0;
+    default:
+      return input.invoice.extractedData.confidence ?? 0;
+  }
 }
 
 function record(
@@ -196,22 +324,48 @@ function record(
   const decidedAt = input.correctedAt ?? new Date().toISOString();
   const supplierAccountId =
     input.invoice.purchaseJournal?.supplierResolution.selectedAccountId;
+  const priorRule = matchingCorrections(
+    input.invoice,
+    originalData,
+    input.learning,
+    field
+  ).find((item) => {
+    const sameLine =
+      String(item.metadata?.lineIndex ?? "invoice") ===
+      String(metadata?.lineIndex ?? "invoice");
+    const sameKind =
+      field !== "supplier" ||
+      item.metadata?.correctionKind === metadata?.correctionKind;
+    return sameLine && sameKind;
+  });
+  const resolvedMetadata = { ...(priorRule?.metadata ?? {}) };
+  for (const [key, value] of Object.entries(metadata ?? {})) {
+    if (value !== undefined) {
+      resolvedMetadata[key] = value;
+    }
+  }
 
   return upsertCorrection(input.learning, {
+    invoiceId: input.invoice.id,
     field,
-    supplierIdentity: primarySupplierIdentity(originalData),
+    supplierIdentity:
+      priorRule?.supplierIdentity ?? primarySupplierIdentity(originalData),
     supplierName: input.nextExtractedData.supplierName || originalData.supplierName,
-    supplierAccountId,
-    matchKey: invoiceMatchKey(originalData),
-    originalValue,
+    supplierAccountId: supplierAccountId ?? priorRule?.supplierAccountId,
+    matchKey: priorRule?.matchKey ?? invoiceMatchKey(originalData),
+    originalValue: priorRule?.originalValue ?? originalValue,
     correctedValue,
     invoiceTextContext: contextAround(originalData, [correctedValue, originalValue]),
-    filenamePattern: learnedFilenamePattern(input.invoice.fileName),
+    filenamePattern:
+      priorRule?.filenamePattern ?? learnedFilenamePattern(input.invoice.fileName),
     confidence: supplierAccountId ? 0.99 : 0.95,
+    confidenceBefore: correctionConfidenceBefore(input, field, metadata),
+    confidenceAfter: 1,
     correctedAt: decidedAt,
     correctedByUserId: input.user.id,
     correctedByUserName: input.user.name,
-    metadata,
+    metadata:
+      Object.keys(resolvedMetadata).length > 0 ? resolvedMetadata : undefined,
   });
 }
 
@@ -259,6 +413,26 @@ export function captureUserCorrections(input: CaptureInput) {
       nextData.paymentTerms
     )
   );
+  add(
+    record(input, "invoiceDate", previousData.invoiceDate, nextData.invoiceDate, {
+      sourceLabel: learnedFieldLabel(previousData, "invoiceDate"),
+    })
+  );
+  add(
+    record(input, "netAmount", previousData.netAmount, nextData.netAmount, {
+      sourceLabel: learnedFieldLabel(previousData, "netAmount"),
+    })
+  );
+  add(
+    record(input, "vatAmount", previousData.vatAmount, nextData.vatAmount, {
+      sourceLabel: learnedFieldLabel(previousData, "vatAmount"),
+    })
+  );
+  add(
+    record(input, "totalAmount", previousData.grossAmount, nextData.grossAmount, {
+      sourceLabel: learnedFieldLabel(previousData, "totalAmount"),
+    })
+  );
 
   const previousLines =
     input.invoice.bookingLineOverrides ?? input.invoice.purchaseJournal?.lines ?? [];
@@ -305,15 +479,8 @@ export function captureUserCorrections(input: CaptureInput) {
         metadata
       )
     );
-    add(
-      record(
-        input,
-        "accrualPeriod",
-        { from: previousLine.from, to: previousLine.to },
-        { from: nextLine.from, to: nextLine.to },
-        metadata
-      )
-    );
+    add(record(input, "accrualFrom", previousLine.from, nextLine.from, metadata));
+    add(record(input, "accrualTo", previousLine.to, nextLine.to, metadata));
 
     if (supplierAccountId && previousGl !== nextGl) {
       upsertDecision(
@@ -387,8 +554,13 @@ export function captureUserCorrections(input: CaptureInput) {
         input,
         "bookingLineSplit",
         previousLines.map(lineComparable),
-        input.nextBookingLines.map((line) => ({ ...line })),
-        { lineCount: input.nextBookingLines.length }
+        input.nextBookingLines.map((line, index) =>
+          learnedSplitLine(line, previousLines[index])
+        ),
+        {
+          lineCount: input.nextBookingLines.length,
+          invoiceDate: nextData.invoiceDate || previousData.invoiceDate,
+        }
       )
     );
   }
@@ -405,6 +577,7 @@ export function captureSupplierAccountCorrection(input: {
   correctedAt?: string;
 }) {
   return upsertCorrection(input.learning, {
+    invoiceId: input.invoice.id,
     field: "supplier",
     supplierIdentity: primarySupplierIdentity(input.invoice.extractedData),
     supplierName: input.invoice.extractedData.supplierName,
@@ -420,6 +593,11 @@ export function captureSupplierAccountCorrection(input: {
     ]),
     filenamePattern: learnedFilenamePattern(input.invoice.fileName),
     confidence: 1,
+    confidenceBefore:
+      input.invoice.purchaseJournal?.confidenceScores.supplierMatch ??
+      input.invoice.extractedData.confidence ??
+      0,
+    confidenceAfter: 1,
     correctedAt: input.correctedAt ?? new Date().toISOString(),
     correctedByUserId: input.user.id,
     correctedByUserName: input.user.name,
@@ -457,7 +635,12 @@ function matchingCorrections(
   return corrections(learning).filter((item) => {
     const supplierConfidence = supplierMatchConfidence(item, data);
     const contextualMatch =
-      item.matchKey === matchKey || item.filenamePattern === filePattern;
+      Boolean(item.matchKey && matchKey && item.matchKey === matchKey) ||
+      Boolean(
+        item.filenamePattern &&
+          filePattern &&
+          item.filenamePattern === filePattern
+      );
     return (
       item.field === field &&
       item.confidence >= highConfidenceThreshold &&
@@ -472,6 +655,91 @@ function referenceFromLearnedLabel(rawText: string, label: string) {
     .split(/\r?\n/)
     .find((item) => normalizeText(item).includes(label));
   return line ? detectInvoiceReference(line)?.value ?? "" : "";
+}
+
+function lineFromLearnedLabel(rawText: string, label: string) {
+  return rawText
+    .split(/\r?\n/)
+    .find((line) => containsLearnedLabel(line, label));
+}
+
+function validIsoDate(year: number, month: number, day: number) {
+  const value = `${String(year).padStart(4, "0")}-${String(month).padStart(
+    2,
+    "0"
+  )}-${String(day).padStart(2, "0")}`;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) &&
+    parsed.toISOString().slice(0, 10) === value
+    ? value
+    : "";
+}
+
+function dateFromLearnedLabel(rawText: string, label: string) {
+  const line = lineFromLearnedLabel(rawText, label);
+  if (!line) {
+    return "";
+  }
+
+  const yearFirst = line.match(/\b(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\b/);
+  if (yearFirst) {
+    return validIsoDate(
+      Number(yearFirst[1]),
+      Number(yearFirst[2]),
+      Number(yearFirst[3])
+    );
+  }
+
+  const dayFirst = line.match(/\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})\b/);
+  return dayFirst
+    ? validIsoDate(
+        Number(dayFirst[3]),
+        Number(dayFirst[2]),
+        Number(dayFirst[1])
+      )
+    : "";
+}
+
+function amountFromLearnedLabel(rawText: string, label: string) {
+  const line = lineFromLearnedLabel(rawText, label);
+  if (!line) {
+    return null;
+  }
+
+  const labelIndex = line.toLowerCase().indexOf(label.toLowerCase());
+  const amountText =
+    labelIndex >= 0 ? line.slice(labelIndex + label.length) : line;
+  const candidates = [
+    ...amountText.matchAll(
+      /-?(?:\d{1,3}(?:[.\s,']\d{3})+|\d+)(?:[.,]\d{1,2})?/g
+    ),
+  ].filter(
+    (match) =>
+      amountText
+        .slice((match.index ?? 0) + match[0].length)
+        .trimStart()[0] !== "%"
+  );
+
+  for (const candidate of candidates) {
+    const minorUnits = amountToMinorUnits(candidate[0]);
+    if (minorUnits !== null) {
+      return minorUnits / 100;
+    }
+  }
+  return null;
+}
+
+function learnedOcrCorrection(
+  invoice: UploadedInvoice,
+  data: ExtractedInvoiceData,
+  learning: BookingLearningStore,
+  field: "invoiceDate" | "netAmount" | "vatAmount" | "totalAmount"
+) {
+  const correction = matchingCorrections(invoice, data, learning, field)[0];
+  const label = String(correction?.metadata?.sourceLabel ?? "");
+  return correction && label && data.rawText
+    ? { label, rawText: data.rawText }
+    : null;
 }
 
 export function applyLearnedExtractedData(
@@ -535,7 +803,107 @@ export function applyLearnedExtractedData(
     apply("paymentCondition");
   }
 
+  const learnedDate = learnedOcrCorrection(
+    invoice,
+    extractedData,
+    learning,
+    "invoiceDate"
+  );
+  const invoiceDate = learnedDate
+    ? dateFromLearnedLabel(learnedDate.rawText, learnedDate.label)
+    : "";
+  if (invoiceDate) {
+    data.invoiceDate = invoiceDate;
+    apply("invoiceDate");
+  }
+
+  const amountFields = [
+    ["netAmount", "netAmount"],
+    ["vatAmount", "vatAmount"],
+    ["totalAmount", "grossAmount"],
+  ] as const;
+  for (const [correctionField, dataField] of amountFields) {
+    const learnedAmount = learnedOcrCorrection(
+      invoice,
+      extractedData,
+      learning,
+      correctionField
+    );
+    const amount = learnedAmount
+      ? amountFromLearnedLabel(learnedAmount.rawText, learnedAmount.label)
+      : null;
+    if (amount !== null) {
+      data[dataField] = amount;
+      apply(correctionField);
+    }
+  }
+
   return { data, appliedFields };
+}
+
+function allocateAmount(total: number, weights: number[]) {
+  const target = amountToMinorUnits(total) ?? 0;
+  const signedWeights = weights.map(
+    (weight) => amountToMinorUnits(weight) ?? 0
+  );
+  const totalWeight = signedWeights.reduce((sum, weight) => sum + weight, 0);
+  if (!totalWeight) {
+    return target === 0
+      ? signedWeights.map((weight) => weight / 100)
+      : null;
+  }
+
+  const raw = signedWeights.map((weight) => (target * weight) / totalWeight);
+  const allocated = raw.map(Math.trunc);
+  let remainder = target - allocated.reduce((sum, value) => sum + value, 0);
+  const byFraction = raw
+    .map((value, index) => ({ index, fraction: value - allocated[index] }))
+    .sort((left, right) =>
+      remainder > 0
+        ? right.fraction - left.fraction
+        : left.fraction - right.fraction
+    );
+
+  for (let index = 0; remainder !== 0; index += 1) {
+    const adjustment = remainder > 0 ? 1 : -1;
+    allocated[byFraction[index % byFraction.length].index] += adjustment;
+    remainder -= adjustment;
+  }
+  return allocated.map((value) => value / 100);
+}
+
+function daysInMonth(year: number, month: number) {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+function shiftDateByInvoiceMonth(
+  value: string,
+  sourceInvoiceDate: string,
+  targetInvoiceDate: string
+) {
+  const valueMatch = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const sourceMatch = sourceInvoiceDate.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const targetMatch = targetInvoiceDate.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!valueMatch || !sourceMatch || !targetMatch) {
+    return value;
+  }
+
+  const monthDelta =
+    (Number(targetMatch[1]) - Number(sourceMatch[1])) * 12 +
+    Number(targetMatch[2]) -
+    Number(sourceMatch[2]);
+  const sourceYear = Number(valueMatch[1]);
+  const sourceMonth = Number(valueMatch[2]);
+  const sourceDay = Number(valueMatch[3]);
+  const shiftedMonthIndex = sourceYear * 12 + sourceMonth - 1 + monthDelta;
+  const shiftedYear = Math.floor(shiftedMonthIndex / 12);
+  const shiftedMonth = (shiftedMonthIndex % 12) + 1;
+  const sourceWasMonthEnd =
+    sourceDay === daysInMonth(sourceYear, sourceMonth);
+  const shiftedDay = sourceWasMonthEnd
+    ? daysInMonth(shiftedYear, shiftedMonth)
+    : Math.min(sourceDay, daysInMonth(shiftedYear, shiftedMonth));
+  return validIsoDate(shiftedYear, shiftedMonth, shiftedDay) || value;
 }
 
 export function learnedBookingLinesForInvoice(
@@ -564,13 +932,46 @@ export function learnedBookingLinesForInvoice(
     reasoning: [...(line.reasoning ?? [])],
     vatReasoning: [...(line.vatReasoning ?? [])],
   }));
+  const sourceInvoiceDate = String(match.metadata?.invoiceDate ?? "");
+  const targetInvoiceDate = invoice.extractedData.invoiceDate;
+  for (const line of lines) {
+    line.from = line.from
+      ? shiftDateByInvoiceMonth(line.from, sourceInvoiceDate, targetInvoiceDate)
+      : "";
+    line.to = line.to
+      ? shiftDateByInvoiceMonth(line.to, sourceInvoiceDate, targetInvoiceDate)
+      : "";
+  }
+
+  const targetNetAmount = invoice.extractedData.netAmount;
+  const targetVatAmount = invoice.extractedData.vatAmount;
+  if (targetNetAmount !== null && targetVatAmount !== null && lines.length) {
+    const amountWeights = lines.map((line) => line.amount);
+    const vatWeights = lines.some((line) => line.vatAmount)
+      ? lines.map((line) => line.vatAmount)
+      : amountWeights;
+    const amounts = allocateAmount(targetNetAmount, amountWeights);
+    const vatAmounts = allocateAmount(targetVatAmount, vatWeights);
+    if (!amounts || !vatAmounts) {
+      return null;
+    }
+    lines.forEach((line, index) => {
+      line.amount = amounts[index];
+      line.vatAmount = vatAmounts[index];
+    });
+  }
+
   const learnedTotal = lines.reduce(
     (sum, line) => sum + line.amount + line.vatAmount,
     0
   );
   const targetTotal = invoice.extractedData.grossAmount ?? learnedTotal;
 
-  if (learnedTotal && Math.abs(targetTotal - learnedTotal) > 0.005) {
+  if (
+    (targetNetAmount === null || targetVatAmount === null) &&
+    learnedTotal &&
+    Math.abs(targetTotal - learnedTotal) > 0.005
+  ) {
     const ratio = targetTotal / learnedTotal;
     for (const line of lines) {
       line.amount = Math.round(line.amount * ratio * 100) / 100;

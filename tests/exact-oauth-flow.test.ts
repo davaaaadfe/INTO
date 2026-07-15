@@ -143,11 +143,34 @@ test("uses Vercel Exact credentials for OAuth, encrypted tokens, refresh, and ma
         if (/\/PurchaseEntryLines$/i.test(url.pathname)) {
           return exactResponse([
             {
-              ID: "history-id",
+              ID: "history-line-id",
+              EntryID: "history-entry-id",
               Supplier: "supplier-id",
               GLAccount: "4420",
               YourRef: "INV-001",
-              Amount: 121,
+              Description: "Managed security subscription",
+              AmountFC: 100,
+              VATAmountFC: 21,
+              VATPercentage: 21,
+              VATCode: "4",
+              CostCenter: "FIN",
+              CostUnit: "EU",
+              From: "2025-01-01",
+              To: "2025-12-31",
+            },
+          ]);
+        }
+        if (/\/PurchaseEntries$/i.test(url.pathname)) {
+          return exactResponse([
+            {
+              EntryID: "history-entry-id",
+              Supplier: "supplier-id",
+              YourRef: "INV-001",
+              Description: "Managed security subscription",
+              AmountFC: 121,
+              Currency: "EUR",
+              PaymentCondition: "30",
+              EntryDate: "2025-01-15T00:00:00",
             },
           ]);
         }
@@ -212,6 +235,30 @@ test("uses Vercel Exact credentials for OAuth, encrypted tokens, refresh, and ma
         assert.equal(masterData.vatCodes.length, 1);
         assert.equal(masterData.costCenters.length, 1);
         assert.equal(masterData.costUnits.length, 1);
+        assert.equal(masterData.historicalPurchaseBookings.length, 1);
+        assert.deepEqual(masterData.historicalPurchaseBookings[0], {
+          id: "history-line-id",
+          entryId: "history-entry-id",
+          lineId: "history-line-id",
+          supplierAccountId: "supplier-id",
+          yourRef: "INV-001",
+          invoiceNumber: "INV-001",
+          invoiceDate: "2025-01-15",
+          description: "Managed security subscription",
+          totalAmount: 121,
+          lineAmount: 100,
+          vatAmount: 21,
+          vatPercentage: 21,
+          currency: "EUR",
+          paymentConditionCode: "30",
+          descriptionKey: "managed-security-subscription",
+          glAccount: "4420",
+          vatCode: "4",
+          costCentre: "FIN",
+          costUnit: "EU",
+          accrualFrom: "2025-01-01",
+          accrualTo: "2025-12-31",
+        });
         assert.ok(
           exactApiRequests.includes(
             "/api/v1/123456/cashflow/PaymentConditions"

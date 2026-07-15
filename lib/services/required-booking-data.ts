@@ -1,8 +1,16 @@
-import type {
-  ExtractedInvoiceData,
-  PurchaseJournalBooking,
-  ValidationError,
+import {
+  isIntoPurchaseVatCode,
+  type ExactMasterDataCache,
+  type PurchaseJournalLine,
+  type ExtractedInvoiceData,
+  type PurchaseJournalBooking,
+  type ValidationError,
 } from "../domain/invoice";
+import {
+  BOOKING_TOTAL_MISMATCH_MESSAGE,
+  DUPLICATE_INVOICE_REFERENCE_MESSAGE,
+  calculateBookingTotals,
+} from "./invoice-validation";
 
 export const REQUIRED_BOOKING_DISABLED_REASON =
   "Complete all required fields before booking to Exact Online.";
@@ -59,13 +67,17 @@ const requiredLabels: Array<{
     field: "accrualFrom",
     label: "Accrual From",
     isFilled: (_data, booking) =>
-      !bookingRequiresAccrual(booking) || hasText(firstBookingLine(booking)?.from),
+      (booking?.lines ?? []).every(
+        (line) => !bookingLineRequiresAccrual(line) || hasText(line.from)
+      ),
   },
   {
     field: "accrualTo",
     label: "Accrual To",
     isFilled: (_data, booking) =>
-      !bookingRequiresAccrual(booking) || hasText(firstBookingLine(booking)?.to),
+      (booking?.lines ?? []).every(
+        (line) => !bookingLineRequiresAccrual(line) || hasText(line.to)
+      ),
   },
   {
     field: "vatCode",
@@ -96,7 +108,13 @@ function firstBookingLine(booking: PurchaseJournalBooking | null | undefined) {
 export function bookingRequiresAccrual(
   booking: PurchaseJournalBooking | null | undefined
 ) {
-  return hasText(firstBookingLine(booking)?.accrualReason);
+  return (booking?.lines ?? []).some(bookingLineRequiresAccrual);
+}
+
+export function bookingLineRequiresAccrual(
+  line: PurchaseJournalLine | null | undefined
+) {
+  return hasText(line?.accrualReason) || hasText(line?.from) || hasText(line?.to);
 }
 
 function hasText(value: string | undefined | null) {
@@ -105,6 +123,177 @@ function hasText(value: string | undefined | null) {
 
 function hasNumber(value: number | null | undefined) {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+export type BookingLineDataIssue = {
+  lineIndex?: number;
+  field?:
+    | "glAccount"
+    | "description"
+    | "from"
+    | "to"
+    | "vatCode"
+    | "amount"
+    | "vatAmount";
+  message: string;
+};
+
+export function getBookingLineDataIssues(
+  lines: PurchaseJournalLine[]
+): BookingLineDataIssue[] {
+  if (!lines.length) {
+    return [{ message: "At least one booking line is required." }];
+  }
+
+  return lines.flatMap((line, lineIndex) => {
+    const number = lineIndex + 1;
+    const issues: BookingLineDataIssue[] = [];
+    const add = (field: BookingLineDataIssue["field"], message: string) =>
+      issues.push({ lineIndex, field, message: `Line ${number}: ${message}` });
+
+    if (!hasText(line.finalSelectedAccount) && !hasText(line.glAccount)) {
+      add("glAccount", "G/L Account is required.");
+    }
+    if (!hasText(line.description)) {
+      add("description", "Description is required.");
+    }
+    if (bookingLineRequiresAccrual(line) && !hasText(line.from)) {
+      add("from", "Accrual From is required.");
+    }
+    if (bookingLineRequiresAccrual(line) && !hasText(line.to)) {
+      add("to", "Accrual To is required.");
+    }
+    if (!hasText(line.vatCode)) {
+      add("vatCode", "VAT code is required.");
+    } else if (!isIntoPurchaseVatCode(line.vatCode)) {
+      add(
+        "vatCode",
+        `Unsupported VAT code ${line.vatCode}. Only codes 4, 5, 6, 7, and 8 are allowed.`
+      );
+    }
+    if (!hasNumber(line.amount)) {
+      add("amount", "Net amount is required.");
+    }
+    if (!hasNumber(line.vatAmount)) {
+      add("vatAmount", "VAT amount is required.");
+    }
+
+    return issues;
+  });
+}
+
+export type BookingBlocker = {
+  field: ValidationError["field"];
+  message: string;
+};
+
+function bookingLineValidationField(
+  field: BookingLineDataIssue["field"]
+): ValidationError["field"] {
+  if (field === "glAccount") return "glAccount";
+  if (field === "from") return "accrualFrom";
+  if (field === "to") return "accrualTo";
+  if (field === "vatCode") return "vatCode";
+  return "purchaseJournal";
+}
+
+export function getBookingBlockers(
+  data: ExtractedInvoiceData,
+  booking: PurchaseJournalBooking | null | undefined,
+  exactMasterData: ExactMasterDataCache | null = null
+): BookingBlocker[] {
+  const blockers: BookingBlocker[] = getRequiredBookingDataIssues(
+    data,
+    booking
+  ).map(({ field, message }) => ({ field, message }));
+
+  if (!booking) {
+    blockers.push({
+      field: "purchaseJournal",
+      message: "Purchase Journal booking data is missing.",
+    });
+    return blockers;
+  }
+
+  const bookingLineBlockers = getBookingLineDataIssues(booking.lines).map(
+    (issue) => ({
+      field: bookingLineValidationField(issue.field),
+      message: issue.message,
+    })
+  );
+  blockers.unshift(...bookingLineBlockers);
+
+  const supplierResolution = booking.supplierResolution;
+  if (supplierResolution.reviewRequired) {
+    blockers.push({
+      field: "supplier",
+      message:
+        supplierResolution.candidates.length > 1
+          ? "Multiple Exact suppliers match this invoice. Please choose the correct supplier."
+          : "Supplier could not be matched to Exact Online master data. Please select the supplier manually.",
+    });
+  } else if (
+    !supplierResolution.selectedAccountId ||
+    (exactMasterData &&
+      !exactMasterData.suppliers.some(
+        (supplier) => supplier.id === supplierResolution.selectedAccountId
+      ))
+  ) {
+    blockers.push({
+      field: "supplier",
+      message: "Supplier must be matched to Exact Online master data before booking.",
+    });
+  }
+
+  if (!hasText(booking.yourRef)) {
+    blockers.push({
+      field: "yourRef",
+      message: "Your ref. is required before booking to Exact Online.",
+    });
+  } else if (!booking.yourRefUnique) {
+    blockers.push({
+      field: "yourRef",
+      message: DUPLICATE_INVOICE_REFERENCE_MESSAGE,
+    });
+  }
+
+  if (!hasText(booking.paymentConditionCode)) {
+    blockers.push({
+      field: "paymentCondition",
+      message: "Payment condition is required before booking to Exact Online.",
+    });
+  } else if (
+    exactMasterData &&
+    !exactMasterData.paymentConditions.some(
+      (condition) =>
+        condition.code === booking.paymentConditionCode && condition.isActive
+    )
+  ) {
+    blockers.push({
+      field: "paymentCondition",
+      message: `Payment condition ${booking.paymentConditionCode} is not available in Exact master data.`,
+    });
+  }
+
+  if (
+    typeof data.grossAmount === "number" &&
+    Number.isFinite(data.grossAmount) &&
+    calculateBookingTotals(booking.lines, data.grossAmount).difference !== 0
+  ) {
+    blockers.push({
+      field: "grossAmount",
+      message: BOOKING_TOTAL_MISMATCH_MESSAGE,
+    });
+  }
+
+  return blockers.filter(
+    (blocker, index, all) =>
+      all.findIndex(
+        (candidate) =>
+          candidate.field === blocker.field &&
+          candidate.message === blocker.message
+      ) === index
+  );
 }
 
 export function getRequiredBookingDataIssues(

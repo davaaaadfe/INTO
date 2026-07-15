@@ -52,6 +52,12 @@ import {
   loadStoreSnapshot,
   saveStoreSnapshot,
 } from "./postgres-store";
+import {
+  databaseMode,
+  loadSqliteStoreSnapshot,
+  saveSqliteStoreSnapshot,
+  sqliteDatabasePath,
+} from "./sqlite-store";
 
 const verifiedUserPermissions: PermissionAction[] = [
   "view",
@@ -290,9 +296,10 @@ function createInitialStore(): IntoStore {
 
 const globalStore = globalThis as typeof globalThis & {
   __INTO_STORE?: IntoStore;
-  __INTO_STORE_HYDRATED?: boolean;
+  __INTO_STORE_HYDRATED_FOR?: string;
   __INTO_STORE_HYDRATING?: Promise<void>;
   __INTO_STORE_PERSISTING?: Promise<void>;
+  __INTO_STORE_PERSISTENCE_ERROR?: unknown;
 };
 
 export function getStore() {
@@ -327,23 +334,52 @@ export function getStore() {
   return globalStore.__INTO_STORE;
 }
 
-export async function hydrateStoreFromPostgres() {
-  if (!isPostgresPersistenceEnabled() || globalStore.__INTO_STORE_HYDRATED) {
+function persistenceIdentity() {
+  const mode = databaseMode();
+  return mode === "sqlite" ? `${mode}:${sqliteDatabasePath()}` : mode;
+}
+
+async function loadConfiguredStoreSnapshot() {
+  if (databaseMode() === "sqlite") {
+    return loadSqliteStoreSnapshot();
+  }
+
+  if (isPostgresPersistenceEnabled()) {
+    return loadStoreSnapshot();
+  }
+
+  return null;
+}
+
+async function saveConfiguredStoreSnapshot(store: IntoStore) {
+  if (databaseMode() === "sqlite") {
+    await saveSqliteStoreSnapshot(store);
+    return;
+  }
+
+  if (isPostgresPersistenceEnabled()) {
+    await saveStoreSnapshot(store);
+  }
+}
+
+export async function hydrateStoreFromPersistence() {
+  const identity = persistenceIdentity();
+  if (databaseMode() === "memory" || globalStore.__INTO_STORE_HYDRATED_FOR === identity) {
     return;
   }
 
   if (!globalStore.__INTO_STORE_HYDRATING) {
-    globalStore.__INTO_STORE_HYDRATING = loadStoreSnapshot()
+    globalStore.__INTO_STORE_HYDRATING = loadConfiguredStoreSnapshot()
       .then((snapshot) => {
         if (snapshot) {
           globalStore.__INTO_STORE = snapshot;
         } else {
           globalStore.__INTO_STORE = createInitialStore();
-          globalStore.__INTO_STORE_PERSISTING = saveStoreSnapshot(
+          globalStore.__INTO_STORE_PERSISTING = saveConfiguredStoreSnapshot(
             globalStore.__INTO_STORE
           );
         }
-        globalStore.__INTO_STORE_HYDRATED = true;
+        globalStore.__INTO_STORE_HYDRATED_FOR = identity;
       })
       .finally(() => {
         globalStore.__INTO_STORE_HYDRATING = undefined;
@@ -354,17 +390,25 @@ export async function hydrateStoreFromPostgres() {
 }
 
 export function persistStoreSoon() {
-  if (!isPostgresPersistenceEnabled()) {
+  if (databaseMode() === "memory") {
     return;
   }
 
-  globalStore.__INTO_STORE_PERSISTING = saveStoreSnapshot(getStore()).catch(() => {
-    // Persistence failures surface in setup status and API retries; never leak secrets.
-  });
+  const previous = globalStore.__INTO_STORE_PERSISTING ?? Promise.resolve();
+  globalStore.__INTO_STORE_PERSISTING = previous
+    .then(() => saveConfiguredStoreSnapshot(getStore()))
+    .catch((error: unknown) => {
+      globalStore.__INTO_STORE_PERSISTENCE_ERROR ??= error;
+    });
 }
 
-export async function flushStoreToPostgres() {
+export async function flushStoreToPersistence() {
   await globalStore.__INTO_STORE_PERSISTING;
+  if (globalStore.__INTO_STORE_PERSISTENCE_ERROR) {
+    const error = globalStore.__INTO_STORE_PERSISTENCE_ERROR;
+    globalStore.__INTO_STORE_PERSISTENCE_ERROR = undefined;
+    throw error;
+  }
 }
 
 export function listUsers() {

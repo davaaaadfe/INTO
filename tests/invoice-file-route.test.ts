@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { rm } from "node:fs/promises";
+import { readdir, rm } from "node:fs/promises";
 import {
   GET as getInvoiceFile,
   HEAD as headInvoiceFile,
@@ -191,6 +191,35 @@ test("a newly uploaded invoice can be previewed and downloaded", async () => {
     } else {
       environment["NODE_ENV"] = previousNodeEnv;
     }
+    await rm(uploadStoragePath, { recursive: true, force: true });
+  }
+});
+
+test("an unsupported upload is rejected before any local file is written", async () => {
+  const environment = process.env as Record<string, string | undefined>;
+  const previousPath = process.env.TEMP_INVOICE_STORAGE_PATH;
+  const previousNodeEnv = process.env.NODE_ENV;
+  const uploadStoragePath = `${storagePath}-unsupported`;
+  environment["NODE_ENV"] = "test";
+  process.env.TEMP_INVOICE_STORAGE_PATH = uploadStoragePath;
+
+  try {
+    const formData = new FormData();
+    formData.append("files", new File(["not an invoice"], "notes.txt"));
+    const response = await uploadInvoices(
+      new Request("http://localhost/api/invoices", { method: "POST", body: formData })
+    );
+    const payload = await response.json();
+
+    assert.equal(response.status, 201);
+    assert.equal(payload.processed.length, 0);
+    assert.equal(payload.rejected[0]?.fileName, "notes.txt");
+    await assert.rejects(readdir(uploadStoragePath), /ENOENT/);
+  } finally {
+    if (previousPath === undefined) delete process.env.TEMP_INVOICE_STORAGE_PATH;
+    else process.env.TEMP_INVOICE_STORAGE_PATH = previousPath;
+    if (previousNodeEnv === undefined) delete environment["NODE_ENV"];
+    else environment["NODE_ENV"] = previousNodeEnv;
     await rm(uploadStoragePath, { recursive: true, force: true });
   }
 });

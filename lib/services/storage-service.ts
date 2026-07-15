@@ -55,6 +55,14 @@ function envValue(key: string) {
 }
 
 export function invoiceStorageProvider(): StorageProvider {
+  const configured = envValue("STORAGE_MODE").toLowerCase();
+  if (configured === "local" || configured === "local_temp") {
+    return "local_temp";
+  }
+  if (configured === "postgres" || configured === "postgres_temp") {
+    return "postgres_temp";
+  }
+
   return isPostgresPersistenceEnabled() ? "postgres_temp" : "local_temp";
 }
 
@@ -71,7 +79,7 @@ function temporaryInvoiceStorageRoot() {
 export function temporaryInvoiceStoragePath() {
   const configuredPath = envValue("TEMP_INVOICE_STORAGE_PATH");
   if (!configuredPath) {
-    return path.join(temporaryInvoiceStorageRoot(), "storage", "tmp-invoices");
+    return path.join(temporaryInvoiceStorageRoot(), "storage", "invoices");
   }
 
   return path.isAbsolute(configuredPath)

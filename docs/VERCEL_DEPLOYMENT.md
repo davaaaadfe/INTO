@@ -24,8 +24,9 @@ EXACT_ONLINE_REDIRECT_URI=https://your-vercel-domain.vercel.app/api/exact/callba
 OAUTH_TOKEN_ENCRYPTION_KEY=
 OAUTH_STATE_SECRET=
 
-STORAGE_MODE=local_temp
-TEMP_INVOICE_STORAGE_PATH=storage/tmp-invoices
+DATABASE_MODE=postgres
+DATABASE_URL=your_managed_postgresql_connection_string
+STORAGE_MODE=postgres
 TEMP_INVOICE_RETENTION_DAYS=30
 ```
 
@@ -34,9 +35,9 @@ TEMP_INVOICE_RETENTION_DAYS=30
 URL automatically. Setting it explicitly is still recommended when using a
 custom domain.
 
-`DATABASE_URL` is recommended for durable INTO metadata and audit history.
-Invoice files are stored only temporarily while they are processed, reviewed,
-and attached to Exact Online.
+`DATABASE_URL` is required on Vercel because serverless process memory and its
+local filesystem are not durable. The PostgreSQL adapter stores metadata and
+temporary invoice bytes until they are attached to Exact Online.
 
 ## 3. Callback URLs
 
@@ -52,10 +53,10 @@ Vercel preview or generated domain:
 https://your-project.vercel.app/api/exact/callback
 ```
 
-Local development:
+Local server through a public HTTPS endpoint:
 
 ```text
-http://localhost:3000/api/exact/callback
+https://your-public-local-url/api/exact/callback
 ```
 
 Optional ngrok:
@@ -85,11 +86,8 @@ tokens, encryption keys, or passwords.
 
 ## 5. Production Storage Notes
 
-INTO defaults to temporary local invoice file storage. Uploaded files are kept
-only while an invoice is being processed, previewed, reviewed, or retried. After
-a successful Exact Online booking with an Exact reference, INTO deletes the
-local file and keeps the invoice metadata and audit history.
-
-Temporary local storage on Vercel may not survive redeploys, so invoices should
-be processed and booked promptly. Failed or unbooked invoices keep their local
-files as long as the Vercel instance keeps them available.
+INTO defaults to SQLite plus local invoice storage when it runs on a dedicated
+local server. Vercel must use the PostgreSQL modes shown above because its local
+filesystem may disappear between requests or deployments. In either mode, an
+invoice file is deleted only after the Exact booking and attachment succeed;
+metadata and audit history remain.

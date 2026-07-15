@@ -118,7 +118,9 @@ test("uses Vercel Exact credentials for OAuth, encrypted tokens, refresh, and ma
           return exactResponse([{ Code: "60", Description: "Purchases" }]);
         }
         if (/\/GLAccounts$/i.test(url.pathname)) {
-          return exactResponse([{ Code: "4420", Description: "Software" }]);
+          return exactResponse([
+            { ID: "gl-account-id", Code: "4420", Description: "Software" },
+          ]);
         }
         if (/\/Costcenters$/i.test(url.pathname)) {
           return exactResponse([{ Code: "FIN", Description: "Finance" }]);
@@ -196,6 +198,7 @@ test("uses Vercel Exact credentials for OAuth, encrypted tokens, refresh, and ma
         assert.equal(masterData.paymentConditions.length, 1);
         assert.equal(masterData.journals.length, 1);
         assert.equal(masterData.glAccounts.length, 1);
+        assert.equal(masterData.glAccounts[0]?.id, "gl-account-id");
         assert.equal(masterData.vatCodes.length, 1);
         assert.equal(masterData.costCenters.length, 1);
         assert.equal(masterData.costUnits.length, 1);

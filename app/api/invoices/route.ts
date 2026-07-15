@@ -4,7 +4,6 @@ import {
   detectContentDuplicate,
   findDuplicateBeforeProcessing,
   listInvoices,
-  markInvoiceFileError,
   markInvoiceReading,
   recomputeInvoiceState,
   requirePermission,
@@ -59,6 +58,16 @@ export async function POST(request: Request) {
 
       for (const [index, file] of files.entries()) {
         const checksum = checksums[index] || undefined;
+
+        if (!isSupportedInvoiceFile(file.name)) {
+          rejected.push({
+            fileName: file.name,
+            checksum,
+            reason: "Unsupported file type. Upload PDF, JPG, PNG, XML, or UBL invoices.",
+          });
+          continue;
+        }
+
         const duplicate = findDuplicateBeforeProcessing({
           fileName: file.name,
           fileSize: file.size,
@@ -94,16 +103,6 @@ export async function POST(request: Request) {
         fileName: invoice.fileName,
         fileSize: invoice.fileSize,
       });
-
-      if (!isSupportedInvoiceFile(file.name)) {
-        processed.push(
-          markInvoiceFileError(
-            invoice.id,
-            "Unsupported file type. Upload PDF, JPG, PNG, XML, or UBL invoices."
-          )
-        );
-        continue;
-      }
 
       markInvoiceReading(invoice.id);
       const extractedData = await extractInvoiceData(file);

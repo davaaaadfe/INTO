@@ -14,11 +14,15 @@ encrypted OAuth access and refresh tokens.
 https://your-domain/api/exact/callback
 ```
 
-For local development:
+For a local INTO server, register the public HTTPS URL that forwards to it:
 
 ```text
-http://localhost:3000/api/exact/callback
+https://your-public-local-url/api/exact/callback
 ```
+
+Exact Online does not accept an insecure localhost callback. The HTTPS endpoint
+must forward to `http://localhost:3000` while INTO is running, and its callback
+path must match `EXACT_ONLINE_REDIRECT_URI` exactly.
 
 4. Copy the OAuth client ID and client secret into environment variables.
 

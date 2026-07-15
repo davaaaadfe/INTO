@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
+import { resolve } from "node:path";
 import { exactRedirectUri } from "../lib/services/app-config-service";
 import {
   getCompanyConnectionUserId,
@@ -9,6 +10,7 @@ import {
 } from "../lib/repository/invoice-store";
 import { createMockExactConnection } from "../lib/services/exact-online-service";
 import { getSetupStatus } from "../lib/services/setup-status-service";
+import { closeSqliteStore } from "../lib/repository/sqlite-store";
 
 const envKeys = [
   "NODE_ENV",
@@ -18,6 +20,8 @@ const envKeys = [
   "VERCEL_ENV",
   "VERCEL_PROJECT_PRODUCTION_URL",
   "DATABASE_URL",
+  "DATABASE_MODE",
+  "LOCAL_DATABASE_PATH",
   "STORAGE_PROVIDER",
   "STORAGE_MODE",
   "TEMP_INVOICE_STORAGE_PATH",
@@ -212,12 +216,17 @@ test("setup status does not mark shared integrations ready before they are conne
   });
 });
 
-test("setup status folds missing production database into the review queue readiness item", async () => {
+test("setup status treats local SQLite as durable record storage", async () => {
+  const databasePath = resolve(
+    "data/tmp-tests",
+    `setup-${Date.now()}-${Math.random().toString(16).slice(2)}.sqlite`
+  );
   await withEnv(
     {
       NODE_ENV: "production",
       APP_URL: "https://into.example.com",
-      STORAGE_PROVIDER: "memory",
+      DATABASE_MODE: "sqlite",
+      LOCAL_DATABASE_PATH: databasePath,
     },
     async () => {
       resetSharedConnections();
@@ -226,16 +235,19 @@ test("setup status folds missing production database into the review queue readi
       const reviewQueue = checks.find((check) => check.id === "review-queue");
 
       assert.equal(ids.includes("database"), false);
-      assert.equal(reviewQueue?.status, "warning");
-      assert.match(reviewQueue?.message ?? "", /production record storage/);
-      assert.deepEqual(reviewQueue?.missingEnv, ["DATABASE_URL"]);
-      assert.doesNotMatch(reviewQueue?.message ?? "", /DATABASE_URL/);
+      assert.equal(reviewQueue?.status, "ok");
+      assert.deepEqual(reviewQueue?.missingEnv, []);
+      assert.doesNotMatch(JSON.stringify(reviewQueue), /DATABASE_URL/);
       resetSharedConnections();
     }
   );
+  closeSqliteStore();
+  await rm(databasePath, { force: true });
+  await rm(`${databasePath}-shm`, { force: true });
+  await rm(`${databasePath}-wal`, { force: true });
 });
 
-test("setup status uses local temporary invoice storage without requiring S3", async () => {
+test("setup status uses local invoice storage without requiring S3", async () => {
   const storagePath = `storage/tmp-tests/setup-${Date.now()}-${Math.random()
     .toString(16)
     .slice(2)}`;
@@ -243,7 +255,7 @@ test("setup status uses local temporary invoice storage without requiring S3", a
     {
       NODE_ENV: "production",
       APP_URL: "https://into.example.com",
-      STORAGE_MODE: "local_temp",
+      STORAGE_MODE: "local",
       TEMP_INVOICE_STORAGE_PATH: storagePath,
     },
     async () => {
@@ -254,7 +266,7 @@ test("setup status uses local temporary invoice storage without requiring S3", a
 
       assert.equal(ids.includes("storage"), false);
       assert.equal(upload?.status, "ok");
-      assert.match(upload?.details.join(" ") ?? "", /Temporary local invoice storage is ready/);
+      assert.match(upload?.details.join(" ") ?? "", /Local invoice storage is ready/);
       assert.deepEqual(upload?.missingEnv, []);
       assert.doesNotMatch(JSON.stringify(upload), /S3_/);
       resetSharedConnections();

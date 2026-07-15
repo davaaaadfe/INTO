@@ -1,13 +1,13 @@
 import {
-  flushStoreToPostgres,
-  hydrateStoreFromPostgres,
+  flushStoreToPersistence,
+  hydrateStoreFromPersistence,
 } from "./invoice-store";
 
 export async function withPersistentStore<T>(handler: () => Promise<T> | T) {
-  await hydrateStoreFromPostgres();
+  await hydrateStoreFromPersistence();
   try {
     return await handler();
   } finally {
-    await flushStoreToPostgres();
+    await flushStoreToPersistence();
   }
 }

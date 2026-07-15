@@ -1,10 +1,10 @@
 # INTO
 
-INTO is an invoice booking automation tool for bulk invoice intake, validation,
-review, and Exact Online booking. The current implementation uses mock OCR while
-keeping extraction, Exact Online, database, and temporary file storage concerns
-isolated behind service modules. Exact Online can run in mock mode or real OAuth
-mode for the shared company account.
+INTO is a local-first invoice booking automation tool for bulk invoice intake,
+validation, review, and Exact Online booking. The current implementation uses
+mock OCR while keeping extraction, Exact Online, database, and file storage
+concerns isolated behind service modules. Exact Online can run in mock mode or
+real OAuth mode for the shared company account.
 
 ## Structure
 
@@ -14,18 +14,17 @@ mode for the shared company account.
 - `components/into-workbench.tsx` is the product workbench UI.
 - `lib/services` separates extraction, validation, storage, Exact Online, and
   booking logic.
-- `lib/repository/invoice-store.ts` is the local/mock repository used during
-  development and tests. In Vercel production, API routes hydrate and flush this
-  state through a PostgreSQL JSONB snapshot bridge in
-  `lib/repository/postgres-store.ts` while the normalized repository is completed.
+- `lib/repository/invoice-store.ts` is the runtime repository. Local requests
+  hydrate and flush it through the SQLite snapshot adapter in
+  `lib/repository/sqlite-store.ts`; optional Vercel deployments can use the
+  PostgreSQL adapter in `lib/repository/postgres-store.ts`.
 - `db/schema.ts` defines the Sites/D1 schema, and `db/postgres-schema.sql`
   mirrors a production PostgreSQL schema.
 
 ## Environment
 
-Copy `.env.example` to `.env` for local development and fill in real values
-when replacing the mock adapters. Exact Online credentials are read from
-environment variables and are not hard-coded.
+Copy `.env.example` to `.env.local` for local development and fill in real
+values. Exact Online credentials are read on the server and are not hard-coded.
 
 INTO includes a readiness panel backed by `/api/setup/status`. The UI shows
 simple user-facing readiness items for the shared Exact connection, invoice
@@ -33,23 +32,24 @@ upload, review queue, Exact master data sync, and booking. It does not show
 normal users database, storage, migration, internal API, or raw environment
 variable checklist items.
 
-For Vercel production, configure durable records. Invoice files use temporary
-local storage by default while they are being processed, previewed, reviewed,
-and attached to Exact Online. After a successful Exact booking, INTO deletes the
-local invoice file and keeps invoice metadata, booking status, Exact reference,
-and audit history.
+Local mode uses SQLite for durable metadata and the local filesystem for the
+original invoice while it is being processed, previewed, reviewed, and attached
+to Exact Online. After a successful Exact booking and attachment upload, INTO
+deletes the local invoice file and keeps its metadata, booking status, Exact
+reference, and audit history.
 
 ```bash
-DATABASE_URL=your_postgres_connection_string
-STORAGE_MODE=local_temp
-TEMP_INVOICE_STORAGE_PATH=storage/tmp-invoices
+DATABASE_MODE=sqlite
+LOCAL_DATABASE_PATH=data/into.sqlite
+STORAGE_MODE=local
+TEMP_INVOICE_STORAGE_PATH=storage/invoices
 TEMP_INVOICE_RETENTION_DAYS=30
 ```
 
-Temporary local storage on Vercel is suitable only for short-lived processing;
-files may not survive redeploys. This is acceptable only when invoices are
-processed and booked quickly. If booking fails or an invoice still needs review,
-INTO keeps the local file so users can preview and retry it.
+SQLite, PostgreSQL, and S3 are not all required: a dedicated local INTO server
+needs only SQLite and local storage. Keep that machine running and backed up.
+If booking fails or an invoice still needs review, INTO keeps the local file so
+users can preview and retry it.
 
 ### Real Exact Online connection
 
@@ -61,9 +61,14 @@ authenticate on Exact Online's official OAuth page.
 2. Register the callback URL that matches where INTO is running:
 
 ```text
-Local:  http://localhost:3000/api/exact/callback
+Local:  https://your-public-local-url/api/exact/callback
 Vercel: https://your-vercel-domain/api/exact/callback
 ```
+
+Exact requires a secure callback. For local operation, expose only the INTO
+server through a trusted HTTPS tunnel/reverse proxy and forward it to
+`http://localhost:3000`. Set `APP_URL` and `EXACT_ONLINE_REDIRECT_URI` to that
+same public HTTPS origin while connecting Exact.
 
 3. Put the required values in the right place:
 
@@ -84,8 +89,8 @@ EXACT_ONLINE_ENABLE_REAL_BOOKING=false
 `EXACT_ONLINE_CLIENT_ID` must be the Exact OAuth app Client ID, not a user email
 address. `EXACT_ONLINE_CLIENT_SECRET` must be the app secret from Exact.
 
-4. Restart the dev server or redeploy Vercel, sign in as the system owner, and
-   click `Connect Company Exact`.
+4. Restart the local server (or redeploy Vercel), unlock INTO, and click
+   `Connect Company Exact`.
 5. After the connection succeeds, click `Sync Exact Data Now` to load suppliers,
    payment conditions, journals, G/L accounts, cost centers, cost units, VAT
    codes, and available historical purchase data from Exact.
@@ -101,9 +106,13 @@ codes, but it must never create, update, patch, merge, or delete those records
 in Exact. The Exact API client includes a hard guard that blocks non-read
 requests to those master-data resources before a network request can be sent.
 
-Real purchase-entry posting is intentionally guarded. Keep
-`EXACT_ONLINE_ENABLE_REAL_BOOKING=false` until the Exact purchase-entry payload
-has been validated against your Exact division.
+Real purchase-entry posting is intentionally guarded. INTO verifies the Exact
+document type, creates a purchase-invoice document, uploads the original file,
+and only then creates the purchase entry linked to that document. Keep
+`EXACT_ONLINE_ENABLE_REAL_BOOKING=false` until one controlled invoice has been
+reviewed against your Exact company. Then set it to `true` and restart INTO.
+If the attachment upload fails, no purchase entry is sent and the local file is
+kept for retry.
 
 ## Development
 
@@ -124,10 +133,10 @@ Generate D1 migrations after schema changes:
 npm run db:generate
 ```
 
-## Vercel Deployment
+## Optional Vercel Deployment
 
-Vercel is the default deployment target for OAuth integrations because it gives
-the app a stable HTTPS domain without ngrok. The repository includes:
+Vercel is optional. It provides a stable HTTPS domain, but it is not required
+for a dedicated local INTO installation. The repository includes:
 
 - `vercel.json`
 - `.vercelignore`
@@ -145,6 +154,6 @@ See `docs/VERCEL_DEPLOYMENT.md` and `docs/OAUTH_SETUP.md` for the full setup.
 ## Sites Deployment
 
 This project keeps `.openai/hosting.json` configured for the older Sites
-packaging flow, but the Vercel app now defaults to local temporary invoice file
-storage. Vercel production still needs durable metadata storage through
-PostgreSQL.
+packaging flow. A Vercel deployment must use shared durable metadata and file
+storage because its local filesystem is ephemeral; the local-first setup above
+does not have that limitation.

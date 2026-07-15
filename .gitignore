@@ -17,6 +17,7 @@
 /github-upload-ready-dbfree/
 /.wrangler/
 /.vite/
+/.pnpm-store/
 /storage/
 /data/
 

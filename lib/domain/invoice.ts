@@ -175,6 +175,7 @@ export type ExactJournal = {
 };
 
 export type ExactGlAccount = {
+  id?: string;
   code: string;
   name: string;
   isActive: boolean;

@@ -24,6 +24,7 @@ import {
 import {
   fetchExactCurrentDivision,
   isMockExactConnection,
+  isRealExactBookingEnabled,
   isRealExactMode,
 } from "./exact-api-client";
 import { bookInvoiceInExact } from "./exact-online-service";
@@ -32,6 +33,10 @@ import {
   supportedInvoiceFileExtensions,
   verifyInvoiceStorageWorks,
 } from "./storage-service";
+import {
+  databaseMode,
+  verifySqliteStoreWorks,
+} from "../repository/sqlite-store";
 
 type ExactReadiness = {
   status: SetupStatusLevel;
@@ -76,22 +81,6 @@ function readinessCheck(
     missingEnv,
     details,
   };
-}
-
-function hasEnv(key: string) {
-  return Boolean(process.env[key]?.trim());
-}
-
-function missingRequiredEnv(keys: string[]) {
-  return keys.filter((key) => !hasEnv(key));
-}
-
-function missingDatabaseSettings() {
-  if (runtimeEnvironment() !== "production") {
-    return [];
-  }
-
-  return missingRequiredEnv(["DATABASE_URL"]);
 }
 
 function exactSetupGuidance(details: string[] = []) {
@@ -237,14 +226,8 @@ async function uploadReadiness() {
     "Users can upload PDF, JPG, PNG, XML, and UBL invoice files.",
     storageProvider === "postgres_temp"
       ? "Temporary shared invoice storage is ready."
-      : "Temporary local invoice storage is ready.",
+      : "Local invoice storage is ready.",
   ];
-
-  if (runtimeEnvironment() === "production" && storageProvider === "local_temp") {
-    details.push(
-      "A single long-running server can use local temporary storage. Vercel requires shared temporary storage so uploads remain available to preview and download requests."
-    );
-  }
 
   return {
     status: "ok" as const,
@@ -254,15 +237,26 @@ async function uploadReadiness() {
   };
 }
 
-function reviewQueueReadiness() {
-  const missingDatabaseEnv = missingDatabaseSettings();
-  if (missingDatabaseEnv.length) {
+async function reviewQueueReadiness() {
+  const mode = databaseMode();
+  if (mode === "sqlite" && !(await verifySqliteStoreWorks())) {
+    return notReady(
+      "Invoice review queue needs attention.",
+      ["INTO could not open its local invoice record database."]
+    );
+  }
+
+  if (mode === "postgres" && !process.env.DATABASE_URL?.trim()) {
     return needsSetup(
       "Invoice review queue needs production record storage setup.",
-      [
-        "Invoices, audit history, duplicate decisions, and booking attempts must be stored durably before production use.",
-      ],
-      missingDatabaseEnv
+      ["Ask the system owner to configure the shared production record database."]
+    );
+  }
+
+  if (mode === "memory" && runtimeEnvironment() === "production") {
+    return needsSetup(
+      "Invoice review queue needs durable record storage.",
+      ["Use local SQLite on a dedicated server or shared PostgreSQL on Vercel."]
     );
   }
 
@@ -277,7 +271,7 @@ function reviewQueueReadiness() {
     return {
       status: "ok" as const,
       message: "Invoice review queue is ready.",
-      details: ["Invoices can be listed for review."],
+      details: ["Invoices can be listed for review and retained between restarts."],
       missingEnv: [],
     };
   } catch {
@@ -393,6 +387,15 @@ function bookingReadiness(
     );
   }
 
+  if (isRealExactMode() && !isRealExactBookingEnabled()) {
+    return needsSetup(
+      "Invoice booking is connected but live Exact posting is still disabled.",
+      [
+        "The system owner must complete one controlled payload review before enabling real booking.",
+      ]
+    );
+  }
+
   if (typeof bookInvoiceInExact !== "function") {
     return notReady("Invoice booking needs attention.", [
       "The booking service is not available.",
@@ -409,7 +412,7 @@ function bookingReadiness(
 export async function getSetupStatus(): Promise<SetupStatus> {
   const exactReadiness = await exactConnectionReadiness();
   const uploadStatus = await uploadReadiness();
-  const reviewQueueStatus = reviewQueueReadiness();
+  const reviewQueueStatus = await reviewQueueReadiness();
   const masterDataStatus = await masterDataReadiness(exactReadiness);
   const bookingStatus = bookingReadiness(exactReadiness, masterDataStatus);
 

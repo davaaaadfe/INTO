@@ -11,7 +11,9 @@ import type {
   ExactVatCode,
   UploadedInvoice,
 } from "../domain/invoice";
+import { Buffer } from "node:buffer";
 import { createId } from "../utils/id";
+import { getStoredInvoiceFile } from "./storage-service";
 import {
   decodeExactStatePayload,
   decryptExactSecret,
@@ -47,6 +49,8 @@ type ExactStatePayload = {
 
 type ExactBookingResult = {
   exactBookingId: string;
+  exactDocumentId: string;
+  exactAttachmentId: string;
   divisionCode: string;
   journal: "60" | "61";
   financialYear: number;
@@ -98,6 +102,10 @@ export function exactIntegrationMode() {
 
 export function isRealExactMode() {
   return exactIntegrationMode() === "real";
+}
+
+export function isRealExactBookingEnabled() {
+  return process.env.EXACT_ONLINE_ENABLE_REAL_BOOKING?.trim().toLowerCase() === "true";
 }
 
 export function isMockExactConnection(connection: ExactConnection | null) {
@@ -323,26 +331,41 @@ async function fetchExactJson<T>(
   connection: ExactConnection,
   pathOrUrl: string
 ): Promise<T> {
+  return requestExactJson<T>(connection, pathOrUrl, { method: "GET" });
+}
+
+async function requestExactJson<T>(
+  connection: ExactConnection,
+  pathOrUrl: string,
+  options: { method: "GET" | "POST"; body?: unknown }
+): Promise<T> {
   const { baseUrl } = exactConfig();
   const accessToken = await exactAccessToken(connection);
   const url = pathOrUrl.startsWith("http")
     ? pathOrUrl
     : `${baseUrl}${pathOrUrl}`;
-  assertExactMasterDataReadOnlyRequest("GET", pathOrUrl);
+  assertExactMasterDataReadOnlyRequest(options.method, pathOrUrl);
   const response = await fetch(url, {
-    method: "GET",
+    method: options.method,
     headers: {
       Authorization: `Bearer ${accessToken}`,
       Accept: "application/json",
+      ...(options.body ? { "Content-Type": "application/json" } : {}),
     },
+    body: options.body ? JSON.stringify(options.body) : undefined,
   });
-  const payload = await response.json().catch(() => ({}));
+  const payload = (await response.json().catch(() => ({}))) as Record<
+    string,
+    unknown
+  >;
 
   if (!response.ok) {
+    const error = normalizeRecord(payload.error);
+    const errorMessage = normalizeRecord(error.message);
     const detail =
-      payload.error?.message?.value ||
-      payload.error_description ||
-      payload.error ||
+      valueOf(errorMessage, ["value"]) ||
+      valueOf(payload, ["error_description"]) ||
+      (typeof payload.error === "string" ? payload.error : "") ||
       response.statusText;
     throw new Error(`Exact API request failed for ${pathOrUrl}: ${detail}`);
   }
@@ -550,6 +573,7 @@ function mapGlAccount(value: unknown): ExactGlAccount {
   const record = normalizeRecord(value);
   const code = valueOf(record, ["Code", "GLAccount", "ID"]);
   return {
+    id: valueOf(record, ["ID", "Id"]),
     code,
     name: valueOf(record, ["Description", "Name"]) || code,
     isActive: booleanValueOf(record, ["IsActive", "Active"], true),
@@ -829,17 +853,180 @@ export async function createRealExactPurchaseBooking(
   invoice: UploadedInvoice,
   masterData: ExactMasterDataCache
 ): Promise<ExactBookingResult> {
-  void connection;
-  void invoice;
-  void masterData;
-
-  if (process.env.EXACT_ONLINE_ENABLE_REAL_BOOKING !== "true") {
+  if (!isRealExactBookingEnabled()) {
     throw new Error(
       "Real Exact Online booking is disabled. Set EXACT_ONLINE_ENABLE_REAL_BOOKING=true only after validating the purchase-entry payload with your Exact Online division."
     );
   }
 
-  throw new Error(
-    "Real Exact Online purchase-entry posting adapter is not implemented yet. INTO is connected to Exact for OAuth and master-data sync."
+  const booking = invoice.purchaseJournal;
+  if (!booking?.attachmentStorageKey) {
+    throw new Error("Original invoice attachment is required for Exact Online booking.");
+  }
+
+  const originalFile = await getStoredInvoiceFile(booking.attachmentStorageKey, {
+    fileName: invoice.fileName,
+    fileType: invoice.fileType,
+  });
+  if (!originalFile) {
+    throw new Error("Original invoice file is not available in storage.");
+  }
+
+  const supplierId = booking.supplierResolution.selectedAccountId;
+  if (!supplierId) {
+    throw new Error("A resolved Exact supplier is required for booking.");
+  }
+
+  const allowedVatCodes = new Set(["4", "5", "6", "7", "8"]);
+  const purchaseEntryLines = booking.lines.map((line) => {
+    if (!allowedVatCodes.has(line.vatCode)) {
+      throw new Error(`Unsupported purchase VAT code ${line.vatCode}.`);
+    }
+
+    const glAccount = masterData.glAccounts.find(
+      (account) => account.code === line.finalSelectedAccount && account.isActive
+    );
+    if (!glAccount?.id) {
+      throw new Error(
+        `G/L account ${line.finalSelectedAccount} is missing its Exact Online ID. Sync Exact master data again.`
+      );
+    }
+
+    return {
+      AmountFC: line.amount,
+      Description: line.description,
+      GLAccount: glAccount.id,
+      VATCode: line.vatCode,
+      VATAmountFC: line.vatAmount,
+      ...(line.costCentre ? { CostCenter: line.costCentre } : {}),
+      ...(line.costUnit ? { CostUnit: line.costUnit } : {}),
+      ...(line.from ? { From: exactDateValue(line.from) } : {}),
+      ...(line.to ? { To: exactDateValue(line.to) } : {}),
+    };
+  });
+
+  const divisionCode = connection.divisionCode || (await fetchExactCurrentDivision(connection));
+  const documentType = exactPurchaseDocumentType();
+  const documentTypes = await fetchExactOData<Record<string, unknown>>(
+    connection,
+    divisionCode,
+    `/documents/DocumentTypes?$filter=ID eq ${documentType}&$top=1`,
+    { maxPages: 1 }
   );
+  const documentTypeRecord = documentTypes.find(
+    (record) => Number(record.ID) === documentType
+  );
+  if (
+    !documentTypeRecord ||
+    !booleanValueOf(documentTypeRecord, ["DocumentIsCreatable", "IsCreatable"], false)
+  ) {
+    throw new Error(
+      `Exact document type ${documentType} is missing or cannot be used to create purchase invoice documents.`
+    );
+  }
+
+  const documentResponse = await requestExactJson<Record<string, unknown>>(
+    connection,
+    `/api/v1/${divisionCode}/documents/Documents`,
+    {
+      method: "POST",
+      body: {
+        Account: supplierId,
+        AmountFC: invoice.extractedData.grossAmount ?? booking.totals.grossAmount,
+        Currency: booking.currency,
+        DocumentDate: exactDateValue(invoice.extractedData.invoiceDate),
+        Subject: `Purchase invoice ${booking.yourRef} - ${invoice.extractedData.supplierName}`.slice(
+          0,
+          255
+        ),
+        Type: documentType,
+      },
+    }
+  );
+  const exactDocumentId = responseValue(documentResponse, ["ID", "Document"]);
+  if (!exactDocumentId) {
+    throw new Error("Exact Online created no usable document reference.");
+  }
+
+  const attachmentResponse = await requestExactJson<Record<string, unknown>>(
+    connection,
+    `/api/v1/${divisionCode}/documents/DocumentAttachments`,
+    {
+      method: "POST",
+      body: {
+        Attachment: Buffer.from(originalFile.bytes).toString("base64"),
+        Document: exactDocumentId,
+        FileName: invoice.fileName,
+      },
+    }
+  );
+  const exactAttachmentId =
+    responseValue(attachmentResponse, ["ID", "AttachmentID"]) ||
+    `${exactDocumentId}/${invoice.fileName}`;
+
+  const purchaseEntryResponse = await requestExactJson<Record<string, unknown>>(
+    connection,
+    `/api/v1/${divisionCode}/purchaseentry/PurchaseEntries`,
+    {
+      method: "POST",
+      body: {
+        Currency: booking.currency,
+        Description: booking.description,
+        Document: exactDocumentId,
+        EntryDate: exactDateValue(invoice.extractedData.invoiceDate),
+        ...(invoice.extractedData.dueDate
+          ? { DueDate: exactDateValue(invoice.extractedData.dueDate) }
+          : {}),
+        Journal: booking.journal,
+        PaymentCondition: booking.paymentConditionCode,
+        PurchaseEntryLines: purchaseEntryLines,
+        Supplier: supplierId,
+        VATAmountFC: booking.totals.vatAmount,
+        YourRef: booking.yourRef,
+      },
+    }
+  );
+  const exactBookingId = responseValue(purchaseEntryResponse, [
+    "EntryID",
+    "ID",
+    "EntryNumber",
+  ]);
+  if (!exactBookingId) {
+    throw new Error("Exact Online created no usable purchase entry reference.");
+  }
+
+  return {
+    exactBookingId,
+    exactDocumentId,
+    exactAttachmentId,
+    divisionCode,
+    journal: booking.journal,
+    financialYear: booking.financialYear,
+    period: booking.period,
+    attachedFileKey: booking.attachmentStorageKey,
+    bookedAt: new Date().toISOString(),
+  };
+}
+
+function exactDateValue(value: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw new Error(`Exact booking date ${value || "(empty)"} is invalid.`);
+  }
+  return `${value}T00:00:00`;
+}
+
+function exactPurchaseDocumentType() {
+  const configured = Number.parseInt(
+    process.env.EXACT_ONLINE_DOCUMENT_TYPE?.trim() || "55",
+    10
+  );
+  if (!Number.isInteger(configured) || configured <= 0) {
+    throw new Error("EXACT_ONLINE_DOCUMENT_TYPE must be a positive number.");
+  }
+  return configured;
+}
+
+function responseValue(response: Record<string, unknown>, keys: string[]) {
+  const entity = normalizeRecord(response.d ?? response);
+  return valueOf(entity, keys);
 }

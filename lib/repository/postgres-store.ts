@@ -1,6 +1,7 @@
 import { neon } from "@neondatabase/serverless";
 import { Buffer } from "node:buffer";
 import type { IntoStore } from "./invoice-store";
+import { databaseMode } from "./sqlite-store";
 
 const snapshotId = "company";
 
@@ -9,7 +10,7 @@ function databaseUrl() {
 }
 
 export function isPostgresPersistenceEnabled() {
-  return process.env.NODE_ENV === "production" && Boolean(databaseUrl());
+  return databaseMode() === "postgres" && Boolean(databaseUrl());
 }
 
 async function sqlClient() {

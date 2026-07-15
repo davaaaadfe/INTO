@@ -18,6 +18,7 @@ async function withEnv(
 ) {
   const keys = [
     "NODE_ENV",
+    "DATABASE_MODE",
     "DATABASE_URL",
     "VERCEL",
     "VERCEL_ENV",
@@ -85,6 +86,28 @@ test("uses local temporary invoice storage by default", async () => {
   await rm(storagePath, { recursive: true, force: true });
 });
 
+test("uses storage/invoices for durable local invoice files by default", async () => {
+  await withEnv({ NODE_ENV: "test" }, async () => {
+    assert.match(temporaryInvoiceStoragePath(), /storage[\\/]invoices$/);
+  });
+});
+
+test("accepts STORAGE_MODE=local as the local-first configuration", async () => {
+  const storagePath = testStoragePath("local-mode");
+  await withEnv(
+    {
+      NODE_ENV: "production",
+      STORAGE_MODE: "local",
+      TEMP_INVOICE_STORAGE_PATH: storagePath,
+    },
+    async () => {
+      assert.equal(invoiceStorageProvider(), "local_temp");
+      assert.equal(await verifyInvoiceStorageWorks(), true);
+    }
+  );
+  await rm(storagePath, { recursive: true, force: true });
+});
+
 test("does not require S3 settings in production when using local temp storage", async () => {
   const storagePath = testStoragePath("production-local");
   await withEnv(
@@ -130,6 +153,7 @@ test("uses shared PostgreSQL temporary file storage on Vercel", async () => {
       NODE_ENV: "production",
       VERCEL: "1",
       VERCEL_ENV: "production",
+      DATABASE_MODE: "postgres",
       DATABASE_URL: "postgresql://example.invalid/into",
     },
     async () => {

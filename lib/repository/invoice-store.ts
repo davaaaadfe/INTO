@@ -1,4 +1,7 @@
-import { emptyExtractedInvoiceData } from "../domain/invoice";
+import {
+  emptyExtractedInvoiceData,
+  SHARED_ACCESS_PERMISSIONS,
+} from "../domain/invoice";
 import type {
   AuditEvent,
   BookingAttempt,
@@ -59,25 +62,8 @@ import {
   sqliteDatabasePath,
 } from "./sqlite-store";
 
-const verifiedUserPermissions: PermissionAction[] = [
-  "view",
-  "search_archive",
-  "upload",
-  "edit",
-  "review",
-  "approve",
-  "book",
-];
-
-const systemOwnerPermissions: PermissionAction[] = [
-  "manage_connections",
-  "manage_users",
-  "manage_settings",
-];
-
 const sharedUserPermissions: PermissionAction[] = [
-  ...verifiedUserPermissions,
-  ...systemOwnerPermissions,
+  ...SHARED_ACCESS_PERMISSIONS,
 ];
 
 export const SHARED_USER_ID = "shared_user";

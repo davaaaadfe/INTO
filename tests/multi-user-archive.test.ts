@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { SHARED_ACCESS_PERMISSIONS } from "../lib/domain/invoice";
 import {
   createUploadedInvoice,
   disconnectExactConnection,
@@ -22,8 +23,7 @@ test("uses one shared internal user with access to all INTO functions", () => {
 
   assert.equal(user.id, "shared_user");
   assert.deepEqual(listUsers().map((item) => item.id), ["shared_user"]);
-  assert.equal(permissionsForUser(user).includes("book"), true);
-  assert.equal(permissionsForUser(user).includes("manage_connections"), true);
+  assert.deepEqual(permissionsForUser(user), [...SHARED_ACCESS_PERMISSIONS]);
 });
 
 test("stores Exact credentials as a shared company connection", () => {

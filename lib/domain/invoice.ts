@@ -34,6 +34,19 @@ export type PermissionAction =
   | "manage_users"
   | "manage_settings";
 
+export const SHARED_ACCESS_PERMISSIONS = [
+  "view",
+  "search_archive",
+  "upload",
+  "edit",
+  "review",
+  "approve",
+  "book",
+  "manage_connections",
+  "manage_users",
+  "manage_settings",
+] as const satisfies readonly PermissionAction[];
+
 export type IntoUser = {
   id: string;
   email: string;

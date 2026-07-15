@@ -11,6 +11,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { SHARED_ACCESS_PERMISSIONS } from "../lib/domain/invoice";
 import type {
   AuditEvent,
   DuplicateDetectionResult,
@@ -1083,7 +1084,7 @@ export function IntoWorkbench() {
     scrollTop: number;
   } | null>(null);
   const [state, setState] = useState<ApiState>({
-    permissions: [],
+    permissions: [...SHARED_ACCESS_PERMISSIONS],
     invoices: [],
     exactConnection: null,
     exactMasterData: null,
@@ -1661,10 +1662,9 @@ export function IntoWorkbench() {
   }
 
   async function refreshAll() {
-    const [invoiceResponse, exactResponse, userResponse] = await Promise.all([
+    const [invoiceResponse, exactResponse] = await Promise.all([
       fetch("/api/invoices"),
       fetch("/api/exact/status"),
-      fetch("/api/users"),
     ]);
     const invoiceData = (await invoiceResponse.json()) as {
       invoices: UploadedInvoice[];
@@ -1676,12 +1676,8 @@ export function IntoWorkbench() {
       masterDataReadOnly: boolean;
       configuration: NonNullable<ApiState["exactConfiguration"]>;
     };
-    const userData = (await userResponse.json()) as {
-      permissions: PermissionAction[];
-    };
-
     setState({
-      permissions: userData.permissions,
+      permissions: [...SHARED_ACCESS_PERMISSIONS],
       invoices: invoiceData.invoices,
       exactConnection: exactData.connection,
       exactMasterData: exactData.masterData,

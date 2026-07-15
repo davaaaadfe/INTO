@@ -77,6 +77,7 @@ test("uses Vercel Exact credentials for OAuth, encrypted tokens, refresh, and ma
     async () => {
       const originalFetch = globalThis.fetch;
       const tokenRequests: URLSearchParams[] = [];
+      const exactApiRequests: string[] = [];
 
       globalThis.fetch = (async (input, init) => {
         const url = new URL(
@@ -84,6 +85,10 @@ test("uses Vercel Exact credentials for OAuth, encrypted tokens, refresh, and ma
             ? input.toString()
             : input.url
         );
+
+        if (url.pathname.startsWith("/api/v1/")) {
+          exactApiRequests.push(url.pathname);
+        }
 
         if (url.pathname === "/api/oauth2/token") {
           const body = new URLSearchParams(String(init?.body ?? ""));
@@ -107,12 +112,14 @@ test("uses Vercel Exact credentials for OAuth, encrypted tokens, refresh, and ma
               ID: "supplier-id",
               Code: "SUP-001",
               Name: "Example Supplier",
-              PaymentCondition: "30",
+              PaymentConditionPurchase: "30",
             },
           ]);
         }
-        if (/\/PaymentConditions$/i.test(url.pathname)) {
-          return exactResponse([{ Code: "30", Description: "30 days", Days: 30 }]);
+        if (/\/cashflow\/PaymentConditions$/i.test(url.pathname)) {
+          return exactResponse([
+            { Code: "30", Description: "30 days", PaymentDays: 30 },
+          ]);
         }
         if (/\/Journals$/i.test(url.pathname)) {
           return exactResponse([{ Code: "60", Description: "Purchases" }]);
@@ -195,13 +202,27 @@ test("uses Vercel Exact credentials for OAuth, encrypted tokens, refresh, and ma
         const masterData = getExactMasterData();
         assert.ok(masterData);
         assert.equal(masterData.suppliers.length, 1);
+        assert.equal(masterData.suppliers[0]?.paymentConditionCode, "30");
+        assert.equal(masterData.suppliers[0]?.paymentConditionLabel, "30 days");
         assert.equal(masterData.paymentConditions.length, 1);
+        assert.equal(masterData.paymentConditions[0]?.days, 30);
         assert.equal(masterData.journals.length, 1);
         assert.equal(masterData.glAccounts.length, 1);
         assert.equal(masterData.glAccounts[0]?.id, "gl-account-id");
         assert.equal(masterData.vatCodes.length, 1);
         assert.equal(masterData.costCenters.length, 1);
         assert.equal(masterData.costUnits.length, 1);
+        assert.ok(
+          exactApiRequests.includes(
+            "/api/v1/123456/cashflow/PaymentConditions"
+          )
+        );
+        assert.equal(
+          exactApiRequests.some((path) =>
+            /\/(?:crm|financial)\/PaymentConditions$/i.test(path)
+          ),
+          false
+        );
 
         const statusResponse = await exactStatus();
         const status = await statusResponse.json();

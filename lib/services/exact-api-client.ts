@@ -69,8 +69,7 @@ export type ExactDuplicatePurchaseBooking = {
 const exactDefaultBaseUrl = "https://start.exactonline.nl";
 const exactMasterDataResourcePatterns = [
   /\/crm\/accounts(?:[/?(]|$)/i,
-  /\/crm\/paymentconditions(?:[/?(]|$)/i,
-  /\/financial\/paymentconditions(?:[/?(]|$)/i,
+  /\/cashflow\/paymentconditions(?:[/?(]|$)/i,
   /\/financial\/journals(?:[/?(]|$)/i,
   /\/financial\/glaccounts(?:[/?(]|$)/i,
   /\/hrm\/costcenters(?:[/?(]|$)/i,
@@ -496,6 +495,7 @@ function mapSupplier(value: unknown): ExactSupplierAccount {
   const code = valueOf(record, ["Code", "AccountCode", "SupplierCode", "ID"]);
   const id = valueOf(record, ["ID", "Id", "AccountID", "Account", "Code"]) || code;
   const paymentConditionCode = valueOf(record, [
+    "PaymentConditionPurchase",
     "PaymentCondition",
     "PaymentConditionCode",
     "PaymentConditionID",
@@ -528,7 +528,11 @@ function mapSupplier(value: unknown): ExactSupplierAccount {
     country: valueOf(record, ["Country", "CountryCode"]),
     paymentConditionCode,
     paymentConditionLabel:
-      valueOf(record, ["PaymentConditionDescription", "PaymentConditionLabel"]) ||
+      valueOf(record, [
+        "PaymentConditionPurchaseDescription",
+        "PaymentConditionDescription",
+        "PaymentConditionLabel",
+      ]) ||
       paymentConditionCode,
     defaultGlAccount,
     defaultGlAccountName:
@@ -788,8 +792,7 @@ export async function syncRealExactMasterData(
       "/crm/Accounts?$top=500",
     ]),
     fetchFirstAvailable(connection, divisionCode, [
-      "/crm/PaymentConditions?$top=500",
-      "/financial/PaymentConditions?$top=500",
+      "/cashflow/PaymentConditions?$top=500",
     ]),
     fetchFirstAvailable(connection, divisionCode, [
       "/financial/Journals?$top=500",
@@ -827,16 +830,29 @@ export async function syncRealExactMasterData(
   const historicalPurchaseBookings = historicalRaw
     .map(mapHistory)
     .filter((item): item is ExactHistoricalPurchaseBooking => Boolean(item));
+  const paymentConditions = paymentConditionsRaw
+    .map(mapPaymentCondition)
+    .filter((condition) => condition.code);
+  const paymentConditionLabels = new Map(
+    paymentConditions.map((condition) => [condition.code, condition.label])
+  );
+  const suppliers = suppliersRaw
+    .map(mapSupplier)
+    .filter((supplier) => supplier.name)
+    .map((supplier) => ({
+      ...supplier,
+      paymentConditionLabel:
+        paymentConditionLabels.get(supplier.paymentConditionCode) ||
+        supplier.paymentConditionLabel,
+    }));
 
   return {
     source: "exact-online",
     divisionCode,
     lastSyncedAt: syncedAt.toISOString(),
     staleAfter: new Date(syncedAt.getTime() + 30 * 60 * 1000).toISOString(),
-    suppliers: suppliersRaw.map(mapSupplier).filter((supplier) => supplier.name),
-    paymentConditions: paymentConditionsRaw
-      .map(mapPaymentCondition)
-      .filter((condition) => condition.code),
+    suppliers,
+    paymentConditions,
     journals: journalsRaw.map(mapJournal).filter((journal) => journal.code),
     glAccounts: glAccountsRaw.map(mapGlAccount).filter((account) => account.code),
     costCenters: costCentersRaw

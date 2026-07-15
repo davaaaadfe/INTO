@@ -4,8 +4,7 @@ import { assertExactMasterDataReadOnlyRequest } from "../lib/services/exact-api-
 
 const masterDataPaths = [
   "/api/v1/123456/crm/Accounts?$top=1",
-  "/api/v1/123456/crm/PaymentConditions?$top=1",
-  "/api/v1/123456/financial/PaymentConditions?$top=1",
+  "/api/v1/123456/cashflow/PaymentConditions?$top=1",
   "/api/v1/123456/financial/Journals?$top=1",
   "/api/v1/123456/financial/GLAccounts?$top=1",
   "/api/v1/123456/hrm/Costcenters?$top=1",

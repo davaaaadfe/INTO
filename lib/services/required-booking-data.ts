@@ -229,8 +229,8 @@ export function getBookingBlockers(
       field: "supplier",
       message:
         supplierResolution.candidates.length > 1
-          ? "Multiple Exact suppliers match this invoice. Please choose the correct supplier."
-          : "Supplier could not be matched to Exact Online master data. Please select the supplier manually.",
+          ? "Multiple supplier matches found. Please choose the correct supplier."
+          : "Supplier could not be confidently matched. Please select the correct supplier.",
     });
   } else if (
     !supplierResolution.selectedAccountId ||

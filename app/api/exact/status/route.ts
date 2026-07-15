@@ -1,5 +1,6 @@
 import {
   getExactMasterData,
+  getSupplierOverviewImportStatus,
   isCachedExactMasterDataStale,
   publicExactConnection,
 } from "../../../../lib/repository/invoice-store";
@@ -14,6 +15,7 @@ export async function GET() {
       masterData: getExactMasterData(),
       masterDataStale: isCachedExactMasterDataStale(),
       masterDataReadOnly: true,
+      supplierOverviewImport: getSupplierOverviewImportStatus(),
       configuration: {
         ...exactOAuthConfigurationStatus(),
         mode: exactIntegrationMode(),

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   emptyExtractedInvoiceData,
+  type ExactSupplierAccount,
   type ExtractedInvoiceData,
   type UploadedInvoice,
 } from "../lib/domain/invoice";
@@ -94,6 +95,23 @@ function buildBooking(invoice: UploadedInvoice) {
     createInitialLearningStore(),
     exactMasterData
   );
+}
+
+function supplierAccount(
+  overrides: Partial<ExactSupplierAccount>
+): ExactSupplierAccount {
+  return {
+    ...exactMasterData.suppliers[0],
+    id: "supplier_imported",
+    code: "90000",
+    name: "Imported Supplier",
+    vatNumber: "",
+    iban: "",
+    chamberOfCommerceNumber: "",
+    address: "",
+    country: "",
+    ...overrides,
+  };
 }
 
 test("blocks booking until Exact master data is synced", () => {
@@ -287,7 +305,10 @@ test("marks multiple matching suppliers for manual supplier review", () => {
     supplierName: "Acme Supplies BV",
     supplierVatNumber: "NL123456789B01",
     supplierChamberOfCommerceNumber: "",
+    supplierAddress: "",
+    supplierCountry: "",
     iban: "",
+    expenseDescription: "Ambiguous widgets",
     invoiceNumber: "INV-ACME-001",
   });
   const booking = buildBooking(invoice);
@@ -300,7 +321,7 @@ test("marks multiple matching suppliers for manual supplier review", () => {
       (error) =>
         error.field === "supplier" &&
         error.message ===
-          "Multiple Exact suppliers match this invoice. Please choose the correct supplier."
+          "Multiple supplier matches found. Please choose the correct supplier."
     ),
     true
   );
@@ -310,9 +331,11 @@ test("uses a unique VAT match before conflicting historical evidence", () => {
   const invoice = uploadedInvoice(
     {},
     {
-      supplierName: "Acme Supplies BV - Eindhoven",
+      supplierName: "Unknown VAT supplier",
       supplierVatNumber: "NL812345678B01",
       supplierChamberOfCommerceNumber: "",
+      supplierAddress: "",
+      supplierCountry: "",
       iban: "",
       expenseDescription: "Office Supplies",
       invoiceNumber: "INV-VAT-PRIORITY-001",
@@ -350,6 +373,8 @@ test("shows the required guidance when no Exact supplier can be matched", () => 
       supplierName: "Completely Unknown Vendor",
       supplierVatNumber: "",
       supplierChamberOfCommerceNumber: "",
+      supplierAddress: "",
+      supplierCountry: "",
       iban: "",
       expenseDescription: "Unrelated expense",
       invoiceNumber: "INV-UNKNOWN-001",
@@ -364,7 +389,7 @@ test("shows the required guidance when no Exact supplier can be matched", () => 
       (error) =>
         error.field === "supplier" &&
         error.message ===
-          "Supplier could not be matched to Exact Online master data. Please select the supplier manually."
+          "Supplier could not be confidently matched. Please select the correct supplier."
     ),
     true
   );
@@ -406,6 +431,219 @@ test("matches an Exact supplier IBAN despite invoice spacing", () => {
   assert.equal(booking.supplierResolution.reviewRequired, false);
   assert.equal(booking.supplierResolution.selectedAccountId, "supplier_delta_it");
   assert.equal(booking.supplierResolution.method, "IBAN");
+});
+
+test("prioritizes an imported supplier IBAN over a conflicting supplier name", () => {
+  const masterData = {
+    ...exactMasterData,
+    suppliers: [
+      supplierAccount({
+        id: "supplier_name_match",
+        code: "90001",
+        name: "Visible Invoice Supplier",
+        iban: "NL11BANK0000000001",
+        city: "Amsterdam",
+        bicCode: "BANKNL2A",
+        isSupplier: true,
+      }),
+      supplierAccount({
+        id: "supplier_iban_match",
+        code: "90002",
+        name: "Exact Legal Supplier Name",
+        iban: "NL22BANK0000000002",
+        city: "Utrecht",
+        bicCode: "BANKNL2U",
+        isSupplier: true,
+      }),
+    ],
+  };
+  const invoice = uploadedInvoice({}, {
+    supplierName: "Visible Invoice Supplier",
+    supplierVatNumber: "",
+    iban: "NL22 BANK 0000 0000 02",
+    invoiceNumber: "INV-IBAN-PRIORITY-001",
+  });
+  const booking = generatePurchaseJournalBooking(
+    invoice,
+    [invoice],
+    createInitialLearningStore(),
+    masterData
+  );
+
+  assert.equal(booking.supplierResolution.selectedAccountId, "supplier_iban_match");
+  assert.equal(booking.supplierResolution.selectedAccountCode, "90002");
+  assert.equal(booking.supplierResolution.selectedAccountName, "Exact Legal Supplier Name");
+  assert.equal(booking.supplierResolution.method, "IBAN");
+});
+
+test("matches an imported supplier by labeled BIC before name similarity", () => {
+  const masterData = {
+    ...exactMasterData,
+    suppliers: [
+      supplierAccount({
+        id: "supplier_bic_match",
+        code: "90003",
+        name: "Northwind Trading",
+        bicCode: "RABONL2U",
+        isSupplier: true,
+      }),
+    ],
+  };
+  const invoice = uploadedInvoice({}, {
+    supplierName: "Unknown invoice supplier",
+    supplierVatNumber: "",
+    iban: "",
+    rawText: "Bank details\nBIC: RABO NL 2U\nInvoice INV-BIC-001",
+    invoiceNumber: "INV-BIC-001",
+  });
+  const booking = generatePurchaseJournalBooking(
+    invoice,
+    [invoice],
+    createInitialLearningStore(),
+    masterData
+  );
+
+  assert.equal(booking.supplierResolution.selectedAccountId, "supplier_bic_match");
+  assert.equal(booking.supplierResolution.method, "BIC");
+});
+
+test("matches an imported supplier by a labeled supplier code", () => {
+  const masterData = {
+    ...exactMasterData,
+    suppliers: [
+      supplierAccount({
+        id: "supplier_code_match",
+        code: "90004",
+        name: "Code Matched Supplier",
+        isSupplier: true,
+      }),
+    ],
+  };
+  const invoice = uploadedInvoice({}, {
+    supplierName: "Unknown invoice supplier",
+    supplierVatNumber: "",
+    iban: "",
+    rawText: "Supplier code: 90004\nInvoice number: INV-CODE-001",
+    invoiceNumber: "INV-CODE-001",
+  });
+  const booking = generatePurchaseJournalBooking(
+    invoice,
+    [invoice],
+    createInitialLearningStore(),
+    masterData
+  );
+
+  assert.equal(booking.supplierResolution.selectedAccountId, "supplier_code_match");
+  assert.equal(booking.supplierResolution.method, "Supplier code");
+});
+
+test("matches an imported supplier by address when stronger identifiers are absent", () => {
+  const masterData = {
+    ...exactMasterData,
+    suppliers: [
+      supplierAccount({
+        id: "supplier_address_match",
+        code: "90005",
+        name: "Address Matched Supplier",
+        address: "Coolsingel 88, Rotterdam",
+        city: "Rotterdam",
+        country: "NL",
+        isSupplier: true,
+      }),
+    ],
+  };
+  const invoice = uploadedInvoice({}, {
+    supplierName: "Unknown invoice supplier",
+    supplierVatNumber: "",
+    iban: "",
+    supplierAddress: "Coolsingel 88, 3011 AD Rotterdam",
+    supplierCountry: "NL",
+    invoiceNumber: "INV-ADDRESS-001",
+  });
+  const booking = generatePurchaseJournalBooking(
+    invoice,
+    [invoice],
+    createInitialLearningStore(),
+    masterData
+  );
+
+  assert.equal(booking.supplierResolution.selectedAccountId, "supplier_address_match");
+  assert.equal(booking.supplierResolution.method, "Address");
+});
+
+test("requires review when city and country identify multiple imported suppliers", () => {
+  const masterData = {
+    ...exactMasterData,
+    suppliers: [
+      supplierAccount({
+        id: "supplier_city_a",
+        code: "90006",
+        name: "Rotterdam Supplier One",
+        city: "Rotterdam",
+        country: "NL",
+        isSupplier: true,
+      }),
+      supplierAccount({
+        id: "supplier_city_b",
+        code: "90007",
+        name: "Rotterdam Supplier Two",
+        city: "Rotterdam",
+        country: "NL",
+        isSupplier: true,
+      }),
+    ],
+  };
+  const invoice = uploadedInvoice({}, {
+    supplierName: "Unknown invoice supplier",
+    supplierVatNumber: "",
+    iban: "",
+    supplierAddress: "Rotterdam",
+    supplierCountry: "NL",
+    invoiceNumber: "INV-CITY-001",
+  });
+  const booking = generatePurchaseJournalBooking(
+    invoice,
+    [invoice],
+    createInitialLearningStore(),
+    masterData
+  );
+
+  assert.equal(booking.supplierResolution.selectedAccountId, undefined);
+  assert.equal(booking.supplierResolution.reviewRequired, true);
+  assert.equal(
+    booking.supplierResolution.reasoning[0],
+    "Multiple supplier matches found. Please choose the correct supplier."
+  );
+  assert.equal(booking.supplierResolution.candidates.length, 2);
+});
+
+test("does not match an imported account that is not marked as a supplier", () => {
+  const masterData = {
+    ...exactMasterData,
+    suppliers: [
+      supplierAccount({
+        id: "customer_only",
+        code: "90008",
+        name: "Customer Only Account",
+        isSupplier: false,
+      }),
+    ],
+  };
+  const invoice = uploadedInvoice({}, {
+    supplierName: "Customer Only Account",
+    supplierVatNumber: "",
+    iban: "",
+    invoiceNumber: "INV-CUSTOMER-001",
+  });
+  const booking = generatePurchaseJournalBooking(
+    invoice,
+    [invoice],
+    createInitialLearningStore(),
+    masterData
+  );
+
+  assert.equal(booking.supplierResolution.selectedAccountId, undefined);
+  assert.equal(booking.supplierResolution.reviewRequired, true);
 });
 
 test("uses learned supplier decisions to unblock future ambiguous matches", () => {
@@ -1015,7 +1253,7 @@ test("final Exact booking gate rejects every required booking blocker", async (t
           },
         ];
       },
-      expected: /multiple Exact suppliers/i,
+      expected: /multiple supplier matches/i,
     },
     {
       name: "Your ref is missing",

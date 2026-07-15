@@ -7,6 +7,7 @@ import {
 } from "../lib/domain/invoice";
 import {
   amountToMinorUnits,
+  BOOKING_TOTAL_MISMATCH_MESSAGE,
   validateInvoiceData,
 } from "../lib/services/invoice-validation";
 import {
@@ -45,7 +46,8 @@ test("does not allow rounding differences in the gross amount", () => {
     []
   );
 
-  assert.equal(errors.some((error) => error.field === "grossAmount"), true);
+  const mismatch = errors.find((error) => error.field === "grossAmount");
+  assert.equal(mismatch?.message, BOOKING_TOTAL_MISMATCH_MESSAGE);
 });
 
 test("rejects amounts that need rounding instead of exact cents", () => {
@@ -56,6 +58,257 @@ test("parses European and English invoice amounts as exact cents", () => {
   assert.equal(amountToMinorUnits("€1.234,56"), 123456);
   assert.equal(amountToMinorUnits("€1,234.56"), 123456);
   assert.equal(amountToMinorUnits("1 234,56 EUR"), 123456);
+  assert.equal(amountToMinorUnits("1.234,56 PLN"), 123456);
+  assert.equal(amountToMinorUnits("\u20ac1.234,56"), 123456);
+  assert.equal(amountToMinorUnits("\u20ac1,234.56"), 123456);
+});
+
+test("extracts the nearest labelled amounts from a compact summary row", async () => {
+  const data = await extractInvoiceData({
+    name: "invoice-compact-summary.xml",
+    type: "application/xml",
+    size: 1000,
+    text: async () =>
+      [
+        "Invoice number: COMPACT-2026-001",
+        "Subtotal \u20ac1.234,56 VAT 21% \u20ac259,26 Total \u20ac1.493,82",
+        "Payment terms: 30 days",
+      ].join("\n"),
+  });
+
+  assert.equal(data.netAmount, 1234.56);
+  assert.equal(data.vatAmount, 259.26);
+  assert.equal(data.grossAmount, 1493.82);
+});
+
+test("extracts Amazon-style summary values split across nearby lines", async () => {
+  const data = await extractInvoiceData({
+    name: "invoice-amazon-summary.xml",
+    type: "application/xml",
+    size: 1000,
+    text: async () =>
+      [
+        "Invoice number: AMAZON-2026-001",
+        "Invoice Summary Invoice Amount Due",
+        "500,15 EUR",
+        "Subtotal 500,15 EUR",
+        "VAT(0%) - GERMANY 0,00 EUR",
+        "Tax Subtotal 0,00 EUR",
+        "Total Amount Due 500,15 EUR",
+      ].join("\n"),
+  });
+
+  assert.equal(data.netAmount, 500.15);
+  assert.equal(data.vatAmount, 0);
+  assert.equal(data.grossAmount, 500.15);
+});
+
+test("uses the invoice total instead of a zero post-payment balance", async () => {
+  const data = await extractInvoiceData({
+    name: "invoice-paid.xml",
+    type: "application/xml",
+    size: 1000,
+    text: async () =>
+      [
+        "Invoice number: PAID-2026-001",
+        "Subtotal \u20ac55.00",
+        "VAT (0%) \u20ac0.00",
+        "Invoice Amount \u20ac55.00 (EUR)",
+        "Total \u20ac55.00",
+        "Payments (\u20ac55.00)",
+        "Amount Due \u20ac0.00",
+      ].join("\n"),
+  });
+
+  assert.equal(data.netAmount, 55);
+  assert.equal(data.vatAmount, 0);
+  assert.equal(data.grossAmount, 55);
+});
+
+test("extracts Dutch tax summary labels without using item-row numbers", async () => {
+  const data = await extractInvoiceData({
+    name: "invoice-dutch-summary.xml",
+    type: "application/xml",
+    size: 1000,
+    text: async () =>
+      [
+        "Factuurnummer: NL-2026-001",
+        "PRODUCT HOEVEELHEID PRIJS NETTO BEDRAG BELASTING TOTAAL",
+        "Acrobat Pro 1 19.99 19.99 0.00% 0.00 19.99",
+        "FACTUURTOTAAL",
+        "NETTO BEDRAG (EUR) 19.99",
+        "BELASTING (ZIE DETAILS) 0.00",
+        "TOTAAL (EUR) 19.99",
+      ].join("\n"),
+  });
+
+  assert.equal(data.netAmount, 19.99);
+  assert.equal(data.vatAmount, 0);
+  assert.equal(data.grossAmount, 19.99);
+});
+
+test("keeps an explicit invoice total when a later line-item total is present", async () => {
+  const data = await extractInvoiceData({
+    name: "invoice-later-line-total.xml",
+    type: "application/xml",
+    size: 1000,
+    text: async () =>
+      [
+        "Invoice number: TOTAL-2026-001",
+        "Net amount 100.00",
+        "VAT amount 21.00",
+        "Invoice total 121.00",
+        "Item A line total 40.00",
+      ].join("\n"),
+  });
+
+  assert.equal(data.netAmount, 100);
+  assert.equal(data.vatAmount, 21);
+  assert.equal(data.grossAmount, 121);
+});
+
+test("does not use a VAT total as the invoice total", async () => {
+  const data = await extractInvoiceData({
+    name: "invoice-without-final-total.xml",
+    type: "application/xml",
+    size: 1000,
+    text: async () =>
+      [
+        "Invoice number: NO-TOTAL-2026-001",
+        "Net amount 100.00",
+        "VAT Total 21.00",
+        "Item A 100.00",
+      ].join("\n"),
+  });
+
+  assert.equal(data.netAmount, 100);
+  assert.equal(data.vatAmount, 21);
+  assert.equal(data.grossAmount, null);
+});
+
+test("extracts the exact red-box summary amounts from representative invoice layouts", async () => {
+  const examples = [
+    {
+      name: "dutch-three-column-total.xml",
+      text: [
+        "Te betalen inclusief btw 156,78",
+        "Omschrijving Btw Exclusief btw Btw-bedrag Inclusief btw",
+        "Boodschappen, zie specificatie 9% 136,70 12,28 148,98",
+        "Totaal 144,10 12,68 156,78",
+      ].join("\n"),
+      expected: [144.1, 12.68, 156.78],
+    },
+    {
+      name: "dutch-explicit-excl-incl.xml",
+      text: [
+        "Subtotaal EUR 271,80",
+        "Toeslagen EUR 7,30",
+        "Totaal (excl. BTW) EUR 279,10",
+        "BTW 21,0% EUR 58,61",
+        "Totaal (incl. BTW) EUR 337,71",
+      ].join("\n"),
+      expected: [279.1, 58.61, 337.71],
+    },
+    {
+      name: "dutch-adjacent-summary-columns.xml",
+      text: [
+        "Subtotaal btw Totaal",
+        "EUR 110,70 EUR 23,25 EUR 133,95",
+        "Totaal te betalen EUR 133,95",
+      ].join("\n"),
+      expected: [110.7, 23.25, 133.95],
+    },
+    {
+      name: "english-zero-vat-summary.xml",
+      text: [
+        "Subtotal EUR 28.00",
+        "VAT 0.0% EUR 0.00",
+        "Total EUR 28.00",
+      ].join("\n"),
+      expected: [28, 0, 28],
+    },
+    {
+      name: "dutch-payable-summary.xml",
+      text: [
+        "Totaal excl. BTW 2.907,87",
+        "BTW 0,00",
+        "Te betalen (EUR) 2.907,87",
+      ].join("\n"),
+      expected: [2907.87, 0, 2907.87],
+    },
+    {
+      name: "negative-credit-summary.xml",
+      text: [
+        "Total excl. VAT: -EUR 139,20",
+        "21,00% VAT -EUR 29,23",
+        "To receive: -EUR 168,43",
+      ].join("\n"),
+      expected: [-139.2, -29.23, -168.43],
+    },
+  ] as const;
+
+  for (const example of examples) {
+    const data = await extractInvoiceData({
+      name: example.name,
+      type: "application/xml",
+      size: example.text.length,
+      text: async () => example.text,
+    });
+
+    assert.deepEqual(
+      [data.netAmount, data.vatAmount, data.grossAmount],
+      example.expected,
+      example.name
+    );
+  }
+});
+
+test("uses a clear first-page summary instead of totals on irrelevant later pages", async () => {
+  const data = await extractInvoiceData({
+    name: "multi-page-first-summary.xml",
+    type: "application/xml",
+    size: 1000,
+    text: async () =>
+      [
+        [
+          "Invoice number: MULTI-FIRST-001",
+          "Net amount 100.00",
+          "VAT amount 21.00",
+          "Invoice total 121.00",
+        ].join("\n"),
+        "Line item appendix\nLine total 40.00",
+        "Previous invoice total 999.00\nHistorical balance due 0.00",
+      ].join("\f"),
+  });
+
+  assert.deepEqual(
+    [data.netAmount, data.vatAmount, data.grossAmount],
+    [100, 21, 121]
+  );
+});
+
+test("prioritizes a clear last-page payable summary over a first-page total", async () => {
+  const data = await extractInvoiceData({
+    name: "multi-page-last-summary.xml",
+    type: "application/xml",
+    size: 1000,
+    text: async () =>
+      [
+        "Invoice total shown in order history 999.00",
+        "--- PAGE 2 ---\nItem A 80.00\nItem B 120.00",
+        [
+          "--- PAGE 3 ---",
+          "Subtotal 200.00",
+          "VAT amount 42.00",
+          "Amount due 242.00",
+        ].join("\n"),
+      ].join("\f"),
+  });
+
+  assert.deepEqual(
+    [data.netAmount, data.vatAmount, data.grossAmount],
+    [200, 42, 242]
+  );
 });
 
 test("extracts the exact European net, VAT, and printed invoice total", async () => {

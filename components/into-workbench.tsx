@@ -27,6 +27,7 @@ import type {
   PermissionAction,
   PurchaseJournalLine,
   PublicExactConnection,
+  SupplierOverviewImportStatus,
   UploadedInvoice,
   ValidationError,
 } from "../lib/domain/invoice";
@@ -53,6 +54,7 @@ type ApiState = {
   exactMasterData: ExactMasterDataCache | null;
   exactMasterDataStale: boolean;
   exactMasterDataReadOnly: boolean;
+  supplierOverviewImport: SupplierOverviewImportStatus | null;
   exactConfiguration: {
     ready: boolean;
     missingEnv: string[];
@@ -1101,6 +1103,7 @@ function PreviewDocument({
 
 export function IntoWorkbench() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const supplierOverviewInputRef = useRef<HTMLInputElement | null>(null);
   const previewViewportRef = useRef<HTMLDivElement | null>(null);
   const previewDragStartRef = useRef<{
     x: number;
@@ -1115,6 +1118,7 @@ export function IntoWorkbench() {
     exactMasterData: null,
     exactMasterDataStale: true,
     exactMasterDataReadOnly: true,
+    supplierOverviewImport: null,
     exactConfiguration: null,
   });
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<string>("");
@@ -1164,11 +1168,16 @@ export function IntoWorkbench() {
     return previewFileProbe.status;
   }, [previewFileProbe, selectedInvoice]);
   const selectedPurchaseJournal = selectedInvoice?.purchaseJournal ?? null;
+  const matchedSupplierLabel =
+    selectedPurchaseJournal?.supplierResolution.selectedAccountCode &&
+    selectedPurchaseJournal.supplierResolution.selectedAccountName
+      ? `${selectedPurchaseJournal.supplierResolution.selectedAccountCode} - ${selectedPurchaseJournal.supplierResolution.selectedAccountName}`
+      : "";
   const currentCurrency =
     draft?.currency || selectedPurchaseJournal?.currency || "EUR";
   const confidenceThreshold = selectedPurchaseJournal?.confidenceThreshold;
   const supplierOptions: SelectOption[] = (state.exactMasterData?.suppliers ?? [])
-    .filter((supplier) => supplier.name)
+    .filter((supplier) => supplier.name && supplier.isSupplier !== false)
     .map((supplier) => ({
       value: supplier.name,
       label: `${supplier.code} - ${supplier.name}`,
@@ -1304,7 +1313,7 @@ export function IntoWorkbench() {
     ["grossAmount"],
     [
       selectedPurchaseJournal?.totals.difference
-        ? "Total amount does not match invoice total."
+        ? BOOKING_TOTAL_MISMATCH_MESSAGE
         : undefined,
     ]
   );
@@ -1704,6 +1713,7 @@ export function IntoWorkbench() {
       masterData: ExactMasterDataCache | null;
       masterDataStale: boolean;
       masterDataReadOnly: boolean;
+      supplierOverviewImport: SupplierOverviewImportStatus | null;
       configuration: NonNullable<ApiState["exactConfiguration"]>;
     };
     setState({
@@ -1713,6 +1723,7 @@ export function IntoWorkbench() {
       exactMasterData: exactData.masterData,
       exactMasterDataStale: exactData.masterDataStale,
       exactMasterDataReadOnly: exactData.masterDataReadOnly,
+      supplierOverviewImport: exactData.supplierOverviewImport,
       exactConfiguration: exactData.configuration,
     });
 
@@ -2612,6 +2623,57 @@ export function IntoWorkbench() {
     });
   }
 
+  async function importSupplierOverview(file: File) {
+    setBusy("supplier-overview-import");
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const response = await fetch("/api/exact/suppliers/import", {
+        method: "POST",
+        body: formData,
+      });
+      const data = (await response.json()) as {
+        supplierOverviewImport?: SupplierOverviewImportStatus;
+        masterData?: ExactMasterDataCache;
+        invoices?: UploadedInvoice[];
+        error?: string;
+      };
+      if (!response.ok) {
+        throw new Error(data.error ?? "Supplier overview import failed.");
+      }
+
+      setState((current) => ({
+        ...current,
+        invoices: data.invoices ?? current.invoices,
+        exactMasterData: data.masterData ?? current.exactMasterData,
+        exactMasterDataStale: data.masterData
+          ? new Date(data.masterData.staleAfter).getTime() <= Date.now()
+          : current.exactMasterDataStale,
+        supplierOverviewImport:
+          data.supplierOverviewImport ?? current.supplierOverviewImport,
+      }));
+      setMessage(
+        `Imported ${data.supplierOverviewImport?.supplierCount ?? 0} Exact suppliers from ${file.name}.`
+      );
+      flashButton("supplier-overview-import", "success");
+    } catch (error) {
+      setMessage(
+        error instanceof Error ? error.message : "Supplier overview import failed."
+      );
+      flashButton("supplier-overview-import", "error");
+    } finally {
+      setBusy("");
+      if (supplierOverviewInputRef.current) {
+        supplierOverviewInputRef.current.value = "";
+      }
+    }
+  }
+
+  function handleSupplierOverviewInput(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (file) importSupplierOverview(file);
+  }
+
   function updateBookingLineAmount(
     index: number,
     field: "amount" | "vatAmount",
@@ -3109,6 +3171,27 @@ export function IntoWorkbench() {
                       Exact master data has not been synced yet.
                     </div>
                   )}
+                  <div className="mt-3 rounded-md border border-stone-200 bg-stone-50 p-3 text-xs text-stone-600">
+                    <div className="font-semibold text-stone-800">
+                      Exact supplier overview
+                    </div>
+                    {state.supplierOverviewImport ? (
+                      <>
+                        <div className="mt-1">
+                          {state.supplierOverviewImport.supplierCount} suppliers imported
+                          from {state.supplierOverviewImport.sourceFileName}
+                        </div>
+                        <div className="mt-1">
+                          Last imported {formatTimestamp(state.supplierOverviewImport.importedAt)}
+                        </div>
+                      </>
+                    ) : (
+                      <div className="mt-1">
+                        Import the Exact Accounts supplier overview (.xlsx) to improve
+                        supplier matching.
+                      </div>
+                    )}
+                  </div>
                   <div className="mt-4 flex flex-wrap gap-2">
                     <ActionButton
                       variant="outline"
@@ -3143,6 +3226,28 @@ export function IntoWorkbench() {
                     >
                       Sync Exact master data
                     </ActionButton>
+                    <ActionButton
+                      variant="outline"
+                      onClick={() => supplierOverviewInputRef.current?.click()}
+                      loading={busy === "supplier-overview-import"}
+                      feedback={buttonFeedbackFor(
+                        "supplier-overview-import",
+                        "supplier-overview-import"
+                      )}
+                      disabled={busy === "supplier-overview-import"}
+                      disabledReason="Supplier overview import is already running."
+                    >
+                      {state.supplierOverviewImport
+                        ? "Re-import supplier overview"
+                        : "Import supplier overview"}
+                    </ActionButton>
+                    <input
+                      ref={supplierOverviewInputRef}
+                      className="sr-only"
+                      type="file"
+                      accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                      onChange={handleSupplierOverviewInput}
+                    />
                     <ActionButton
                       variant="danger"
                       onClick={disconnectExact}
@@ -4025,8 +4130,8 @@ export function IntoWorkbench() {
                       disabled={!hasPermission("edit")}
                       issue={supplierFieldIssue}
                       helper={
-                        selectedPurchaseJournal?.supplierResolution.selectedAccountName
-                          ? `Exact account: ${selectedPurchaseJournal.supplierResolution.selectedAccountName}`
+                        matchedSupplierLabel
+                          ? `Exact supplier: ${matchedSupplierLabel}`
                           : "Search synced Exact supplier accounts."
                       }
                       confidence={
@@ -4373,7 +4478,7 @@ export function IntoWorkbench() {
                       <div className="mt-3 grid gap-2 rounded-lg border border-stone-200 bg-white p-3 text-sm sm:grid-cols-2 xl:grid-cols-5">
                         <div>
                           <div className="text-xs font-semibold text-stone-500">
-                            Net total
+                            Net amount
                           </div>
                           <div className="mt-1 font-semibold text-stone-900">
                             {formatMoney(bookingLineTotals.lineAmount, currentCurrency)}
@@ -4381,7 +4486,7 @@ export function IntoWorkbench() {
                         </div>
                         <div>
                           <div className="text-xs font-semibold text-stone-500">
-                            VAT total
+                            VAT amount
                           </div>
                           <div className="mt-1 font-semibold text-stone-900">
                             {formatMoney(bookingLineTotals.vatAmount, currentCurrency)}
@@ -4389,18 +4494,18 @@ export function IntoWorkbench() {
                         </div>
                         <div>
                           <div className="text-xs font-semibold text-stone-500">
-                            Booking calculated total
+                            Total amount from invoice
                           </div>
                           <div className="mt-1 font-semibold text-stone-900">
-                            {formatMoney(bookingLineTotals.grossAmount, currentCurrency)}
+                            {formatMoney(bookingLineTotals.invoiceTotal, currentCurrency)}
                           </div>
                         </div>
                         <div>
                           <div className="text-xs font-semibold text-stone-500">
-                            Invoice total
+                            Calculated booking total
                           </div>
                           <div className="mt-1 font-semibold text-stone-900">
-                            {formatMoney(bookingLineTotals.invoiceTotal, currentCurrency)}
+                            {formatMoney(bookingLineTotals.grossAmount, currentCurrency)}
                           </div>
                         </div>
                         <div>
@@ -4690,8 +4795,7 @@ export function IntoWorkbench() {
                           Supplier
                         </div>
                         <div className="mt-1 font-semibold">
-                          {selectedPurchaseJournal.supplierResolution
-                            .selectedAccountName ?? "Review required"}
+                          {matchedSupplierLabel || "Review required"}
                         </div>
                         <div className="mt-1 text-xs text-stone-500">
                           {selectedPurchaseJournal.supplierResolution.method} -{" "}
@@ -4765,6 +4869,10 @@ export function IntoWorkbench() {
                           >
                             <option value="">Select an Exact supplier...</option>
                             {(state.exactMasterData?.suppliers ?? [])
+                              .filter(
+                                (supplier) =>
+                                  supplier.name && supplier.isSupplier !== false
+                              )
                               .slice()
                               .sort((left, right) =>
                                 left.name.localeCompare(right.name)

@@ -514,6 +514,7 @@ function mapSupplier(value: unknown): ExactSupplierAccount {
     name: valueOf(record, ["Name", "AccountName", "SupplierName"]),
     vatNumber: valueOf(record, ["VATNumber", "VatNumber", "TaxNumber"]),
     iban: valueOf(record, ["IBAN", "Iban", "BankAccountIBAN", "BankAccount"]),
+    bicCode: valueOf(record, ["BICCode", "BIC", "BankAccountBIC"]),
     chamberOfCommerceNumber: valueOf(record, [
       "ChamberOfCommerce",
       "ChamberOfCommerceNumber",
@@ -526,7 +527,9 @@ function mapSupplier(value: unknown): ExactSupplierAccount {
     ]
       .filter(Boolean)
       .join(", "),
+    city: valueOf(record, ["City"]),
     country: valueOf(record, ["Country", "CountryCode"]),
+    isSupplier: booleanValueOf(record, ["IsSupplier", "Supplier"], true),
     paymentConditionCode,
     paymentConditionLabel:
       valueOf(record, [

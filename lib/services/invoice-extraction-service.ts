@@ -340,25 +340,33 @@ function xmlAmount(input: string, names: string[]) {
   return null;
 }
 
-function lastAmountOnLine(value: string) {
-  const matches = [
+function amountsOnLine(value: string) {
+  return [
     ...value.matchAll(
-      /(?:EUR|USD|GBP|CHF|€|\$|£)?\s*-?\d[\d.,'\s\u00a0]*(?:\s*(?:EUR|USD|GBP|CHF))?/gi
+      /(?:-\s*)?(?:(?:EUR|USD|GBP|CHF|AUD|CAD|PLN|SEK|NOK|DKK|CZK|HUF|RON|BGN)|\u20ac|\$|\u00a3)?\s*-?(?:\d{1,3}(?:[.,' \u00a0]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)(?:\s*(?:EUR|USD|GBP|CHF|AUD|CAD|PLN|SEK|NOK|DKK|CZK|HUF|RON|BGN))?/gi
     ),
-  ];
+  ].flatMap((match) => {
+    const index = match.index ?? 0;
+    const suffix = value.slice(index + match[0].length).trimStart();
+    const amount = suffix.startsWith("%") ? null : parsedAmount(match[0]);
+    return amount === null
+      ? []
+      : [{ amount, index, end: index + match[0].length }];
+  });
+}
 
-  for (const match of matches.reverse()) {
-    const suffix = value.slice((match.index ?? 0) + match[0].length).trimStart();
-    if (suffix.startsWith("%")) {
-      continue;
-    }
-    const amount = parsedAmount(match[0]);
-    if (amount !== null) {
-      return amount;
-    }
+function amountOnlyLine(value: string) {
+  const matches = amountsOnLine(value);
+  if (matches.length !== 1) {
+    return null;
   }
 
-  return null;
+  const match = matches[0];
+  const remainder = `${value.slice(0, match.index)} ${value.slice(match.end)}`
+    .replace(/\b[A-Z]{3}\b/gi, "")
+    .replace(/[()[\]:-]/g, "")
+    .trim();
+  return remainder ? null : match.amount;
 }
 
 function labelledAmount(
@@ -366,35 +374,82 @@ function labelledAmount(
   labels: RegExp[],
   excludedLine?: RegExp
 ) {
-  const candidates: number[] = [];
+  const lines = input.replace(/\r/g, "").split("\n");
 
-  for (const line of input.replace(/\r/g, "\n").split(/\n+/)) {
-    if (excludedLine?.test(line)) {
-      continue;
-    }
-    for (const label of labels) {
+  for (const label of labels) {
+    const candidates: number[] = [];
+    for (const [lineIndex, line] of lines.entries()) {
+      if (excludedLine?.test(line)) {
+        continue;
+      }
       const match = label.exec(line);
       if (!match) {
         continue;
       }
-      const amount = lastAmountOnLine(line.slice(match.index + match[0].length));
-      if (amount !== null) {
-        candidates.push(amount);
+
+      const afterLabel = amountsOnLine(
+        line.slice(match.index + match[0].length)
+      )[0]?.amount;
+      if (afterLabel !== undefined) {
+        candidates.push(afterLabel);
+        continue;
       }
-      break;
+
+      const nextLineAmount = amountOnlyLine(lines[lineIndex + 1] ?? "");
+      if (nextLineAmount !== null) {
+        candidates.push(nextLineAmount);
+        continue;
+      }
+
+      const beforeLabel = amountsOnLine(line.slice(0, match.index)).at(-1)?.amount;
+      if (beforeLabel !== undefined) {
+        candidates.push(beforeLabel);
+      }
+    }
+
+    if (candidates.length) {
+      return candidates.at(-1) ?? null;
     }
   }
 
-  return candidates.at(-1) ?? null;
+  return null;
 }
 
-function extractInvoiceAmounts(input: string) {
+function summaryRowAmounts(input: string) {
+  const lines = input.replace(/\r/g, "").split("\n");
+
+  for (const [lineIndex, line] of lines.entries()) {
+    const isTotalRow = /^\s*(?:total|totaal)\b/i.test(line);
+    const isSummaryHeader =
+      /\b(?:sub\s*total|subtotaal)\b/i.test(line) &&
+      /\b(?:vat|btw)\b/i.test(line) &&
+      /\b(?:total|totaal)\b/i.test(line);
+    const values = amountsOnLine(
+      isSummaryHeader ? lines[lineIndex + 1] ?? "" : line
+    ).map(({ amount }) => amount);
+
+    if ((isTotalRow || isSummaryHeader) && values.length >= 3) {
+      const [netAmount, vatAmount, grossAmount] = values.slice(-3);
+      return { netAmount, vatAmount, grossAmount };
+    }
+  }
+
+  return null;
+}
+
+function extractInvoiceAmountsFromSection(input: string) {
   const taxTotal = /<(?:[a-z0-9_.-]+:)?TaxTotal\b[^>]*>([\s\S]*?)<\/(?:[a-z0-9_.-]+:)?TaxTotal>/i.exec(
     input
   )?.[1];
+  const summary = summaryRowAmounts(input);
   const netAmount =
     xmlAmount(input, ["TaxExclusiveAmount"]) ??
+    summary?.netAmount ??
     labelledAmount(input, [
+      /\b(?:total|totaal)\s*\(?(?:excl\.?|excluding|exclusief)\s*(?:vat|tax|btw)\)?\b/i,
+      /\btotal\s+excl\.?\s*(?:vat|tax)\b/i,
+      /\btotal\s+excluding\s+(?:vat|tax)\b/i,
+      /\bamount\s*\(?(?:excl\.?|excluding)\s+(?:vat|tax)\)?\b/i,
       /\bnet amount\b/i,
       /\bsub\s*total\b/i,
       /\bnetto(?:\s+bedrag)?\b/i,
@@ -404,29 +459,46 @@ function extractInvoiceAmounts(input: string) {
       /\bnetto\s*betrag\b/i,
       /\bsous-total\b/i,
       /\bimponibile\b/i,
-    ]);
+    ], /\b(?:tax|vat|btw)\s+sub\s*total\b/i);
   const vatAmount =
     (taxTotal ? xmlAmount(taxTotal, ["TaxAmount"]) : null) ??
-    labelledAmount(input, [
-      /\bvat\s+(?:amount|total)\b/i,
-      /\btax\s+amount\b/i,
-      /\bbtw(?:\s+bedrag)?\b/i,
-      /\bmwst\b/i,
-      /\bust\b/i,
-      /\btva\b/i,
-      /\biva\b/i,
-    ]);
-  const grossAmount =
-    xmlAmount(input, ["PayableAmount", "TaxInclusiveAmount"]) ??
+    summary?.vatAmount ??
     labelledAmount(
       input,
       [
+        /\bvat\s+(?:amount|total)\b/i,
+        /\btotal\s+vat\b/i,
+        /\btax\s+(?:amount|total|subtotal)\b/i,
+        /\bbtw(?:\s+(?:bedrag|totaal))?\b/i,
+        /\bbelasting(?:\s*\([^)]*\))?\b/i,
+        /\bmwst\b/i,
+        /\bust\b/i,
+        /\btva\b/i,
+        /\biva\b/i,
+        /\bvat\b/i,
+      ],
+      /\b(?:vat|btw)\s*(?:reg(?:istration)?|number|no\.?|nr\.?|nummer)|\b(?:customer|client|supplier)\s+(?:vat|btw)\b|\b(?:incl\.?|excl\.?|inclusief|exclusief)\s*(?:vat|btw)\b/i
+    );
+  const grossAmount =
+    xmlAmount(input, ["PayableAmount", "TaxInclusiveAmount"]) ??
+    summary?.grossAmount ??
+    labelledAmount(
+      input,
+      [
+        /\binvoice\s+amount\s+due\b/i,
+        /\binvoice\s+amount\b/i,
         /\binvoice\s+total\b/i,
+        /\btotal\s+amount\s+due\b/i,
         /\btotal\s+amount\b/i,
         /\bgrand\s+total\b/i,
+        /\b(?:amount|total)\s+payable\b/i,
+        /\bpayable\s+amount\b/i,
         /\bamount\s+due\b/i,
         /\bbalance\s+due\b/i,
+        /\bto\s+receive\b/i,
         /\bfactuurtotaal\b/i,
+        /\bfactuurbedrag\b/i,
+        /\btotaalbedrag\b/i,
         /\btotaal(?:\s+factuur|\s+te\s+betalen)?\b/i,
         /\bte\s+betalen\b/i,
         /\bgesamtbetrag\b/i,
@@ -434,12 +506,84 @@ function extractInvoiceAmounts(input: string) {
         /\bmontant\s+total\b/i,
         /\btotal\s+(?:facture|a\s+pagar|factura)\b/i,
         /\btotale(?:\s+fattura|\s+da\s+pagare)?\b/i,
-        /\btotal\b/i,
-      ],
-      /\b(?:sub\s*total|subtotaal|vat|btw|tax|excl|exclusive|net)\b/i
+        /(?:^|(?<!vat)(?<!tax)(?<!btw)(?<!net)(?<!line)\s)total\b(?!\s+(?:vat|tax|btw)\b)/i,
+      ]
     );
 
   return { netAmount, vatAmount, grossAmount };
+}
+
+function invoicePages(input: string) {
+  const pages = input
+    .split(
+      /\f|(?:^|\n)\s*(?:[-=]{2,}\s*)?(?:page|pagina)\s+\d+(?:\s+(?:of|van)\s+\d+)?(?:\s*[-=]{2,})?\s*(?=\n|$)/gim
+    )
+    .map((page) => page.trim())
+    .filter(Boolean);
+  return pages.length ? pages : [input];
+}
+
+function amountPageSignals(page: string, index: number, pageCount: number) {
+  const hasFinalTotal =
+    /\b(?:total\s+amount|invoice\s+total|amount\s+due|balance\s+due|total\s+due|totaalbedrag|te\s+betalen|factuurbedrag|factuurtotaal|to\s+receive)\b/i.test(
+      page
+    ) || /(?:^|\n)\s*(?:total|totaal)\b/im.test(page);
+  const hasNetTotal =
+    /\b(?:sub\s*total|subtotaal|net\s+amount)\b/i.test(page) ||
+    /\bexcl\.?\s*(?:vat|btw)\b/i.test(page);
+  const hasVatTotal = /\b(?:vat(?:\s+amount)?|btw)\b/i.test(page);
+  const hasSummaryRow = summaryRowAmounts(page) !== null;
+  const edgePriority = index === pageCount - 1 ? 3 : index === 0 ? 2 : 0;
+  const score =
+    (hasSummaryRow ? 30 : 0) +
+    (hasFinalTotal ? 20 : 0) +
+    (hasNetTotal ? 8 : 0) +
+    (hasVatTotal ? 8 : 0) +
+    edgePriority;
+
+  return {
+    clear: hasSummaryRow || (hasFinalTotal && (hasNetTotal || hasVatTotal)),
+    score,
+  };
+}
+
+function extractInvoiceAmounts(input: string) {
+  const pages = invoicePages(input);
+  if (pages.length === 1) {
+    return extractInvoiceAmountsFromSection(input);
+  }
+
+  const rankedPages = pages
+    .map((page, index) => ({
+      page,
+      ...amountPageSignals(page, index, pages.length),
+    }))
+    .sort((left, right) => right.score - left.score);
+  const clearSummary = rankedPages.find(({ clear }) => clear);
+  if (clearSummary) {
+    return extractInvoiceAmountsFromSection(clearSummary.page);
+  }
+
+  const merged: ReturnType<typeof extractInvoiceAmountsFromSection> = {
+    netAmount: null,
+    vatAmount: null,
+    grossAmount: null,
+  };
+  for (const { page } of rankedPages) {
+    const candidate = extractInvoiceAmountsFromSection(page);
+    merged.netAmount ??= candidate.netAmount;
+    merged.vatAmount ??= candidate.vatAmount;
+    merged.grossAmount ??= candidate.grossAmount;
+    if (
+      merged.netAmount !== null &&
+      merged.vatAmount !== null &&
+      merged.grossAmount !== null
+    ) {
+      break;
+    }
+  }
+
+  return merged;
 }
 
 export async function extractInvoiceData(

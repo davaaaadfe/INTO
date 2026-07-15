@@ -53,7 +53,7 @@ export function amountToMinorUnits(value: AmountValue) {
   const cleaned = String(value)
     .trim()
     .replace(/\u00a0/g, " ")
-    .replace(/\b(?:EUR|USD|GBP|CHF|AUD|CAD)\b/gi, "")
+    .replace(/\b(?:EUR|USD|GBP|CHF|AUD|CAD|PLN|SEK|NOK|DKK|CZK|HUF|RON|BGN)\b/gi, "")
     .replace(/[€$£¥]/g, "")
     .replace(/[\s']/g, "");
   const negative = cleaned.startsWith("-");
@@ -213,7 +213,7 @@ export function validateInvoiceData(
     errors.push(
       error(
         "grossAmount",
-        "Net amount plus VAT amount must equal gross amount exactly."
+        BOOKING_TOTAL_MISMATCH_MESSAGE
       )
     );
   }

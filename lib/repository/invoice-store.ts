@@ -22,6 +22,9 @@ import type {
   PermissionAction,
   PurchaseJournalLine,
   PublicExactConnection,
+  SupplierOverviewImport,
+  SupplierOverviewImportStatus,
+  SupplierOverviewRecord,
   UploadedInvoice,
   ValidationError,
 } from "../domain/invoice";
@@ -49,6 +52,7 @@ import {
   captureUserCorrections,
 } from "../services/correction-learning";
 import { refreshExactTokenIfNeeded } from "../services/exact-online-service";
+import { mergeSupplierOverviewWithExactSuppliers } from "../services/supplier-overview-import";
 import { createId } from "../utils/id";
 import {
   isPostgresPersistenceEnabled,
@@ -83,6 +87,7 @@ export type IntoStore = {
     userId: string;
     cache: ExactMasterDataCache;
   }>;
+  supplierOverviewImport: SupplierOverviewImport | null;
   duplicateLogs: DuplicateDecisionLog[];
   auditEvents: AuditEvent[];
   learning: BookingLearningStore;
@@ -92,8 +97,35 @@ function now() {
   return new Date().toISOString();
 }
 
-function exactMasterDataForUser(store: IntoStore, userId: string) {
-  return store.exactMasterDataCaches.find((item) => item.userId === userId)?.cache ?? null;
+function exactMasterDataForUser(
+  store: IntoStore,
+  userId: string
+): ExactMasterDataCache | null {
+  const cache =
+    store.exactMasterDataCaches.find((item) => item.userId === userId)?.cache ?? null;
+  const supplierOverview = store.supplierOverviewImport;
+  if (!supplierOverview) return cache;
+
+  const suppliers = mergeSupplierOverviewWithExactSuppliers(
+    supplierOverview.suppliers,
+    cache?.suppliers ?? []
+  );
+  if (cache) return { ...cache, suppliers };
+
+  return {
+    source: "exact-online",
+    divisionCode: "supplier-overview",
+    lastSyncedAt: supplierOverview.importedAt,
+    staleAfter: supplierOverview.importedAt,
+    suppliers,
+    paymentConditions: [],
+    journals: [],
+    glAccounts: [],
+    costCenters: [],
+    costUnits: [],
+    vatCodes: [],
+    historicalPurchaseBookings: [],
+  };
 }
 
 function createSharedUser(): IntoUser {
@@ -248,6 +280,7 @@ function createInitialStore(): IntoStore {
     ),
     exactConnections: [],
     exactMasterDataCaches: [],
+    supplierOverviewImport: null,
     duplicateLogs: [],
     auditEvents: [],
     learning: createInitialLearningStore(),
@@ -315,6 +348,9 @@ export function getStore() {
   }
   if (!Array.isArray(globalStore.__INTO_STORE.learning.corrections)) {
     globalStore.__INTO_STORE.learning.corrections = [];
+  }
+  if (globalStore.__INTO_STORE.supplierOverviewImport === undefined) {
+    globalStore.__INTO_STORE.supplierOverviewImport = null;
   }
 
   return globalStore.__INTO_STORE;
@@ -1464,6 +1500,54 @@ export function getExactMasterData(userId = COMPANY_CONNECTION_USER_ID) {
   return exactMasterDataForUser(getStore(), userId);
 }
 
+export function getSupplierOverviewImportStatus(): SupplierOverviewImportStatus | null {
+  const imported = getStore().supplierOverviewImport;
+  if (!imported) return null;
+  return {
+    sourceFileName: imported.sourceFileName,
+    importedAt: imported.importedAt,
+    supplierCount: imported.supplierCount,
+  };
+}
+
+export function replaceSupplierOverviewImport(input: {
+  sourceFileName: string;
+  suppliers: SupplierOverviewRecord[];
+  importedAt?: string;
+}) {
+  if (!input.suppliers.length) {
+    throw new Error("Supplier overview contains no supplier records.");
+  }
+
+  const store = getStore();
+  const imported: SupplierOverviewImport = {
+    sourceFileName: input.sourceFileName,
+    importedAt: input.importedAt ?? now(),
+    supplierCount: input.suppliers.length,
+    suppliers: input.suppliers,
+  };
+  store.supplierOverviewImport = imported;
+
+  for (const invoice of store.invoices) {
+    if (invoice.status !== "Uploaded" && invoice.status !== "Reading") {
+      recomputeInvoiceInStore(store, invoice.id);
+    }
+  }
+
+  addAuditEvent({
+    type: "sync_operation",
+    message: "Exact supplier overview imported from Excel.",
+    metadata: {
+      provider: "exact-supplier-overview",
+      sourceFileName: imported.sourceFileName,
+      supplierCount: imported.supplierCount,
+      importedAt: imported.importedAt,
+    },
+  });
+  persistStoreSoon();
+  return imported;
+}
+
 export function isCachedExactMasterDataStale(userId = COMPANY_CONNECTION_USER_ID) {
   return isExactMasterDataStale(getExactMasterData(userId));
 }
@@ -1504,7 +1588,7 @@ export async function syncExactDataNow(userId = COMPANY_CONNECTION_USER_ID) {
     },
   });
 
-  return cache;
+  return exactMasterDataForUser(store, userId) ?? cache;
 }
 
 export async function refreshExactConnectionForUser(userId = COMPANY_CONNECTION_USER_ID) {

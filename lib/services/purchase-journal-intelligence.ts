@@ -74,9 +74,9 @@ const companyConfig = {
 };
 
 export const SUPPLIER_NOT_MATCHED_MESSAGE =
-  "Supplier could not be matched to Exact Online master data. Please select the supplier manually.";
+  "Supplier could not be confidently matched. Please select the correct supplier.";
 export const MULTIPLE_EXACT_SUPPLIERS_MESSAGE =
-  "Multiple Exact suppliers match this invoice. Please choose the correct supplier.";
+  "Multiple supplier matches found. Please choose the correct supplier.";
 export const EXACT_HISTORY_SUGGESTION_NOTE =
   "Suggested from previous Exact bookings.";
 
@@ -133,10 +133,97 @@ function normalizedIban(value: string | null | undefined) {
   return (value ?? "").replace(/[^a-z0-9]/gi, "").toUpperCase();
 }
 
+function normalizedBic(value: string | null | undefined) {
+  return (value ?? "").replace(/[^a-z0-9]/gi, "").toUpperCase();
+}
+
+function normalizedSupplierCode(value: string | null | undefined) {
+  return (value ?? "").replace(/[^a-z0-9]/gi, "").toUpperCase();
+}
+
+function invoiceBic(data: ExtractedInvoiceData) {
+  const match = (data.rawText ?? "").match(
+    /(?:BIC|SWIFT(?:[ \t]*(?:code|number|no\.?))?)[ \t]*[:#-]?[ \t]*([A-Z]{4}[ \t]*[A-Z]{2}[ \t]*[A-Z0-9]{2}(?:[ \t]*[A-Z0-9]{3})?)/i
+  );
+  const value = normalizedBic(match?.[1]);
+  return /^[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?$/.test(value) ? value : "";
+}
+
+function invoiceSupplierCode(data: ExtractedInvoiceData) {
+  const match = (data.rawText ?? "").match(
+    /(?:supplier\s*(?:code|number|no\.?|nr\.?)|vendor\s*(?:code|number|no\.?|nr\.?)|leveranciers(?:code|nummer)|crediteur(?:code|nummer)|creditor\s*(?:code|number|no\.?|nr\.?)|account\s*code)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._\/-]{1,30})/i
+  );
+  return normalizedSupplierCode(match?.[1]);
+}
+
+function normalizedWords(value: string | null | undefined) {
+  return normalizeText(value ?? "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(Boolean);
+}
+
+function addressSimilarity(left: string, right: string) {
+  const leftWords = new Set(normalizedWords(left));
+  const rightWords = new Set(normalizedWords(right));
+  if (leftWords.size < 2 || rightWords.size < 2) {
+    return 0;
+  }
+
+  const overlap = [...leftWords].filter((word) => rightWords.has(word)).length;
+  return overlap / Math.min(leftWords.size, rightWords.size);
+}
+
+const countryAliases: Record<string, string> = {
+  belgium: "BE",
+  belgie: "BE",
+  belgique: "BE",
+  deutschland: "DE",
+  germany: "DE",
+  france: "FR",
+  nederland: "NL",
+  netherlands: "NL",
+  thenetherlands: "NL",
+  unitedkingdom: "GB",
+  uk: "GB",
+  unitedstates: "US",
+  unitedstatesofamerica: "US",
+  usa: "US",
+};
+
+function normalizedCountry(value: string | null | undefined) {
+  const compact = normalizedWords(value).join("");
+  if (!compact) {
+    return "";
+  }
+  if (compact.length === 2) {
+    return compact.toUpperCase();
+  }
+  return countryAliases[compact] ?? compact.toUpperCase();
+}
+
+function invoiceMentionsCity(data: ExtractedInvoiceData, city: string | undefined) {
+  const cityWords = normalizedWords(city).join(" ");
+  if (!cityWords) {
+    return false;
+  }
+  const source = normalizedWords(
+    `${data.supplierAddress ?? ""} ${data.rawText ?? ""}`
+  ).join(" ");
+  return ` ${source} `.includes(` ${cityWords} `);
+}
+
 function supplierIdentityKeys(data: ExtractedInvoiceData) {
   return [
     data.supplierVatNumber ? `vat:${normalizedVat(data.supplierVatNumber)}` : "",
     data.iban ? `iban:${normalizedIban(data.iban).toLowerCase()}` : "",
+    invoiceBic(data) ? `bic:${invoiceBic(data).toLowerCase()}` : "",
+    invoiceSupplierCode(data)
+      ? `code:${invoiceSupplierCode(data).toLowerCase()}`
+      : "",
     data.supplierChamberOfCommerceNumber
       ? `coc:${normalizeText(data.supplierChamberOfCommerceNumber)}`
       : "",
@@ -221,7 +308,11 @@ function nameSimilarity(left: string, right: string) {
 }
 
 function exactSuppliers(exactMasterData: ExactMasterDataCache | null) {
-  return exactMasterData?.suppliers.filter((supplier) => supplier.name) ?? [];
+  return (
+    exactMasterData?.suppliers.filter(
+      (supplier) => supplier.name && supplier.isSupplier !== false
+    ) ?? []
+  );
 }
 
 function exactGlAccount(
@@ -601,29 +692,44 @@ function resolveSupplier(
     );
   };
 
-  const dataVat = normalizedVat(data.supplierVatNumber);
-  if (dataVat) {
-    const vatResolution = considerTier(
-      suppliers.filter((account) => normalizedVat(account.vatNumber) === dataVat),
-      0.99,
-      "VAT number",
-      "VAT number matched Exact supplier master data."
-    );
-    if (vatResolution) {
-      return vatResolution;
-    }
-  }
-
   const dataIban = normalizedIban(data.iban);
   if (dataIban) {
     const ibanResolution = considerTier(
       suppliers.filter((account) => normalizedIban(account.iban) === dataIban),
-      0.98,
+      1,
       "IBAN",
-      "IBAN matched Exact supplier master data."
+      "Bank account / IBAN matched the imported Exact supplier overview."
     );
     if (ibanResolution) {
       return ibanResolution;
+    }
+  }
+
+  const dataBic = invoiceBic(data);
+  if (dataBic) {
+    const bicResolution = considerTier(
+      suppliers.filter((account) => normalizedBic(account.bicCode) === dataBic),
+      0.98,
+      "BIC",
+      "BIC matched the imported Exact supplier overview."
+    );
+    if (bicResolution) {
+      return bicResolution;
+    }
+  }
+
+  const dataSupplierCode = invoiceSupplierCode(data);
+  if (dataSupplierCode) {
+    const codeResolution = considerTier(
+      suppliers.filter(
+        (account) => normalizedSupplierCode(account.code) === dataSupplierCode
+      ),
+      0.97,
+      "Supplier code",
+      "Supplier code matched the imported Exact supplier overview."
+    );
+    if (codeResolution) {
+      return codeResolution;
     }
   }
 
@@ -639,6 +745,69 @@ function resolveSupplier(
   );
   if (learnedResolution) {
     return learnedResolution;
+  }
+
+  const nameScores = new Map(
+    suppliers.map((account) => [account.id, nameSimilarity(data.supplierName, account.name)])
+  );
+  const nameResolution = considerTier(
+    suppliers.filter(
+      (account) =>
+        (nameScores.get(account.id) ?? 0) >= companyConfig.confidenceThreshold
+    ),
+    (account) => roundMoney(nameScores.get(account.id) ?? 0),
+    "Name similarity",
+    "Supplier name matched the imported Exact supplier overview."
+  );
+  if (nameResolution) {
+    return nameResolution;
+  }
+
+  const addressScores = new Map(
+    suppliers.map((account) => [
+      account.id,
+      addressSimilarity(data.supplierAddress, account.address),
+    ])
+  );
+  const addressResolution = considerTier(
+    suppliers.filter((account) => (addressScores.get(account.id) ?? 0) >= 0.75),
+    (account) =>
+      roundMoney(0.87 + Math.min(addressScores.get(account.id) ?? 0, 1) * 0.08),
+    "Address",
+    "Supplier address matched the imported Exact supplier overview."
+  );
+  if (addressResolution) {
+    return addressResolution;
+  }
+
+  const dataCountry = normalizedCountry(data.supplierCountry);
+  const cityCountryResolution = considerTier(
+    dataCountry
+      ? suppliers.filter(
+          (account) =>
+            normalizedCountry(account.country) === dataCountry &&
+            invoiceMentionsCity(data, account.city)
+        )
+      : [],
+    0.87,
+    "City and country",
+    "Supplier city and country matched the imported Exact supplier overview."
+  );
+  if (cityCountryResolution) {
+    return cityCountryResolution;
+  }
+
+  const dataVat = normalizedVat(data.supplierVatNumber);
+  if (dataVat) {
+    const vatResolution = considerTier(
+      suppliers.filter((account) => normalizedVat(account.vatNumber) === dataVat),
+      0.96,
+      "VAT number",
+      "VAT number matched Exact supplier master data."
+    );
+    if (vatResolution) {
+      return vatResolution;
+    }
   }
 
   const historicalAccounts: ExactSupplierAccount[] = [];
@@ -681,22 +850,6 @@ function resolveSupplier(
   );
   if (historyResolution) {
     return historyResolution;
-  }
-
-  const nameScores = new Map(
-    suppliers.map((account) => [account.id, nameSimilarity(data.supplierName, account.name)])
-  );
-  const nameResolution = considerTier(
-    suppliers.filter(
-      (account) =>
-        (nameScores.get(account.id) ?? 0) >= companyConfig.confidenceThreshold
-    ),
-    (account) => roundMoney(nameScores.get(account.id) ?? 0),
-    "Name similarity",
-    "Supplier name is similar to the Exact account name."
-  );
-  if (nameResolution) {
-    return nameResolution;
   }
 
   if (matchState.unresolvedPool && matchState.unresolvedPool.length > 1) {

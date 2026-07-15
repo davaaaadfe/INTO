@@ -36,6 +36,12 @@ test("persists the complete INTO runtime snapshot in SQLite", async () => {
     invoices: [{ id: "invoice-persisted" }],
     exactConnections: [{ id: "exact-persisted" }],
     exactMasterDataCaches: [],
+    supplierOverviewImport: {
+      sourceFileName: "suppliers.xlsx",
+      importedAt: "2026-07-15T10:00:00.000Z",
+      supplierCount: 1,
+      suppliers: [{ code: "1000001", name: "Persisted supplier" }],
+    },
     duplicateLogs: [],
     auditEvents: [{ id: "audit-persisted" }],
     learning: { corrections: [] },

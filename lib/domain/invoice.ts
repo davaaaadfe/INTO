@@ -161,9 +161,12 @@ export type ExactSupplierAccount = {
   name: string;
   vatNumber: string;
   iban: string;
+  bicCode?: string;
   chamberOfCommerceNumber: string;
   address: string;
+  city?: string;
   country: string;
+  isSupplier?: boolean;
   paymentConditionCode: string;
   paymentConditionLabel: string;
   defaultGlAccount: string;
@@ -172,6 +175,29 @@ export type ExactSupplierAccount = {
   defaultCostUnit?: string;
   isInBodyEntity: boolean;
 };
+
+export type SupplierOverviewRecord = {
+  code: string;
+  name: string;
+  city: string;
+  country: string;
+  supplier: boolean;
+  bankAccount: string;
+  bicCode: string;
+  address: string;
+};
+
+export type SupplierOverviewImport = {
+  sourceFileName: string;
+  importedAt: string;
+  supplierCount: number;
+  suppliers: SupplierOverviewRecord[];
+};
+
+export type SupplierOverviewImportStatus = Omit<
+  SupplierOverviewImport,
+  "suppliers"
+>;
 
 export type ExactPaymentCondition = {
   code: string;
@@ -282,7 +308,16 @@ export type ExactMasterDataCache = {
 export type SupplierMatchCandidate = {
   account: ExactSupplierAccount;
   confidence: number;
-  method: "VAT number" | "IBAN" | "Learned decision" | "Exact history" | "Name similarity";
+  method:
+    | "VAT number"
+    | "IBAN"
+    | "BIC"
+    | "Supplier code"
+    | "Learned decision"
+    | "Exact history"
+    | "Name similarity"
+    | "Address"
+    | "City and country";
   reasoning: string[];
 };
 

@@ -1,5 +1,12 @@
-import type { ExtractedInvoiceData } from "../domain/invoice";
+import type {
+  ExtractedInvoiceData,
+  ExtractionFieldEvidence,
+} from "../domain/invoice";
 import { createId } from "../utils/id";
+import {
+  extractDocumentText,
+  type DocumentTextPage,
+} from "./invoice-document-text";
 import { amountToMinorUnits } from "./invoice-validation";
 
 export type ExtractionFileInput = {
@@ -7,6 +14,7 @@ export type ExtractionFileInput = {
   type: string;
   size: number;
   text?: () => Promise<string>;
+  arrayBuffer?: () => Promise<ArrayBuffer>;
 };
 
 type MockSupplierProfile = {
@@ -133,6 +141,9 @@ function stableNumber(input: string) {
 export type InvoiceReferenceDetection = {
   value: string;
   confidence: number;
+  sourceLabel: string;
+  rawValue: string;
+  context: string;
 };
 
 const invoiceReferenceLabelPattern = [
@@ -200,16 +211,26 @@ export function detectInvoiceReference(
   input: string
 ): InvoiceReferenceDetection | null {
   const labelledReference = new RegExp(
-    `(?:${invoiceReferenceLabelPattern})\\s*(?:nr\\.?|no\\.?)?\\s*[:#.-]?\\s*${invoiceReferenceValuePattern}`,
+    `(${invoiceReferenceLabelPattern})\\s*(?:nr\\.?|no\\.?)?\\s*[:#.-]?\\s*${invoiceReferenceValuePattern}`,
     "i"
   ).exec(input);
 
-  if (labelledReference?.[1]) {
-    const value = cleanInvoiceReferenceValue(labelledReference[1]);
+  if (labelledReference?.[2]) {
+    const value = cleanInvoiceReferenceValue(labelledReference[2]);
     const lineStart = input.lastIndexOf("\n", labelledReference.index) + 1;
-    const labelContext = input.slice(lineStart, labelledReference.index);
+    const lineEnd = input.indexOf("\n", labelledReference.index);
+    const labelContext = input.slice(
+      lineStart,
+      lineEnd < 0 ? input.length : lineEnd
+    );
     if (!looksLikeForbiddenReference(value, labelContext)) {
-      return { value, confidence: 0.94 };
+      return {
+        value,
+        confidence: 0.94,
+        sourceLabel: labelledReference[1],
+        rawValue: labelledReference[2],
+        context: labelContext.trim(),
+      };
     }
   }
 
@@ -222,23 +243,128 @@ export function detectInvoiceReference(
     const context = input.slice(start, end);
     const value = cleanInvoiceReferenceValue(generalReference[0]);
     if (!looksLikeForbiddenReference(value, context)) {
-      return { value, confidence: 0.78 };
+      return {
+        value,
+        confidence: 0.78,
+        sourceLabel: "unlabelled reference",
+        rawValue: generalReference[0],
+        context: context.trim(),
+      };
     }
   }
 
   return null;
 }
 
-async function invoiceText(file: ExtractionFileInput) {
-  if (!file.text) {
-    return "";
+export type InvoiceDateDetection = {
+  value: string;
+  confidence: number;
+  sourceLabel: string;
+  rawValue: string;
+  context: string;
+};
+
+const invoiceDateLabels = [
+  /factuurdatum/i,
+  /invoice\s+date/i,
+  /rechnungsdatum/i,
+  /date\s+de\s+facture/i,
+  /fecha\s+de\s+factura/i,
+  /data\s+fattura/i,
+];
+
+const excludedDateContext =
+  /\b(?:due|verval|delivery|lever|payment|betaal|service|period|periode|shipping|order|bestel|verzend)\b/i;
+
+const englishMonths: Record<string, number> = {
+  january: 1,
+  february: 2,
+  march: 3,
+  april: 4,
+  may: 5,
+  june: 6,
+  july: 7,
+  august: 8,
+  september: 9,
+  october: 10,
+  november: 11,
+  december: 12,
+};
+
+function validIsoDate(year: number, month: number, day: number) {
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+    ? `${year.toString().padStart(4, "0")}-${month
+        .toString()
+        .padStart(2, "0")}-${day.toString().padStart(2, "0")}`
+    : "";
+}
+
+function normalizedDateValue(value: string, dayFirst: boolean) {
+  const numeric = /(\d{1,4})[./-](\d{1,2})[./-](\d{1,4})/.exec(value);
+  if (numeric) {
+    const first = Number(numeric[1]);
+    const second = Number(numeric[2]);
+    const third = Number(numeric[3]);
+    let year = third;
+    let month = dayFirst ? second : first;
+    let day = dayFirst ? first : second;
+    if (first >= 1000) {
+      year = first;
+      month = second;
+      day = third;
+    }
+    return validIsoDate(year < 100 ? 2000 + year : year, month, day);
   }
 
-  try {
-    return await file.text();
-  } catch {
-    return "";
+  const words = new RegExp(
+    `(january|february|march|april|may|june|july|august|september|october|november|december)\\s+(\\d{1,2})(?:st|nd|rd|th)?[,]?\\s+(\\d{4})`,
+    "i"
+  ).exec(value);
+  return words
+    ? validIsoDate(
+        Number(words[3]),
+        englishMonths[words[1].toLowerCase()],
+        Number(words[2])
+      )
+    : "";
+}
+
+export function detectInvoiceDate(input: string): InvoiceDateDetection | null {
+  const lines = input.replace(/\r/g, "").split("\n");
+  for (const line of lines) {
+    if (excludedDateContext.test(line)) {
+      continue;
+    }
+    for (const label of invoiceDateLabels) {
+      const labelMatch = label.exec(line);
+      if (!labelMatch) {
+        continue;
+      }
+      const valueText = line.slice(labelMatch.index + labelMatch[0].length);
+      const rawValue =
+        /\d{1,4}[./-]\d{1,2}[./-]\d{1,4}/.exec(valueText)?.[0] ??
+        new RegExp(
+          `(?:${Object.keys(englishMonths).join("|")})\\s+\\d{1,2}(?:st|nd|rd|th)?[,]?\\s+\\d{4}`,
+          "i"
+        ).exec(valueText)?.[0] ??
+        "";
+      const dayFirst = !/^invoice\s+date$/i.test(labelMatch[0]);
+      const value = normalizedDateValue(rawValue, dayFirst);
+      if (value) {
+        return {
+          value,
+          confidence: 0.96,
+          sourceLabel: labelMatch[0],
+          rawValue,
+          context: line.trim(),
+        };
+      }
+    }
   }
+  return null;
 }
 
 function addDays(date: Date, days: number) {
@@ -586,35 +712,122 @@ function extractInvoiceAmounts(input: string) {
   return merged;
 }
 
+const amountEvidenceLabels: Record<
+  "netAmount" | "vatAmount" | "grossAmount",
+  RegExp[]
+> = {
+  netAmount: [
+    /\b(?:total|totaal)\s*\(?(?:excl\.?|excluding|exclusief)\s*(?:vat|btw)\)?\b/i,
+    /\b(?:net amount|netto bedrag|subtotal|subtotaal)\b/i,
+  ],
+  vatAmount: [
+    /\b(?:vat amount|vat total|btw bedrag|btw|tax amount|belasting)\b/i,
+  ],
+  grossAmount: [
+    /\b(?:invoice total|total amount|amount due|balance due|total due|totaalbedrag|factuurbedrag|factuurtotaal|totaal te betalen|te betalen|to receive)\b/i,
+    /(?:^|\s)(?:total|totaal)\b/i,
+  ],
+};
+
+function pageContainingContext(
+  pages: DocumentTextPage[],
+  context: string
+) {
+  return pages.find((page) => page.text.includes(context))?.pageNumber;
+}
+
+function amountEvidence(
+  pages: DocumentTextPage[],
+  field: "netAmount" | "vatAmount" | "grossAmount",
+  value: number | null
+): ExtractionFieldEvidence | undefined {
+  if (value === null) {
+    return undefined;
+  }
+
+  const expectedMinorUnits = amountToMinorUnits(value);
+  for (const page of pages) {
+    for (const line of page.text.replace(/\r/g, "").split("\n")) {
+      for (const label of amountEvidenceLabels[field]) {
+        const labelMatch = label.exec(line);
+        if (!labelMatch) {
+          continue;
+        }
+        const match = amountsOnLine(line).find(
+          (candidate) =>
+            amountToMinorUnits(candidate.amount) === expectedMinorUnits
+        );
+        if (!match) {
+          continue;
+        }
+        return {
+          sourceLabel: labelMatch[0],
+          rawValue: line.slice(match.index, match.end).trim(),
+          confidence: 0.96,
+          page: page.pageNumber,
+          context: line.trim(),
+        };
+      }
+    }
+  }
+  return undefined;
+}
+
 export async function extractInvoiceData(
   file: ExtractionFileInput
 ): Promise<ExtractedInvoiceData> {
   const seed = stableNumber(file.name);
   const profile = profileForFile(file.name, seed);
-  const forcedClosedPeriod = /closed-period|january|february/i.test(file.name);
-  const invoiceDate = forcedClosedPeriod
-    ? new Date(Date.UTC(2026, 0, (seed % 24) + 1))
-    : new Date(Date.UTC(2026, 5 + (seed % 2), (seed % 24) + 1));
   const vatRate = vatRateForFile(file.name, profile);
   const invalidByName = /invalid|missing|check/i.test(file.name);
   const paymentMismatch = /payment-mismatch|immediate|already-paid|paid/i.test(file.name);
   const reverseCharge =
     /reverse|eu-acquisition|intra-community/i.test(file.name) ||
     profile.name === "Google Ireland Limited";
-  const servicePeriod = servicePeriodFor(file.name, invoiceDate);
+  const document = await extractDocumentText(file);
+  const documentText = document.text;
+  const detectedDate = detectInvoiceDate(documentText);
+  const invoiceDate = detectedDate?.value ?? "";
+  const parsedInvoiceDate = invoiceDate
+    ? new Date(`${invoiceDate}T00:00:00.000Z`)
+    : null;
+  const servicePeriod = parsedInvoiceDate
+    ? servicePeriodFor(file.name, parsedInvoiceDate)
+    : { start: "", end: "" };
   const beneficiary = /david|kwon|flight|hotel|booking/i.test(file.name)
     ? "David Kwon"
     : "";
-  const documentText = await invoiceText(file);
   const { netAmount, vatAmount, grossAmount } = extractInvoiceAmounts(documentText);
-  const detectedReference =
-    detectInvoiceReference(documentText) ?? detectInvoiceReference(file.name);
+  const detectedReference = detectInvoiceReference(documentText);
   const confidentReference =
     !invalidByName && detectedReference && detectedReference.confidence >= 0.8
       ? detectedReference
       : null;
   const invoiceNumber = confidentReference?.value ?? "";
   const referenceCode = invoiceNumber;
+  const extractionEvidence: ExtractedInvoiceData["extractionEvidence"] = {
+    referenceCode: confidentReference
+      ? {
+          sourceLabel: confidentReference.sourceLabel,
+          rawValue: confidentReference.rawValue,
+          confidence: confidentReference.confidence,
+          page: pageContainingContext(document.pages, confidentReference.context),
+          context: confidentReference.context,
+        }
+      : undefined,
+    invoiceDate: detectedDate
+      ? {
+          sourceLabel: detectedDate.sourceLabel,
+          rawValue: detectedDate.rawValue,
+          confidence: detectedDate.confidence,
+          page: pageContainingContext(document.pages, detectedDate.context),
+          context: detectedDate.context,
+        }
+      : undefined,
+    netAmount: amountEvidence(document.pages, "netAmount", netAmount),
+    vatAmount: amountEvidence(document.pages, "vatAmount", vatAmount),
+    grossAmount: amountEvidence(document.pages, "grossAmount", grossAmount),
+  };
 
   return {
     supplierName: profile.name,
@@ -625,8 +838,11 @@ export async function extractInvoiceData(
     invoiceNumber,
     referenceCode,
     referenceCodeConfidence: confidentReference?.confidence ?? 0,
-    invoiceDate: isoDate(invoiceDate),
-    dueDate: invalidByName ? "" : isoDate(addDays(invoiceDate, 30)),
+    invoiceDate,
+    dueDate:
+      invalidByName || !parsedInvoiceDate
+        ? ""
+        : isoDate(addDays(parsedInvoiceDate, 30)),
     paymentTerms: paymentMismatch ? "immediately" : profile.paymentTerms,
     currency: "EUR",
     netAmount,
@@ -640,15 +856,21 @@ export async function extractInvoiceData(
     companyVatNumber: "NL857017263B01",
     reverseChargeMentioned: reverseCharge,
     intraCommunityMentioned: reverseCharge,
-    confidence: invalidByName ? 0.72 : 0.94,
-    rawText: [
-      `Mock extraction for ${file.name}.`,
-      reverseCharge ? "Reverse charge intra-community acquisition." : "",
-      profile.country === "US" ? "0% VAT outside EU supplier." : "",
-      servicePeriod.start ? `Service period ${servicePeriod.start} to ${servicePeriod.end}.` : "",
-    ]
-      .filter(Boolean)
-      .join(" "),
+    confidence:
+      invalidByName || document.mode === "unavailable"
+        ? 0.4
+        : Math.min(
+            0.98,
+            0.62 +
+              (confidentReference ? 0.09 : 0) +
+              (detectedDate ? 0.09 : 0) +
+              (netAmount !== null ? 0.06 : 0) +
+              (vatAmount !== null ? 0.06 : 0) +
+              (grossAmount !== null ? 0.06 : 0)
+          ),
+    rawText: documentText,
+    documentTextMode: document.mode,
+    extractionEvidence,
     lineItems:
       netAmount !== null && vatAmount !== null && grossAmount !== null
         ? [

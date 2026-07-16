@@ -69,6 +69,8 @@ export async function POST(request: Request, context: RouteContext) {
           name: storedFile.fileName,
           type: storedFile.fileType,
           size: storedFile.fileSize,
+          arrayBuffer: async () => storedFile.bytes.slice().buffer,
+          text: async () => new TextDecoder().decode(storedFile.bytes),
         });
         const updatedInvoice = replaceInvoiceExtractionFromReread(
           invoice.id,

@@ -106,6 +106,27 @@ export type InvoiceLineItem = {
   grossAmount: number;
 };
 
+export type DocumentTextMode =
+  | "embedded_pdf_text"
+  | "xml_text"
+  | "plain_text"
+  | "unavailable";
+
+export type ExtractionEvidenceField =
+  | "referenceCode"
+  | "invoiceDate"
+  | "netAmount"
+  | "vatAmount"
+  | "grossAmount";
+
+export type ExtractionFieldEvidence = {
+  sourceLabel: string;
+  rawValue: string;
+  confidence: number;
+  page?: number;
+  context?: string;
+};
+
 export type ExtractedInvoiceData = {
   supplierName: string;
   supplierVatNumber: string;
@@ -132,6 +153,10 @@ export type ExtractedInvoiceData = {
   intraCommunityMentioned: boolean;
   lineItems: InvoiceLineItem[];
   rawText?: string;
+  documentTextMode?: DocumentTextMode;
+  extractionEvidence?: Partial<
+    Record<ExtractionEvidenceField, ExtractionFieldEvidence>
+  >;
   confidence?: number;
 };
 

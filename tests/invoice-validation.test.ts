@@ -11,6 +11,7 @@ import {
   validateInvoiceData,
 } from "../lib/services/invoice-validation";
 import {
+  detectInvoiceDate,
   detectInvoiceReference,
   extractInvoiceData,
 } from "../lib/services/invoice-extraction-service";
@@ -32,6 +33,44 @@ function validInvoice(overrides: Partial<ExtractedInvoiceData> = {}) {
     lineItems: [],
     ...overrides,
   };
+}
+
+function pdfBytesWithText(lines: string[]) {
+  const escapedLines = lines.map((line) =>
+    line.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)")
+  );
+  const content = [
+    "BT",
+    "/F1 12 Tf",
+    "14 TL",
+    "72 740 Td",
+    ...escapedLines.flatMap((line, index) => [
+      index ? "T*" : "",
+      `(${line}) Tj`,
+    ]).filter(Boolean),
+    "ET",
+  ].join("\n");
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    `<< /Length ${Buffer.byteLength(content)} >>\nstream\n${content}\nendstream`,
+  ];
+  let body = "%PDF-1.4\n";
+  const offsets = [0];
+  objects.forEach((object, index) => {
+    offsets.push(Buffer.byteLength(body));
+    body += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  });
+  const xrefOffset = Buffer.byteLength(body);
+  body += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  body += offsets
+    .slice(1)
+    .map((offset) => `${String(offset).padStart(10, "0")} 00000 n \n`)
+    .join("");
+  body += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+  return Buffer.from(body, "ascii");
 }
 
 test("accepts a complete invoice with exact net plus VAT total", () => {
@@ -533,4 +572,90 @@ test("does not invent Your ref when no invoice reference is confidently detected
 
   assert.equal(data.referenceCode, "");
   assert.equal(data.invoiceNumber, "");
+});
+
+test("extracts the labelled invoice date instead of due or delivery dates", () => {
+  assert.equal(
+    detectInvoiceDate(
+      "Vervaldatum: 01-04-2026\nFactuurdatum: 20-03-2026\nLeverdatum: 18-03-2026"
+    )?.value,
+    "2026-03-20"
+  );
+  assert.equal(
+    detectInvoiceDate("Invoice date: March 24, 2026\nDue date: April 24, 2026")
+      ?.value,
+    "2026-03-24"
+  );
+  assert.equal(
+    detectInvoiceDate("Rechnungsdatum: 31.03.2026\nFaellig: 30.04.2026")
+      ?.value,
+    "2026-03-31"
+  );
+  assert.equal(
+    detectInvoiceDate("Date de facture : 31/03/2026\nEcheance : 30/04/2026")
+      ?.value,
+    "2026-03-31"
+  );
+  assert.equal(
+    detectInvoiceDate("Invoice date: 03/24/2026")?.value,
+    "2026-03-24"
+  );
+  assert.equal(detectInvoiceDate("Due date: 04/05/2026"), null);
+});
+
+test("stores actual document text and evidence for extracted booking values", async () => {
+  const text = [
+    "Factuurnummer: AH-2026-004821",
+    "Factuurdatum: 24-03-2026",
+    "Totaal excl. BTW 110,70",
+    "BTW 21% 23,25",
+    "Totaal te betalen 133,95",
+  ].join("\n");
+  const data = await extractInvoiceData({
+    name: "invoice.pdf",
+    type: "application/pdf",
+    size: text.length,
+    text: async () => text,
+  });
+
+  assert.equal(data.invoiceDate, "2026-03-24");
+  assert.equal(data.rawText, text);
+  assert.equal(data.documentTextMode, "plain_text");
+  assert.equal(data.extractionEvidence?.referenceCode?.rawValue, "AH-2026-004821");
+  assert.equal(data.extractionEvidence?.invoiceDate?.rawValue, "24-03-2026");
+  assert.equal(data.extractionEvidence?.grossAmount?.rawValue, "133,95");
+});
+
+test("extracts labelled values from embedded PDF text", async () => {
+  const bytes = pdfBytesWithText([
+    "Invoice number: PDF-2026-001",
+    "Invoice date: March 24, 2026",
+    "Net amount 100.00",
+    "VAT amount 21.00",
+    "Invoice total 121.00",
+  ]);
+  const data = await extractInvoiceData({
+    name: "embedded-text.pdf",
+    type: "application/pdf",
+    size: bytes.length,
+    arrayBuffer: async () =>
+      bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+  });
+
+  assert.equal(data.documentTextMode, "embedded_pdf_text");
+  assert.equal(data.referenceCode, "PDF-2026-001");
+  assert.equal(data.invoiceDate, "2026-03-24");
+  assert.equal(data.grossAmount, 121);
+  assert.equal(data.extractionEvidence?.grossAmount?.page, 1);
+});
+
+test("does not invent reference or invoice date from the filename", async () => {
+  const data = await extractInvoiceData({
+    name: "INV-2026-7788-2026-03-24.pdf",
+    type: "application/pdf",
+    size: 0,
+  });
+
+  assert.equal(data.referenceCode, "");
+  assert.equal(data.invoiceDate, "");
 });

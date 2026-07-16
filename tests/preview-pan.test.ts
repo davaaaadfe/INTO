@@ -1,9 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  clampPreviewZoom,
   clampPreviewPan,
   movePreviewPan,
+  previewScrollAfterZoom,
   resetPreviewPan,
+  zoomFromWheel,
 } from "../lib/services/preview-pan";
 
 test("moves invoice preview pan by drag delta", () => {
@@ -44,5 +47,26 @@ test("centers pan when the invoice is smaller than the preview area", () => {
       }
     ),
     { x: 0, y: 0 }
+  );
+});
+
+test("clamps Ctrl+wheel zoom to the supported preview range", () => {
+  assert.equal(clampPreviewZoom(0.2), 0.7);
+  assert.equal(clampPreviewZoom(4), 3);
+  assert.equal(zoomFromWheel(1, -100), 1.15);
+  assert.equal(zoomFromWheel(1, 100), 0.85);
+});
+
+test("keeps the invoice point below the pointer stable while zooming", () => {
+  assert.deepEqual(
+    previewScrollAfterZoom({
+      currentZoom: 1,
+      nextZoom: 2,
+      scrollLeft: 200,
+      scrollTop: 100,
+      pointerX: 300,
+      pointerY: 250,
+    }),
+    { left: 700, top: 450 }
   );
 });

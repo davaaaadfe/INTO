@@ -20,6 +20,7 @@
     "@neondatabase/serverless": "^1.1.0",
     "drizzle-orm": "0.45.2",
     "next": "16.2.6",
+    "pdfjs-dist": "5.4.624",
     "react": "19.2.6",
     "react-dom": "19.2.6",
     "read-excel-file": "9.3.1"

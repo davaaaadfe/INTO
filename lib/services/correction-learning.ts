@@ -153,6 +153,10 @@ function contextAround(data: ExtractedInvoiceData, values: unknown[]) {
 }
 
 function referenceLabel(data: ExtractedInvoiceData, correctedValue: string) {
+  const evidenceLabel = data.extractionEvidence?.referenceCode?.sourceLabel;
+  if (evidenceLabel) {
+    return evidenceLabel;
+  }
   const text = data.rawText ?? "";
   const value = correctedValue.toLowerCase();
   const relevantLine = text
@@ -173,6 +177,22 @@ function learnedFieldLabel(
   data: ExtractedInvoiceData,
   field: LearnableCorrectionField
 ) {
+  const evidenceField =
+    field === "invoiceDate"
+      ? "invoiceDate"
+      : field === "netAmount"
+        ? "netAmount"
+        : field === "vatAmount"
+          ? "vatAmount"
+          : field === "totalAmount"
+            ? "grossAmount"
+            : null;
+  const evidenceLabel = evidenceField
+    ? data.extractionEvidence?.[evidenceField]?.sourceLabel
+    : undefined;
+  if (evidenceLabel) {
+    return evidenceLabel;
+  }
   const labels = learnedFieldLabels[field] ?? [];
   const normalizedLines = (data.rawText ?? "")
     .split(/\r?\n/);

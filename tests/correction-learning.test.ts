@@ -265,6 +265,56 @@ test("stores invoice field corrections with complete provenance and confidence",
   }
 });
 
+test("stores extraction evidence labels with learned field corrections", () => {
+  const learning = createInitialLearningStore();
+  const current = invoice({}, {
+    referenceCode: "SOURCE-REF",
+    invoiceNumber: "SOURCE-REF",
+    invoiceDate: "2026-06-15",
+    rawText: "Document date: 16-06-2026\nVendor reference: CORRECT-REF",
+    extractionEvidence: {
+      referenceCode: {
+        sourceLabel: "Vendor reference",
+        rawValue: "SOURCE-REF",
+        confidence: 0.7,
+        page: 1,
+        context: "Vendor reference: CORRECT-REF",
+      },
+      invoiceDate: {
+        sourceLabel: "Document date",
+        rawValue: "16-06-2026",
+        confidence: 0.75,
+        page: 1,
+        context: "Document date: 16-06-2026",
+      },
+    },
+  });
+
+  const captured = captureUserCorrections({
+    invoice: current,
+    nextExtractedData: {
+      ...current.extractedData,
+      referenceCode: "CORRECT-REF",
+      invoiceNumber: "CORRECT-REF",
+      invoiceDate: "2026-06-16",
+    },
+    nextBookingLines: [],
+    learning,
+    user: { id: "shared_user", name: "Shared INTO User" },
+  });
+
+  assert.equal(
+    captured.find((item) => item.field === "yourRefPattern")?.metadata
+      ?.referenceLabel,
+    "Vendor reference"
+  );
+  assert.equal(
+    captured.find((item) => item.field === "invoiceDate")?.metadata
+      ?.sourceLabel,
+    "Document date"
+  );
+});
+
 test("uses learned OCR labels for a future invoice date and amounts", () => {
   const learning = createInitialLearningStore();
   const original = invoice({}, {

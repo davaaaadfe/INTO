@@ -4,6 +4,7 @@ import {
   ChangeEvent,
   DragEvent,
   type PointerEvent as ReactPointerEvent,
+  type WheelEvent as ReactWheelEvent,
   ReactNode,
   useCallback,
   useEffect,
@@ -11,6 +12,7 @@ import {
   useRef,
   useState,
 } from "react";
+import type { PDFDocumentLoadingTask, RenderTask } from "pdfjs-dist";
 import {
   INTO_PURCHASE_VAT_CODE_LABELS,
   SHARED_ACCESS_PERMISSIONS,
@@ -24,6 +26,7 @@ import type {
   ExactMasterDataCache,
   ExtractedInvoiceData,
   InvoiceArchiveResult,
+  LearnableCorrectionField,
   PermissionAction,
   PurchaseJournalLine,
   PublicExactConnection,
@@ -43,8 +46,10 @@ import {
 } from "../lib/services/invoice-validation";
 import {
   movePreviewPan,
+  previewScrollAfterZoom,
   resetPreviewPan,
   type PreviewPan,
+  zoomFromWheel,
 } from "../lib/services/preview-pan";
 
 type ApiState = {
@@ -84,7 +89,6 @@ type UploadItem = {
 };
 
 type ButtonFeedback = "success" | "error";
-type PreviewFitMode = "auto" | "width" | "height" | "manual";
 type PreviewFileStatus = "checking" | "available" | "missing";
 type ResolvedPreviewFileStatus = Exclude<PreviewFileStatus, "checking">;
 type ActiveView = "queue" | "archive";
@@ -157,6 +161,18 @@ const missingInvoiceFileMessage =
 const learnedCorrectionNote = "Applied from previous user correction.";
 const exactHistorySuggestionNote = "Suggested from previous Exact bookings.";
 
+function uniqueValidationMessages<T extends { message: string }>(items: T[]) {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const key = item.message.trim().toLowerCase();
+    if (!key || seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
 function invoiceFileCanBeRequested(invoice: UploadedInvoice) {
   return Boolean(
     invoice.storageKey &&
@@ -166,17 +182,7 @@ function invoiceFileCanBeRequested(invoice: UploadedInvoice) {
   );
 }
 
-const minPreviewZoom = 0.7;
-const maxPreviewZoom = 3;
-const previewZoomStep = 0.15;
-const defaultPreviewZoom = 1 + previewZoomStep;
-
-const previewFitModeLabels: Record<PreviewFitMode, string> = {
-  auto: "Auto-fit",
-  width: "Fit width",
-  height: "Fit height",
-  manual: "Manual zoom",
-};
+const defaultPreviewZoom = 1;
 
 type DuplicateUploadPrompt = {
   fileName: string;
@@ -1006,20 +1012,131 @@ function MissingInvoiceFileNotice() {
   );
 }
 
+function PdfCanvasPreview({
+  sourceUrl,
+  page,
+  zoom,
+  rotation,
+  onPageCount,
+}: {
+  sourceUrl: string;
+  page: number;
+  zoom: number;
+  rotation: number;
+  onPageCount: (pageCount: number) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [containerWidth, setContainerWidth] = useState(0);
+  const [renderError, setRenderError] = useState("");
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+
+    const updateWidth = () => setContainerWidth(container.clientWidth);
+    updateWidth();
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!containerWidth) {
+      return;
+    }
+
+    let cancelled = false;
+    let renderTask: RenderTask | undefined;
+    let loadingTask: PDFDocumentLoadingTask | undefined;
+
+    async function renderPdf() {
+      try {
+        setRenderError("");
+        const pdfjs = await import("pdfjs-dist");
+        pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+          "pdfjs-dist/build/pdf.worker.min.mjs",
+          import.meta.url
+        ).toString();
+        loadingTask = pdfjs.getDocument({ url: sourceUrl, withCredentials: true });
+        const document = await loadingTask.promise;
+        if (cancelled) {
+          return;
+        }
+
+        onPageCount(document.numPages);
+        const pdfPage = await document.getPage(Math.min(page, document.numPages));
+        const baseViewport = pdfPage.getViewport({ scale: 1, rotation });
+        const cssScale = (containerWidth * zoom) / baseViewport.width;
+        const pixelRatio = Math.max(1, window.devicePixelRatio || 1);
+        const viewport = pdfPage.getViewport({
+          scale: cssScale * pixelRatio,
+          rotation,
+        });
+        const canvas = canvasRef.current;
+        if (!canvas || cancelled) {
+          return;
+        }
+
+        const context = canvas.getContext("2d");
+        if (!context) {
+          throw new Error("Canvas rendering is unavailable.");
+        }
+
+        canvas.width = Math.ceil(viewport.width);
+        canvas.height = Math.ceil(viewport.height);
+        canvas.style.width = `${viewport.width / pixelRatio}px`;
+        canvas.style.height = `${viewport.height / pixelRatio}px`;
+        renderTask = pdfPage.render({ canvas, canvasContext: context, viewport });
+        await renderTask.promise;
+      } catch (error) {
+        if (!cancelled && !(error instanceof Error && error.name === "RenderingCancelledException")) {
+          setRenderError("The original PDF could not be rendered. Download it to inspect the source file.");
+        }
+      }
+    }
+
+    void renderPdf();
+    return () => {
+      cancelled = true;
+      renderTask?.cancel();
+      void loadingTask?.destroy();
+    };
+  }, [containerWidth, onPageCount, page, rotation, sourceUrl, zoom]);
+
+  return (
+    <div ref={containerRef} className="w-full min-w-full">
+      {renderError ? (
+        <div className="flex min-h-[360px] items-center justify-center rounded-lg border border-amber-200 bg-amber-50 p-6 text-center text-sm font-medium text-amber-950">
+          {renderError}
+        </div>
+      ) : (
+        <canvas
+          ref={canvasRef}
+          className="block rounded-md border border-stone-300 bg-white shadow-sm"
+          aria-label="Original PDF invoice page"
+        />
+      )}
+    </div>
+  );
+}
+
 function PreviewDocument({
   invoice,
   fileStatus,
   zoom,
   rotation,
   page,
-  fitMode,
+  onPageCount,
 }: {
   invoice: UploadedInvoice;
   fileStatus: PreviewFileStatus;
   zoom: number;
   rotation: number;
   page: number;
-  fitMode: PreviewFitMode;
+  onPageCount: (pageCount: number) => void;
 }) {
   if (fileStatus === "checking") {
     return (
@@ -1040,63 +1157,46 @@ function PreviewDocument({
     ["jpg", "jpeg", "png"].includes(fileExtension(invoice.fileName));
   const isPdf =
     previewType === "application/pdf" || fileExtension(invoice.fileName) === "pdf";
-  const usesPreviewScale = fitMode === "manual" || fitMode === "auto";
-  const pdfFrameScale = usesPreviewScale ? Math.max(1, Math.sqrt(zoom)) : 1;
-  const pdfZoom =
-    fitMode === "height"
-      ? "page-fit"
-      : usesPreviewScale
-        ? Math.round(pdfFrameScale * 100)
-        : "page-width";
-  const framedSourceUrl = isPdf
-    ? `${sourceUrl}#page=${page}&toolbar=0&navpanes=0&zoom=${pdfZoom}`
-    : sourceUrl;
   const imageStyle = {
     transform: `rotate(${rotation}deg)`,
     transformOrigin: "center top",
-    width: usesPreviewScale ? `${Math.max(1, zoom) * 100}%` : undefined,
-    maxWidth: usesPreviewScale ? "none" : undefined,
-  };
-  const pdfStyle = {
-    transform: `rotate(${rotation}deg)`,
-    transformOrigin: "center top",
-    width: usesPreviewScale ? `${pdfFrameScale * 100}%` : undefined,
-    height: usesPreviewScale ? `${pdfFrameScale * 100}%` : undefined,
+    width: `${zoom * 100}%`,
+    maxWidth: "none",
   };
   const baseFrame =
     "rounded-md border border-stone-300 bg-white shadow-sm transition-transform";
-  const imageSizing: Record<PreviewFitMode, string> = {
-    auto: "h-auto w-full max-w-none object-contain",
-    width: "h-auto w-full max-w-none",
-    height: "h-full w-auto max-w-none object-contain",
-    manual: "h-auto w-full max-w-none",
-  };
-  const pdfSizing: Record<PreviewFitMode, string> = {
-    auto: "h-full min-h-[680px] w-full max-w-none",
-    width: "h-full min-h-[680px] w-full max-w-none",
-    height: "h-full min-h-[680px] w-full max-w-none",
-    manual: "h-full min-h-[680px] min-w-full max-w-none",
-  };
 
   if (isImage) {
     return (
       <img
         src={sourceUrl}
         alt={invoice.fileName}
-        className={`mx-auto ${baseFrame} ${imageSizing[fitMode]}`}
+        className={`mx-auto h-auto w-full max-w-none object-contain ${baseFrame}`}
         decoding="async"
         style={imageStyle}
+        onLoad={() => onPageCount(1)}
+      />
+    );
+  }
+
+  if (isPdf) {
+    return (
+      <PdfCanvasPreview
+        sourceUrl={sourceUrl}
+        page={page}
+        zoom={zoom}
+        rotation={rotation}
+        onPageCount={onPageCount}
       />
     );
   }
 
   return (
     <iframe
-      key={`${invoice.id}-${page}-${fitMode}-${Math.round(zoom * 100)}`}
-      src={framedSourceUrl}
+      src={sourceUrl}
       title={`Original invoice source: ${invoice.fileName}`}
-      className={`mx-auto ${baseFrame} ${pdfSizing[fitMode]}`}
-      style={pdfStyle}
+      className={`mx-auto min-h-[680px] w-full ${baseFrame}`}
+      onLoad={() => onPageCount(1)}
     />
   );
 }
@@ -1135,14 +1235,14 @@ export function IntoWorkbench() {
   const [previewZoom, setPreviewZoom] = useState(defaultPreviewZoom);
   const [previewRotation, setPreviewRotation] = useState(0);
   const [previewPage, setPreviewPage] = useState(1);
-  const [previewFitMode, setPreviewFitMode] = useState<PreviewFitMode>("auto");
-  const [previewFullscreen, setPreviewFullscreen] = useState(false);
+  const [previewPageCount, setPreviewPageCount] = useState(1);
   const [, setPreviewPan] = useState<PreviewPan>(() => resetPreviewPan());
   const [previewDragging, setPreviewDragging] = useState(false);
   const [previewFileProbe, setPreviewFileProbe] = useState<{
     invoiceId: string;
     status: ResolvedPreviewFileStatus;
   } | null>(null);
+  const [exactSupplierSearch, setExactSupplierSearch] = useState("");
   const [activeView, setActiveView] = useState<ActiveView>("queue");
   const [archiveFilters, setArchiveFilters] =
     useState<ArchiveFilterState>(defaultArchiveFilters);
@@ -1176,8 +1276,11 @@ export function IntoWorkbench() {
   const currentCurrency =
     draft?.currency || selectedPurchaseJournal?.currency || "EUR";
   const confidenceThreshold = selectedPurchaseJournal?.confidenceThreshold;
-  const supplierOptions: SelectOption[] = (state.exactMasterData?.suppliers ?? [])
+  const exactSupplierAccounts = (state.exactMasterData?.suppliers ?? [])
     .filter((supplier) => supplier.name && supplier.isSupplier !== false)
+    .slice()
+    .sort((left, right) => left.name.localeCompare(right.name));
+  const supplierOptions: SelectOption[] = exactSupplierAccounts
     .map((supplier) => ({
       value: supplier.name,
       label: `${supplier.code} - ${supplier.name}`,
@@ -1225,7 +1328,7 @@ export function IntoWorkbench() {
       label: `${costUnit.code} - ${costUnit.description}`,
     }));
   const previewCanPan = previewFileStatus === "available";
-  const pageCount = selectedInvoice?.fileName.toLowerCase().endsWith(".pdf") ? 3 : 1;
+  const pageCount = previewPageCount;
   const bookingLinePayloads = bookingLineDrafts.map(toBookingLinePayload);
   const hasBookingLineChanges = Boolean(
     selectedInvoice &&
@@ -1282,6 +1385,28 @@ export function IntoWorkbench() {
     );
     return issue ? { tone: "error", message: issue.message } : undefined;
   };
+  const extractionEvidenceIssueFor = (
+    field: keyof NonNullable<ExtractedInvoiceData["extractionEvidence"]>,
+    learnedField: LearnableCorrectionField,
+    hasValue: boolean,
+    label: string
+  ): FieldIssue | undefined => {
+    if (
+      !selectedInvoice ||
+      !hasValue ||
+      selectedInvoice.extractedData.extractionEvidence?.[field] ||
+      selectedInvoice.learnedFieldsApplied?.includes(learnedField)
+    ) {
+      return undefined;
+    }
+    return {
+      tone: "warning",
+      message:
+        selectedInvoice.extractedData.documentTextMode === "unavailable"
+          ? `${label} could not be verified from embedded document text. Please confirm it.`
+          : `${label} was not linked to a labelled source value. Please confirm it.`,
+    };
+  };
   const supplierIssue = validationIssueFor(
     ["supplier", "supplierName"],
     [
@@ -1306,9 +1431,22 @@ export function IntoWorkbench() {
     requiredIssueFor(["paymentTerms"]) ?? paymentConditionIssue;
   const yourRefIssue =
     requiredIssueFor(["referenceCode"]) ??
-    validationIssueFor(["yourRef", "referenceCode"]);
+    validationIssueFor(["yourRef", "referenceCode"]) ??
+    extractionEvidenceIssueFor(
+      "referenceCode",
+      "yourRefPattern",
+      Boolean(draft?.referenceCode.trim()),
+      "Your ref."
+    );
   const invoiceDateIssue =
-    requiredIssueFor(["invoiceDate"]) ?? validationIssueFor(["invoiceDate"]);
+    requiredIssueFor(["invoiceDate"]) ??
+    validationIssueFor(["invoiceDate"]) ??
+    extractionEvidenceIssueFor(
+      "invoiceDate",
+      "invoiceDate",
+      Boolean(draft?.invoiceDate),
+      "Invoice date"
+    );
   const totalAmountIssue = validationIssueFor(
     ["grossAmount"],
     [
@@ -1318,7 +1456,14 @@ export function IntoWorkbench() {
     ]
   );
   const totalAmountFieldIssue =
-    requiredIssueFor(["grossAmount"]) ?? totalAmountIssue;
+    requiredIssueFor(["grossAmount"]) ??
+    totalAmountIssue ??
+    extractionEvidenceIssueFor(
+      "grossAmount",
+      "totalAmount",
+      draft?.grossAmount !== null && draft?.grossAmount !== undefined,
+      "Total amount"
+    );
   const bookingLineTotals = useMemo(
     () =>
       calculateBookingTotals(
@@ -1444,7 +1589,12 @@ export function IntoWorkbench() {
     const issue = selectedBookingLineIssues.find(
       (item) => item.lineIndex === lineIndex && item.field === field
     );
-    return issue ? { tone: "error", message: issue.message } : undefined;
+    if (issue) {
+      return { tone: "error", message: issue.message };
+    }
+    return lineIndex === 0 && field === "description"
+      ? expenseDescriptionIssue
+      : undefined;
   };
   const bookingLineVatIssueFor = (lineIndex: number): FieldIssue | undefined =>
     bookingLineIssueFor(lineIndex, "vatCode") ??
@@ -1454,7 +1604,7 @@ export function IntoWorkbench() {
       ? { tone: "warning", message: UNSUPPORTED_VAT_CODE_WARNING }
       : undefined);
   const visibleValidationMessages = selectedInvoice
-    ? [
+    ? uniqueValidationMessages([
         ...selectedInvoice.validationErrors.map((item) => ({
           id: item.id,
           message: item.message,
@@ -1474,7 +1624,7 @@ export function IntoWorkbench() {
           id: issue.id,
           message: issue.message,
         })),
-      ]
+      ])
     : [];
 
   const stats = useMemo(() => {
@@ -1614,30 +1764,42 @@ export function IntoWorkbench() {
     setSelectedInvoiceId(invoiceId);
   }
 
-  function setPreviewFit(fitMode: PreviewFitMode) {
-    setPreviewFitMode(fitMode);
-    setPreviewPan(resetPreviewPan());
-    resetPreviewScroll();
-    if (fitMode !== "manual") {
-      setPreviewZoom(defaultPreviewZoom);
-    }
-  }
+  const handlePreviewPageCount = useCallback((count: number) => {
+    const safeCount = Math.max(1, Math.trunc(count));
+    setPreviewPageCount(safeCount);
+    setPreviewPage((current) => Math.min(current, safeCount));
+  }, []);
 
-  function setManualPreviewZoom(nextZoom: number) {
-    setPreviewFitMode("manual");
+  function handlePreviewWheel(event: ReactWheelEvent<HTMLDivElement>) {
+    if (!event.ctrlKey || previewFileStatus !== "available") {
+      return;
+    }
+
+    const viewport = previewViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+
+    event.preventDefault();
+    const nextZoom = zoomFromWheel(previewZoom, event.deltaY);
+    if (nextZoom === previewZoom) {
+      return;
+    }
+
+    const bounds = viewport.getBoundingClientRect();
+    const nextScroll = previewScrollAfterZoom({
+      currentZoom: previewZoom,
+      nextZoom,
+      scrollLeft: viewport.scrollLeft,
+      scrollTop: viewport.scrollTop,
+      pointerX: event.clientX - bounds.left,
+      pointerY: event.clientY - bounds.top,
+    });
     setPreviewZoom(nextZoom);
-    if (nextZoom <= 1) {
-      setPreviewPan(resetPreviewPan());
-    }
-  }
-
-  function resetPreviewView() {
-    setPreviewPage(1);
-    setPreviewZoom(defaultPreviewZoom);
-    setPreviewRotation(0);
-    setPreviewFitMode("auto");
-    setPreviewPan(resetPreviewPan());
-    resetPreviewScroll();
+    window.requestAnimationFrame(() => {
+      viewport.scrollLeft = nextScroll.left;
+      viewport.scrollTop = nextScroll.top;
+    });
   }
 
   const resetPreviewScroll = useCallback(() => {
@@ -1848,9 +2010,10 @@ export function IntoWorkbench() {
         setDraft(nextDraft);
         setBookingLineDrafts(nextBookingLines);
         setPreviewPage(1);
+        setPreviewPageCount(1);
         setPreviewZoom(defaultPreviewZoom);
         setPreviewRotation(0);
-        setPreviewFitMode("auto");
+        setExactSupplierSearch("");
         setPreviewPan(resetPreviewPan());
         resetPreviewScroll();
       }, 0);
@@ -2307,6 +2470,19 @@ export function IntoWorkbench() {
     }
   }
 
+  function chooseExactSupplier(value: string) {
+    setExactSupplierSearch(value);
+    const account = exactSupplierAccounts.find(
+      (supplier) => `${supplier.code} - ${supplier.name}` === value
+    );
+    if (!account) {
+      return;
+    }
+
+    setExactSupplierSearch("");
+    void applyIntelligenceAction("selectSupplier", account.id);
+  }
+
   async function resolveDuplicatePrompt(
     prompt: DuplicateUploadPrompt,
     decision: "re_read" | "keep_existing" | "cancel_upload"
@@ -2586,6 +2762,9 @@ export function IntoWorkbench() {
         lineIndex === index ? { ...line, ...patch } : line
       )
     );
+    if (index === 0 && typeof patch.description === "string") {
+      updateDraft("expenseDescription", patch.description);
+    }
   }
 
   function updateBookingLineGl(index: number, value: string) {
@@ -2694,9 +2873,11 @@ export function IntoWorkbench() {
   }
 
   function deleteBookingLine(index: number) {
-    setBookingLineDrafts((current) =>
-      current.filter((_, lineIndex) => lineIndex !== index)
-    );
+    const nextLines = bookingLineDrafts.filter((_, lineIndex) => lineIndex !== index);
+    setBookingLineDrafts(nextLines);
+    if (index === 0) {
+      updateDraft("expenseDescription", nextLines[0]?.description ?? "");
+    }
   }
 
   function downloadOriginal() {
@@ -3928,13 +4109,7 @@ export function IntoWorkbench() {
 
         {selectedInvoice && draft ? (
           <section className="grid items-start gap-5 lg:grid-cols-[minmax(0,1.35fr)_minmax(380px,0.95fr)]">
-            <section
-              className={
-                previewFullscreen
-                  ? "fixed inset-4 z-50 flex flex-col overflow-hidden rounded-xl border border-stone-200 bg-white shadow-2xl"
-                  : "min-w-0 overflow-hidden rounded-xl border border-stone-200 bg-white shadow-sm lg:sticky lg:top-4 lg:self-start"
-              }
-            >
+            <section className="min-w-0 overflow-hidden rounded-xl border border-stone-200 bg-white shadow-sm lg:sticky lg:top-4 lg:self-start">
               <div className="flex flex-col gap-3 border-b border-stone-200 bg-white p-4 lg:flex-row lg:items-start lg:justify-between">
                 <div>
                   <h2 className="text-xl font-semibold text-stone-950">
@@ -3945,42 +4120,6 @@ export function IntoWorkbench() {
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2 lg:justify-end">
-                  {(["auto", "width", "height"] as PreviewFitMode[]).map((fitMode) => (
-                    <ActionButton
-                      key={fitMode}
-                      variant={previewFitMode === fitMode ? "secondary" : "ghost"}
-                      onClick={() => setPreviewFit(fitMode)}
-                      className="min-h-9 px-3 py-1 text-xs"
-                    >
-                      {previewFitModeLabels[fitMode]}
-                    </ActionButton>
-                  ))}
-                  <ActionButton
-                    variant="ghost"
-                    onClick={() => {
-                      setManualPreviewZoom(
-                        Math.max(minPreviewZoom, previewZoom - previewZoomStep)
-                      );
-                    }}
-                    disabled={previewZoom <= minPreviewZoom}
-                    disabledReason="Minimum zoom reached."
-                    className="min-h-9 px-3 py-1 text-xs"
-                  >
-                    Zoom out
-                  </ActionButton>
-                  <ActionButton
-                    variant="ghost"
-                    onClick={() => {
-                      setManualPreviewZoom(
-                        Math.min(maxPreviewZoom, previewZoom + previewZoomStep)
-                      );
-                    }}
-                    disabled={previewZoom >= maxPreviewZoom}
-                    disabledReason="Maximum zoom reached."
-                    className="min-h-9 px-3 py-1 text-xs"
-                  >
-                    Zoom in
-                  </ActionButton>
                   <ActionButton
                     variant="ghost"
                     onClick={() => {
@@ -4004,20 +4143,6 @@ export function IntoWorkbench() {
                     Rotate right
                   </ActionButton>
                   <ActionButton
-                    variant="ghost"
-                    onClick={resetPreviewView}
-                    className="min-h-9 px-3 py-1 text-xs"
-                  >
-                    Reset view
-                  </ActionButton>
-                  <ActionButton
-                    variant={previewFullscreen ? "secondary" : "outline"}
-                    onClick={() => setPreviewFullscreen((value) => !value)}
-                    className="min-h-9 px-3 py-1 text-xs"
-                  >
-                    {previewFullscreen ? "Exit fullscreen" : "Fullscreen preview"}
-                  </ActionButton>
-                  <ActionButton
                     variant="outline"
                     onClick={downloadOriginal}
                     disabled={previewFileStatus !== "available"}
@@ -4030,7 +4155,7 @@ export function IntoWorkbench() {
               </div>
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200 bg-stone-50/70 px-4 py-2 text-sm">
                 <div className="text-stone-600">
-                  Page {previewPage} of {pageCount} - {previewFitModeLabels[previewFitMode]} - Zoom {Math.round(previewZoom * 100)}%
+                  Page {previewPage} of {pageCount} - Zoom {Math.round(previewZoom * 100)}%
                   {previewRotation ? ` - Rotated ${previewRotation}deg` : ""}
                 </div>
                 <div className="flex gap-2">
@@ -4058,23 +4183,20 @@ export function IntoWorkbench() {
               </div>
               <div
                 ref={previewViewportRef}
-                className={`relative overflow-auto bg-[#f7f8f5] p-3 sm:p-4 ${
+                className={`relative h-[min(78vh,980px)] min-h-[680px] select-none overflow-auto bg-[#f7f8f5] p-3 [scrollbar-width:none] sm:p-4 [&::-webkit-scrollbar]:hidden ${
                   previewCanPan
                     ? previewDragging
                       ? "cursor-grabbing"
                       : "cursor-grab"
                     : ""
-                } ${
-                  previewFullscreen
-                    ? "min-h-0 flex-1"
-                    : "h-[min(78vh,980px)] min-h-[680px] lg:h-[calc(100vh-170px)]"
-                }`}
+                } lg:h-[calc(100vh-170px)]`}
                 role="presentation"
                 onPointerDown={startPreviewPan}
                 onPointerMove={movePreview}
                 onPointerUp={stopPreviewPan}
                 onPointerCancel={stopPreviewPan}
                 onPointerLeave={stopPreviewPan}
+                onWheel={handlePreviewWheel}
               >
                 <div
                   className="flex min-h-full min-w-full items-start justify-center"
@@ -4085,7 +4207,7 @@ export function IntoWorkbench() {
                     zoom={previewZoom}
                     rotation={previewRotation}
                     page={previewPage}
-                    fitMode={previewFitMode}
+                    onPageCount={handlePreviewPageCount}
                   />
                 </div>
               </div>
@@ -4139,19 +4261,70 @@ export function IntoWorkbench() {
                       }
                       threshold={confidenceThreshold}
                     />
-                    <TextField
-                      label="Expense description"
-                      required
-                      value={draft.expenseDescription}
-                      onChange={(value) => updateDraft("expenseDescription", value)}
-                      disabled={!hasPermission("edit")}
-                      issue={expenseDescriptionIssue}
-                      helper={
-                        selectedPurchaseJournal?.description
-                          ? `Booking description: ${selectedPurchaseJournal.description}`
-                          : undefined
-                      }
-                    />
+                    {selectedPurchaseJournal?.supplierResolution.reviewRequired ? (
+                      <div className="sm:col-span-2 rounded-lg border border-orange-200 bg-orange-50 p-3">
+                        <p className="text-sm font-semibold text-orange-950">
+                          Supplier review required
+                        </p>
+                        <p className="mt-1 text-xs leading-5 text-orange-900">
+                          {selectedPurchaseJournal.supplierResolution.reasoning[0]}
+                        </p>
+                        {selectedPurchaseJournal.supplierResolution.candidates.length ? (
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {selectedPurchaseJournal.supplierResolution.candidates.map(
+                              (candidate) => (
+                                <ActionButton
+                                  key={candidate.account.id}
+                                  variant="ghost"
+                                  onClick={() =>
+                                    applyIntelligenceAction(
+                                      "selectSupplier",
+                                      candidate.account.id
+                                    )
+                                  }
+                                  loading={busy === `supplier-${candidate.account.id}`}
+                                  feedback={buttonFeedbackFor(
+                                    `supplier-${candidate.account.id}`,
+                                    `supplier-${candidate.account.id}`
+                                  )}
+                                  disabled={!hasPermission("approve")}
+                                  disabledReason="Supplier selection is not available."
+                                  className="justify-start text-left"
+                                >
+                                  {candidate.account.code} - {candidate.account.name} (
+                                  {percentScore(candidate.confidence)})
+                                </ActionButton>
+                              )
+                            )}
+                          </div>
+                        ) : null}
+                        <label className="mt-3 block text-xs font-semibold text-orange-950">
+                          Search all Exact suppliers
+                          <input
+                            list={`supplier-resolution-options-${selectedInvoice.id}`}
+                            value={exactSupplierSearch}
+                            onChange={(event) => chooseExactSupplier(event.target.value)}
+                            disabled={
+                              !hasPermission("approve") ||
+                              busy.startsWith("supplier-") ||
+                              !exactSupplierAccounts.length
+                            }
+                            placeholder="Code or supplier name"
+                            className="mt-1.5 w-full cursor-text rounded-md border border-orange-300 bg-white px-3 py-2 text-sm font-normal text-stone-900 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100 disabled:cursor-not-allowed disabled:bg-stone-100 disabled:text-stone-500"
+                          />
+                        </label>
+                        <datalist
+                          id={`supplier-resolution-options-${selectedInvoice.id}`}
+                        >
+                          {exactSupplierAccounts.map((supplier) => (
+                            <option
+                              key={supplier.id}
+                              value={`${supplier.code} - ${supplier.name}`}
+                            />
+                          ))}
+                        </datalist>
+                      </div>
+                    ) : null}
                     <TextField
                       label="Your ref"
                       required
@@ -4224,7 +4397,7 @@ export function IntoWorkbench() {
                                 G/L Account <span className="text-rose-600">*</span>
                               </th>
                               <th className="px-2 py-2">
-                                Description <span className="text-rose-600">*</span>
+                                Expense description <span className="text-rose-600">*</span>
                               </th>
                               <th className="px-2 py-2">From</th>
                               <th className="px-2 py-2">To</th>
@@ -4475,7 +4648,7 @@ export function IntoWorkbench() {
                         ))}
                       </datalist>
 
-                      <div className="mt-3 grid gap-2 rounded-lg border border-stone-200 bg-white p-3 text-sm sm:grid-cols-2 xl:grid-cols-5">
+                      <div className="mt-3 grid gap-2 rounded-lg border border-stone-200 bg-white p-3 text-sm sm:grid-cols-2 xl:grid-cols-4">
                         <div>
                           <div className="text-xs font-semibold text-stone-500">
                             Net amount
@@ -4495,18 +4668,19 @@ export function IntoWorkbench() {
                         <div>
                           <div className="text-xs font-semibold text-stone-500">
                             Total amount from invoice
+                            <span className="ml-1 text-rose-600">*</span>
                           </div>
-                          <div className="mt-1 font-semibold text-stone-900">
-                            {formatMoney(bookingLineTotals.invoiceTotal, currentCurrency)}
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-xs font-semibold text-stone-500">
-                            Calculated booking total
-                          </div>
-                          <div className="mt-1 font-semibold text-stone-900">
-                            {formatMoney(bookingLineTotals.grossAmount, currentCurrency)}
-                          </div>
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={numberValue(draft.grossAmount)}
+                            onChange={(event) =>
+                              updateDraft("grossAmount", event.target.value)
+                            }
+                            disabled={!hasPermission("edit")}
+                            className="mt-1 w-full rounded-md border-2 border-emerald-600 bg-emerald-50 px-2 py-1.5 text-right font-semibold text-stone-950 outline-none focus:ring-2 focus:ring-emerald-100 disabled:cursor-not-allowed disabled:border-stone-300 disabled:bg-stone-100 disabled:text-stone-500"
+                          />
+                          <ValidationMessage issue={totalAmountFieldIssue} />
                         </div>
                         <div>
                           <div className="text-xs font-semibold text-stone-500">
@@ -4529,16 +4703,6 @@ export function IntoWorkbench() {
                         </p>
                       ) : null}
                     </div>
-                    <AmountField
-                      label="Total Amount"
-                      required
-                      value={draft.grossAmount}
-                      currency={currentCurrency}
-                      onChange={(value) => updateDraft("grossAmount", value)}
-                      disabled={!hasPermission("edit")}
-                      issue={totalAmountFieldIssue}
-                      emphasized
-                    />
                   </ReviewSection>
 
                   <ReviewActionBar actions={reviewActions} />
@@ -4806,86 +4970,6 @@ export function IntoWorkbench() {
                         </div>
                       </div>
                     </div>
-
-                    {selectedPurchaseJournal.supplierResolution.reviewRequired ? (
-                      <div className="rounded-lg border border-orange-200 bg-orange-50 p-3">
-                        <div className="text-sm font-semibold text-orange-950">
-                          Supplier Review Required
-                        </div>
-                        <p className="mt-1 text-xs leading-5 text-orange-900">
-                          {selectedPurchaseJournal.supplierResolution.reasoning[0]}
-                        </p>
-                        <div className="mt-2 grid gap-2">
-                          {selectedPurchaseJournal.supplierResolution.candidates.map(
-                            (candidate) => (
-                              <ActionButton
-                                key={candidate.account.id}
-                                variant="ghost"
-                                onClick={() =>
-                                  applyIntelligenceAction(
-                                    "selectSupplier",
-                                    candidate.account.id
-                                  )
-                                }
-                                loading={busy === `supplier-${candidate.account.id}`}
-                                feedback={buttonFeedbackFor(
-                                  `supplier-${candidate.account.id}`,
-                                  `supplier-${candidate.account.id}`
-                                )}
-                                disabled={!hasPermission("approve")}
-                                disabledReason="Your INTO account is not verified for supplier resolution decisions."
-                                className="justify-start text-left"
-                              >
-                                <span>
-                                  {candidate.account.code} - {candidate.account.name}
-                                  <span className="block text-xs font-normal text-stone-500">
-                                    {candidate.method} -{" "}
-                                    {percentScore(candidate.confidence)}
-                                  </span>
-                                </span>
-                              </ActionButton>
-                            )
-                          )}
-                        </div>
-                        <label className="mt-3 block text-xs font-semibold text-orange-950">
-                          Choose from all Exact suppliers
-                          <select
-                            value=""
-                            onChange={(event) => {
-                              const accountId = event.target.value;
-                              if (accountId) {
-                                void applyIntelligenceAction(
-                                  "selectSupplier",
-                                  accountId
-                                );
-                              }
-                            }}
-                            disabled={
-                              !hasPermission("approve") ||
-                              busy.startsWith("supplier-") ||
-                              !state.exactMasterData?.suppliers.length
-                            }
-                            className="mt-1.5 w-full cursor-pointer rounded-md border border-orange-300 bg-white px-2 py-2 text-sm font-normal text-stone-900 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100 disabled:cursor-not-allowed disabled:bg-stone-100 disabled:text-stone-500"
-                          >
-                            <option value="">Select an Exact supplier...</option>
-                            {(state.exactMasterData?.suppliers ?? [])
-                              .filter(
-                                (supplier) =>
-                                  supplier.name && supplier.isSupplier !== false
-                              )
-                              .slice()
-                              .sort((left, right) =>
-                                left.name.localeCompare(right.name)
-                              )
-                              .map((supplier) => (
-                                <option key={supplier.id} value={supplier.id}>
-                                  {supplier.code} - {supplier.name}
-                                </option>
-                              ))}
-                          </select>
-                        </label>
-                      </div>
-                    ) : null}
 
                     <div className="grid gap-3 text-sm md:grid-cols-2">
                       <div className="rounded-lg border border-stone-200 bg-stone-50/60 p-3">

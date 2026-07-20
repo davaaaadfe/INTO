@@ -42,3 +42,8 @@ test("keeps removed preview controls out of the active component", () => {
     assert.equal(activeReviewSource.includes(label), false, label);
   }
 });
+
+test("keeps deployment proof markers out of the production UI", () => {
+  assert.doesNotMatch(activeReviewSource, /UI CHANGE PROOF/);
+  assert.doesNotMatch(activeReviewSource, /DEPLOYMENT PROOF/);
+});

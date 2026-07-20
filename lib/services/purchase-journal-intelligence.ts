@@ -628,7 +628,8 @@ function resolveSupplier(
       : null;
     return [...candidates.values()]
       .filter((candidate) => !allowedIds || allowedIds.has(candidate.account.id))
-      .sort((left, right) => right.confidence - left.confidence);
+      .sort((left, right) => right.confidence - left.confidence)
+      .slice(0, 5);
   };
   const resolved = (
     account: ExactSupplierAccount,
@@ -2287,7 +2288,11 @@ export function purchaseJournalValidationErrors(
 
   if (booking.reviewRequired) {
     for (const reason of booking.reviewReasons) {
-      if (reason === DUPLICATE_INVOICE_REFERENCE_MESSAGE) {
+      if (
+        reason === DUPLICATE_INVOICE_REFERENCE_MESSAGE ||
+        (booking.supplierResolution.reviewRequired &&
+          reason === booking.supplierResolution.reasoning[0])
+      ) {
         continue;
       }
       errors.push(

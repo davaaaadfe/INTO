@@ -3157,12 +3157,6 @@ export function IntoWorkbench() {
               Bulk upload invoices, review extracted fields, validate every total,
               and book approved purchases into Exact Online.
             </p>
-            <p className="mt-2 text-xs font-semibold text-emerald-700">
-              UI CHANGE PROOF: INTO-FIX-ACTIVE
-            </p>
-            <p className="mt-1 text-xs font-semibold text-sky-700">
-              DEPLOYMENT PROOF: INTO-LOCAL-REPO-CONNECTED
-            </p>
           </div>
           <div className="flex flex-col gap-3">
             <div className="grid grid-cols-4 gap-2 text-center">

@@ -327,6 +327,28 @@ test("marks multiple matching suppliers for manual supplier review", () => {
   );
 });
 
+test("reports an unresolved supplier warning only once", () => {
+  const invoice = uploadedInvoice({}, {
+    supplierName: "Acme Supplies BV",
+    supplierVatNumber: "NL123456789B01",
+    supplierChamberOfCommerceNumber: "",
+    supplierAddress: "",
+    supplierCountry: "",
+    iban: "",
+    expenseDescription: "Ambiguous widgets",
+    invoiceNumber: "INV-ACME-WARNING",
+  });
+  const booking = buildBooking(invoice);
+  const supplierWarnings = purchaseJournalValidationErrors(booking).filter(
+    (error) =>
+      error.message ===
+      "Multiple supplier matches found. Please choose the correct supplier."
+  );
+
+  assert.equal(supplierWarnings.length, 1);
+  assert.equal(supplierWarnings[0]?.field, "supplier");
+});
+
 test("uses a unique VAT match before conflicting historical evidence", () => {
   const invoice = uploadedInvoice(
     {},
@@ -615,6 +637,49 @@ test("requires review when city and country identify multiple imported suppliers
     "Multiple supplier matches found. Please choose the correct supplier."
   );
   assert.equal(booking.supplierResolution.candidates.length, 2);
+});
+
+test("limits unresolved supplier suggestions to the strongest useful candidates", () => {
+  const masterData = {
+    ...exactMasterData,
+    suppliers: Array.from({ length: 12 }, (_, index) =>
+      supplierAccount({
+        id: `supplier_city_${index}`,
+        code: `91${String(index).padStart(3, "0")}`,
+        name: `Rotterdam Supplier ${index}`,
+        city: "Rotterdam",
+        country: "NL",
+        isSupplier: true,
+      })
+    ),
+  };
+  const invoice = uploadedInvoice({}, {
+    supplierName: "Unknown invoice supplier",
+    supplierVatNumber: "",
+    iban: "",
+    supplierAddress: "Rotterdam",
+    supplierCountry: "NL",
+    invoiceNumber: "INV-CITY-MANY",
+  });
+  const booking = generatePurchaseJournalBooking(
+    invoice,
+    [invoice],
+    createInitialLearningStore(),
+    masterData
+  );
+
+  assert.equal(booking.supplierResolution.reviewRequired, true);
+  assert.equal(booking.supplierResolution.candidates.length, 5);
+  assert.deepEqual(
+    booking.supplierResolution.candidates.map((candidate) => candidate.account.id),
+    [
+      "supplier_city_0",
+      "supplier_city_1",
+      "supplier_city_2",
+      "supplier_city_3",
+      "supplier_city_4",
+    ]
+  );
 });
 
 test("does not match an imported account that is not marked as a supplier", () => {

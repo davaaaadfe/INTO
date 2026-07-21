@@ -64,6 +64,7 @@ type ApiState = {
   supplierOverviewImport: SupplierOverviewImportStatus | null;
   supplierLearning: SupplierLearningSummary[];
   supplierLearningLoaded: boolean;
+  supplierLearningEnabled: boolean;
   exactConfiguration: {
     ready: boolean;
     missingEnv: string[];
@@ -1264,6 +1265,7 @@ export function IntoWorkbench() {
     supplierOverviewImport: null,
     supplierLearning: [],
     supplierLearningLoaded: false,
+    supplierLearningEnabled: false,
     exactConfiguration: null,
   });
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<string>("");
@@ -1295,6 +1297,13 @@ export function IntoWorkbench() {
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [learningResetTarget, setLearningResetTarget] =
     useState<SupplierLearningSummary | null>(null);
+  const availableViews: ActiveView[] = state.supplierLearningEnabled
+    ? ["queue", "archive", "supplier-learning"]
+    : ["queue", "archive"];
+  const visibleActiveView =
+    activeView === "supplier-learning" && !state.supplierLearningEnabled
+      ? "queue"
+      : activeView;
 
   const selectedInvoice = useMemo(
     () =>
@@ -1330,34 +1339,37 @@ export function IntoWorkbench() {
   const recordedSupplierLearningByAccount = new Map(
     state.supplierLearning.map((summary) => [summary.supplierAccountId, summary])
   );
-  const supplierLearningRows = state.supplierLearningLoaded ? [
-    ...exactSupplierAccounts.map(
-      (supplier): SupplierLearningSummary =>
-        recordedSupplierLearningByAccount.get(supplier.id) ?? {
-          supplierAccountId: supplier.id,
-          supplierCode: supplier.code,
-          supplierName: supplier.name,
-          generation: 0,
-          exampleCount: 0,
-          formatDrift: "none",
-          confidence: {
-            score: 35,
-            band: "Low",
-            baseline: 35,
-            exampleCount: 0,
-            volume: 0,
-            quality: 0,
-            driftPenalty: 0,
-          },
-        }
-    ),
-    ...state.supplierLearning.filter(
-      (summary) =>
-        !exactSupplierAccounts.some(
-          (supplier) => supplier.id === summary.supplierAccountId
-        )
-    ),
-  ] : [];
+  const supplierLearningRows =
+    state.supplierLearningEnabled && state.supplierLearningLoaded
+      ? [
+          ...exactSupplierAccounts.map(
+            (supplier): SupplierLearningSummary =>
+              recordedSupplierLearningByAccount.get(supplier.id) ?? {
+                supplierAccountId: supplier.id,
+                supplierCode: supplier.code,
+                supplierName: supplier.name,
+                generation: 0,
+                exampleCount: 0,
+                formatDrift: "none",
+                confidence: {
+                  score: 35,
+                  band: "Low",
+                  baseline: 35,
+                  exampleCount: 0,
+                  volume: 0,
+                  quality: 0,
+                  driftPenalty: 0,
+                },
+              }
+          ),
+          ...state.supplierLearning.filter(
+            (summary) =>
+              !exactSupplierAccounts.some(
+                (supplier) => supplier.id === summary.supplierAccountId
+              )
+          ),
+        ]
+      : [];
   const supplierLearningByAccount = new Map(
     supplierLearningRows.map((summary) => [summary.supplierAccountId, summary])
   );
@@ -1767,16 +1779,20 @@ export function IntoWorkbench() {
           disabled: Boolean(saveChangesDisabledReason()),
           disabledReason: saveChangesDisabledReason(),
         },
-        {
-          key: "learn",
-          label: "Learn",
-          variant: "secondary",
-          onClick: learnSelectedInvoice,
-          loading: busy === "learn",
-          feedback: buttonFeedbackFor("learn", "learn"),
-          disabled: Boolean(learnDisabledReason(selectedInvoice)),
-          disabledReason: learnDisabledReason(selectedInvoice),
-        },
+        ...(state.supplierLearningEnabled
+          ? [
+              {
+                key: "learn",
+                label: "Learn",
+                variant: "secondary" as const,
+                onClick: learnSelectedInvoice,
+                loading: busy === "learn",
+                feedback: buttonFeedbackFor("learn", "learn"),
+                disabled: Boolean(learnDisabledReason(selectedInvoice)),
+                disabledReason: learnDisabledReason(selectedInvoice),
+              },
+            ]
+          : []),
         {
           key: `reread-${selectedInvoice.id}`,
           label: "Re-read invoice",
@@ -1984,13 +2000,21 @@ export function IntoWorkbench() {
       configuration: NonNullable<ApiState["exactConfiguration"]>;
     };
     const learningData = (await learningResponse.json()) as {
+      enabled?: boolean;
       suppliers?: SupplierLearningSummary[];
       error?: string;
     };
-    if (!learningResponse.ok || !learningData.suppliers) {
+    const learningStateLoaded =
+      learningResponse.ok &&
+      typeof learningData.enabled === "boolean" &&
+      Array.isArray(learningData.suppliers);
+    if (!learningStateLoaded) {
       setMessage(
         learningData.error ?? "Supplier learning summaries could not be loaded."
       );
+    } else if (!learningData.enabled) {
+      setActiveView("queue");
+      setLearningResetTarget(null);
     }
     setState((current) => ({
       permissions: [...SHARED_ACCESS_PERMISSIONS],
@@ -2000,14 +2024,17 @@ export function IntoWorkbench() {
       exactMasterDataStale: exactData.masterDataStale,
       exactMasterDataReadOnly: exactData.masterDataReadOnly,
       supplierOverviewImport: exactData.supplierOverviewImport,
-      supplierLearning:
-        learningResponse.ok && learningData.suppliers
-          ? learningData.suppliers
-          : current.supplierLearning,
-      supplierLearningLoaded:
-        learningResponse.ok && Boolean(learningData.suppliers)
-          ? true
-          : current.supplierLearningLoaded,
+      supplierLearning: learningStateLoaded
+        ? learningData.enabled
+          ? learningData.suppliers!
+          : []
+        : current.supplierLearning,
+      supplierLearningLoaded: learningStateLoaded
+        ? true
+        : current.supplierLearningLoaded,
+      supplierLearningEnabled: learningStateLoaded
+        ? learningData.enabled!
+        : current.supplierLearningEnabled,
       exactConfiguration: exactData.configuration,
     }));
 
@@ -2019,16 +2046,26 @@ export function IntoWorkbench() {
   async function refreshSupplierLearning() {
     const response = await fetch("/api/suppliers/learning");
     const data = (await response.json()) as {
+      enabled?: boolean;
       suppliers?: SupplierLearningSummary[];
       error?: string;
     };
-    if (!response.ok || !data.suppliers) {
+    if (
+      !response.ok ||
+      typeof data.enabled !== "boolean" ||
+      !Array.isArray(data.suppliers)
+    ) {
       throw new Error(data.error ?? "Supplier learning could not be refreshed.");
+    }
+    if (!data.enabled) {
+      setActiveView("queue");
+      setLearningResetTarget(null);
     }
     setState((current) => ({
       ...current,
-      supplierLearning: data.suppliers!,
+      supplierLearning: data.enabled ? data.suppliers! : [],
       supplierLearningLoaded: true,
+      supplierLearningEnabled: data.enabled!,
     }));
   }
 
@@ -3909,10 +3946,10 @@ export function IntoWorkbench() {
         ) : null}
 
         <div className="flex flex-wrap gap-2">
-          {(["queue", "archive", "supplier-learning"] as ActiveView[]).map((view) => (
+          {availableViews.map((view) => (
             <ActionButton
               key={view}
-              variant={activeView === view ? "secondary" : "ghost"}
+              variant={visibleActiveView === view ? "secondary" : "ghost"}
               onClick={() => {
                 setActiveView(view);
                 if (view === "archive" && !archive) {
@@ -3933,7 +3970,7 @@ export function IntoWorkbench() {
           ))}
         </div>
 
-        {activeView === "archive" ? (
+        {visibleActiveView === "archive" ? (
           <section className="rounded-lg border border-stone-300 bg-white p-4">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
               <div>
@@ -4262,7 +4299,7 @@ export function IntoWorkbench() {
           </section>
         ) : null}
 
-        {activeView === "supplier-learning" ? (
+        {state.supplierLearningEnabled && activeView === "supplier-learning" ? (
           <section className="rounded-lg border border-stone-300 bg-white p-4">
             <div>
               <h2 className="text-lg font-semibold">Supplier learning</h2>
@@ -4354,7 +4391,7 @@ export function IntoWorkbench() {
           </section>
         ) : null}
 
-        {activeView === "queue" ? (
+        {visibleActiveView === "queue" ? (
         <section className="rounded-lg border border-stone-300 bg-white">
           <div className="flex flex-col gap-3 border-b border-stone-200 p-4 md:flex-row md:items-center md:justify-between">
             <div>
@@ -4702,7 +4739,7 @@ export function IntoWorkbench() {
                       }
                       threshold={confidenceThreshold}
                     />
-                    {selectedSupplierLearning ? (
+                    {state.supplierLearningEnabled && selectedSupplierLearning ? (
                       <div className="sm:col-span-2">
                         <SupplierReliabilityBadge summary={selectedSupplierLearning} />
                       </div>
@@ -4740,7 +4777,8 @@ export function IntoWorkbench() {
                                   <span>
                                     {candidate.account.code} - {candidate.account.name} (
                                     {percentScore(candidate.confidence)} match)
-                                    {supplierLearningByAccount.get(candidate.account.id) ? (
+                                    {state.supplierLearningEnabled &&
+                                    supplierLearningByAccount.get(candidate.account.id) ? (
                                       <span className="block text-xs font-normal text-stone-500">
                                         Supplier reliability{" "}
                                         {
@@ -5551,61 +5589,66 @@ export function IntoWorkbench() {
           </section>
         )}
 
-        <dialog
-          ref={resetLearningDialogRef}
-          aria-labelledby="supplier-learning-reset-title"
-          onCancel={(event) => {
-            event.preventDefault();
-            if (
-              learningResetTarget &&
-              busy === `reset-learning-${learningResetTarget.supplierAccountId}`
-            ) {
-              return;
-            }
-            setLearningResetTarget(null);
-          }}
-          onClose={() => setLearningResetTarget(null)}
-          className="m-auto max-w-lg rounded-xl border border-stone-300 bg-white p-0 text-stone-900 shadow-2xl backdrop:bg-stone-950/40"
-        >
-          <div className="p-5">
-            <h2 id="supplier-learning-reset-title" className="text-lg font-semibold">
-              Reset learning
-            </h2>
-            <p className="mt-3 text-sm leading-6 text-stone-700">
-              {resetLearningConfirmation}
-            </p>
-            {learningResetTarget ? (
-              <p className="mt-2 text-sm font-semibold text-stone-900">
-                {learningResetTarget.supplierCode} -{" "}
-                {learningResetTarget.supplierName}
-              </p>
-            ) : null}
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                ref={resetLearningCancelRef}
-                type="button"
-                onClick={() => setLearningResetTarget(null)}
-                disabled={Boolean(busy)}
-                className="inline-flex min-h-11 cursor-pointer items-center justify-center rounded-md border border-stone-300 bg-white px-4 py-2.5 text-sm font-semibold text-stone-700 shadow-sm hover:bg-stone-50 disabled:cursor-not-allowed disabled:bg-stone-100 disabled:text-stone-500"
-              >
-                Cancel
-              </button>
-              <ActionButton
-                variant="danger"
-                onClick={confirmResetSupplierLearning}
-                loading={Boolean(
-                  learningResetTarget &&
-                    busy ===
-                      `reset-learning-${learningResetTarget.supplierAccountId}`
-                )}
-                disabled={!learningResetTarget || Boolean(busy)}
-                disabledReason="Choose a supplier before resetting learning."
+        {state.supplierLearningEnabled ? (
+          <dialog
+            ref={resetLearningDialogRef}
+            aria-labelledby="supplier-learning-reset-title"
+            onCancel={(event) => {
+              event.preventDefault();
+              if (
+                learningResetTarget &&
+                busy === `reset-learning-${learningResetTarget.supplierAccountId}`
+              ) {
+                return;
+              }
+              setLearningResetTarget(null);
+            }}
+            onClose={() => setLearningResetTarget(null)}
+            className="m-auto max-w-lg rounded-xl border border-stone-300 bg-white p-0 text-stone-900 shadow-2xl backdrop:bg-stone-950/40"
+          >
+            <div className="p-5">
+              <h2
+                id="supplier-learning-reset-title"
+                className="text-lg font-semibold"
               >
                 Reset learning
-              </ActionButton>
+              </h2>
+              <p className="mt-3 text-sm leading-6 text-stone-700">
+                {resetLearningConfirmation}
+              </p>
+              {learningResetTarget ? (
+                <p className="mt-2 text-sm font-semibold text-stone-900">
+                  {learningResetTarget.supplierCode} -{" "}
+                  {learningResetTarget.supplierName}
+                </p>
+              ) : null}
+              <div className="mt-5 flex justify-end gap-2">
+                <button
+                  ref={resetLearningCancelRef}
+                  type="button"
+                  onClick={() => setLearningResetTarget(null)}
+                  disabled={Boolean(busy)}
+                  className="inline-flex min-h-11 cursor-pointer items-center justify-center rounded-md border border-stone-300 bg-white px-4 py-2.5 text-sm font-semibold text-stone-700 shadow-sm hover:bg-stone-50 disabled:cursor-not-allowed disabled:bg-stone-100 disabled:text-stone-500"
+                >
+                  Cancel
+                </button>
+                <ActionButton
+                  variant="danger"
+                  onClick={confirmResetSupplierLearning}
+                  loading={Boolean(
+                    learningResetTarget &&
+                      busy ===
+                        `reset-learning-${learningResetTarget.supplierAccountId}`
+                  )}
+                  disabled={!learningResetTarget || Boolean(busy)}
+                  disabledReason="Choose a supplier before resetting learning."
+                >
+                  Reset learning
+                </ActionButton>
+              </div>
             </div>
-          </div>
-        </dialog>
+          </dialog>
+        ) : null}
 
       </div>
     </main>

@@ -85,6 +85,59 @@ test("supplier learning routes return stable not-found and list responses", asyn
   assert.ok(Array.isArray(payload.suppliers));
 });
 
+test("supplier learning read state stays off until both rollout flags are enabled", async () => {
+  const original = {
+    NODE_ENV: process.env.NODE_ENV,
+    LEARNING_V2_ENABLED: process.env.LEARNING_V2_ENABLED,
+    LEARNING_UI_ENABLED: process.env.LEARNING_UI_ENABLED,
+  };
+
+  try {
+    Reflect.set(process.env, "NODE_ENV", "production");
+    delete process.env.LEARNING_V2_ENABLED;
+    delete process.env.LEARNING_UI_ENABLED;
+
+    const productionDefault = await listSupplierLearningRoute();
+    assert.deepEqual(await productionDefault.json(), {
+      enabled: false,
+      suppliers: [],
+    });
+
+    process.env.LEARNING_V2_ENABLED = "true";
+    process.env.LEARNING_UI_ENABLED = "false";
+    const hiddenUi = await listSupplierLearningRoute();
+    assert.deepEqual(await hiddenUi.json(), {
+      enabled: false,
+      suppliers: [],
+    });
+
+    process.env.LEARNING_V2_ENABLED = "false";
+    process.env.LEARNING_UI_ENABLED = "true";
+    const disabledLearning = await listSupplierLearningRoute();
+    assert.deepEqual(await disabledLearning.json(), {
+      enabled: false,
+      suppliers: [],
+    });
+
+    process.env.LEARNING_V2_ENABLED = "true";
+    const enabled = await listSupplierLearningRoute();
+    const payload = (await enabled.json()) as {
+      enabled?: boolean;
+      suppliers?: unknown[];
+    };
+    assert.equal(payload.enabled, true);
+    assert.ok(Array.isArray(payload.suppliers));
+  } finally {
+    for (const [key, value] of Object.entries(original)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+});
+
 test("Learn route requires an integer revision and rejects stale drafts without mutation", async () => {
   const invoice = routeLearningInvoice();
   const invoiceBefore = structuredClone(invoice);

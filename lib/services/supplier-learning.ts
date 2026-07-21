@@ -7,6 +7,7 @@ import type {
   SupplierLearningProfile,
 } from "../domain/invoice";
 export * from "./supplier-reliability";
+export * from "./supplier-reliability-evidence";
 
 type LearningInput = Omit<SupplierLearningExample, "generation"> & {
   patterns?: Array<

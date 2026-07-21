@@ -10,6 +10,12 @@ export type SupplierReliabilityMetric =
   | "inverse_correction"
   | "duplicate_decision";
 
+export type SupplierReliabilityTrigger =
+  | "learn"
+  | "review"
+  | "booking"
+  | "migration";
+
 export const SUPPLIER_RELIABILITY_METRICS: Record<
   SupplierReliabilityMetric,
   { label: string; weight: number }
@@ -32,6 +38,7 @@ export const SUPPLIER_RELIABILITY_METRICS: Record<
 export type SupplierReliabilityExample = {
   contentHash: string;
   trustState?: "trusted" | "legacy";
+  trigger?: SupplierReliabilityTrigger;
 };
 
 export type SupplierReliabilityOutcome = {
@@ -40,6 +47,7 @@ export type SupplierReliabilityOutcome = {
   occurredAt: string;
   evidence?: "trusted" | "legacy";
   status?: "observed" | "missing" | "infrastructure";
+  trigger?: SupplierReliabilityTrigger;
 };
 
 export type SupplierReliabilityMetricBreakdown = {

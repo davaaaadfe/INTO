@@ -119,6 +119,18 @@ test("does not turn committed mutations or failed summary reads into false train
   assert.match(activeReviewSource, /busy === `reset-learning-\$\{learningResetTarget\.supplierAccountId\}`/);
 });
 
+test("keeps the workspace stable when a required API returns an error payload", () => {
+  assert.match(
+    activeReviewSource,
+    /if \(!invoiceResponse\.ok \|\| !Array\.isArray\(invoiceData\.invoices\)\)/
+  );
+  assert.match(activeReviewSource, /invoiceData\.error/);
+  assert.match(
+    activeReviewSource,
+    /catch\(\(error: unknown\) =>[\s\S]*workspaceLoadErrorMessage\(error\)/
+  );
+});
+
 test("supplier selection preserves live edits and refreshes revision conflicts", () => {
   assert.match(
     activeReviewSource,

@@ -168,6 +168,14 @@ const learnedCorrectionNote = "Applied from previous user correction.";
 const exactHistorySuggestionNote = "Suggested from previous Exact bookings.";
 const resetLearningConfirmation = "Reset learning for this supplier? INTO will forget previous training patterns for this supplier. Existing invoices and Exact bookings will not be deleted.";
 
+function workspaceLoadErrorMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : "";
+  if (message.includes("Supplier learning storage is not configured")) {
+    return "INTO data is temporarily unavailable. Ask the system owner to check the server configuration and redeploy.";
+  }
+  return message || "Unable to load the INTO workspace.";
+}
+
 function supplierReliabilityCopy(band: SupplierLearningSummary["confidence"]["band"]) {
   if (band === "High") {
     return "INTO usually reads this supplier correctly.";
@@ -1994,7 +2002,8 @@ export function IntoWorkbench() {
       fetch("/api/suppliers/learning"),
     ]);
     const invoiceData = (await readApiJson(invoiceResponse)) as {
-      invoices: UploadedInvoice[];
+      invoices?: UploadedInvoice[];
+      error?: string;
     };
     const exactData = (await readApiJson(exactResponse)) as {
       connection: PublicExactConnection | null;
@@ -2003,12 +2012,20 @@ export function IntoWorkbench() {
       masterDataReadOnly: boolean;
       supplierOverviewImport: SupplierOverviewImportStatus | null;
       configuration: NonNullable<ApiState["exactConfiguration"]>;
+      error?: string;
     };
     const learningData = (await readApiJson(learningResponse)) as {
       enabled?: boolean;
       suppliers?: SupplierLearningSummary[];
       error?: string;
     };
+    if (!invoiceResponse.ok || !Array.isArray(invoiceData.invoices)) {
+      throw new Error(invoiceData.error ?? "Invoice data could not be loaded.");
+    }
+    if (!exactResponse.ok || !exactData.configuration) {
+      throw new Error(exactData.error ?? "Exact Online status could not be loaded.");
+    }
+    const invoices = invoiceData.invoices;
     const learningStateLoaded =
       learningResponse.ok &&
       typeof learningData.enabled === "boolean" &&
@@ -2023,7 +2040,7 @@ export function IntoWorkbench() {
     }
     setState((current) => ({
       permissions: [...SHARED_ACCESS_PERMISSIONS],
-      invoices: invoiceData.invoices,
+      invoices,
       exactConnection: exactData.connection,
       exactMasterData: exactData.masterData,
       exactMasterDataStale: exactData.masterDataStale,
@@ -2043,8 +2060,8 @@ export function IntoWorkbench() {
       exactConfiguration: exactData.configuration,
     }));
 
-    if (!selectedInvoiceId && invoiceData.invoices[0]) {
-      setSelectedInvoiceId(invoiceData.invoices[0].id);
+    if (!selectedInvoiceId && invoices[0]) {
+      setSelectedInvoiceId(invoices[0].id);
     }
   }
 
@@ -2161,7 +2178,9 @@ export function IntoWorkbench() {
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
-      refreshAll().catch(() => setMessage("Unable to load the INTO workspace."));
+      refreshAll().catch((error: unknown) =>
+        setMessage(workspaceLoadErrorMessage(error))
+      );
     }, 0);
 
     return () => window.clearTimeout(timeoutId);
@@ -2182,7 +2201,9 @@ export function IntoWorkbench() {
           ? "Exact Online is connected. INTO synced Exact master data."
           : "Exact Online connection failed. Check your Exact app credentials and redirect URI."
       );
-      refreshAll().catch(() => undefined);
+      refreshAll().catch((error: unknown) =>
+        setMessage(workspaceLoadErrorMessage(error))
+      );
     }, 0);
     params.delete("exact");
     const nextQuery = params.toString();

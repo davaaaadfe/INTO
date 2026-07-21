@@ -51,6 +51,8 @@ import {
 } from "../services/purchase-journal-intelligence";
 import {
   applyLearnedExtractedData,
+  canonicalSupplierIdentityKey,
+  canonicalSupplierIdentityKeys,
   captureSupplierAccountCorrection,
   captureUserCorrections,
 } from "../services/correction-learning";
@@ -1069,23 +1071,54 @@ function trustedContentHash(invoice: UploadedInvoice) {
 export function learnInvoice(
   invoiceId: string,
   correctedData: ExtractedInvoiceData,
-  bookingLines: PurchaseJournalLine[]
+  bookingLines: PurchaseJournalLine[],
+  expectedRevision: number
 ) {
   const store = getStore();
   const invoice = store.invoices.find((item) => item.id === invoiceId);
   if (!invoice) {
     return null;
   }
+  if (invoice.revision !== expectedRevision) {
+    throw new InvoiceRevisionConflictError(
+      "Invoice revision changed. Refresh and try again."
+    );
+  }
   if (invoice.status === "Booked" || invoice.exactBookingId) {
     throw new Error("Booked invoices cannot be used as learning-only drafts.");
   }
-  if (invoice.learningState === "saved" && invoice.learningMetadata) {
+  const activeProfile = invoice.learningMetadata
+    ? store.learning.supplierProfiles.find(
+        (item) =>
+          item.supplierAccountId === invoice.learningMetadata!.supplierAccountId
+      )
+    : undefined;
+  if (
+    invoice.learningState === "saved" &&
+    invoice.learningMetadata?.generation === activeProfile?.generation
+  ) {
     return invoice;
   }
 
-  const originalExtractedData = structuredClone(invoice.extractedData);
-  const finalExtractedData = structuredClone(correctedData);
-  const finalBookingLines = structuredClone(bookingLines);
+  const previousExample = invoice.learningMetadata
+    ? store.learning.supplierExamples.find(
+        (item) => item.id === invoice.learningMetadata!.exampleId
+      )
+    : undefined;
+  const isGenerationRelearn = invoice.status === "Learned";
+  const originalExtractedData = structuredClone(
+    previousExample?.originalExtractedData ?? invoice.extractedData
+  );
+  const finalExtractedData = structuredClone(
+    isGenerationRelearn && previousExample?.finalExtractedData
+      ? previousExample.finalExtractedData
+      : correctedData
+  );
+  const finalBookingLines = structuredClone(
+    isGenerationRelearn && previousExample?.bookingLines
+      ? previousExample.bookingLines
+      : bookingLines
+  );
   const draft: UploadedInvoice = {
     ...structuredClone(invoice),
     extractedData: finalExtractedData,
@@ -1106,7 +1139,9 @@ export function learnInvoice(
     throw new Error("Select one Exact supplier before saving learning.");
   }
 
-  const saved = saveInvoiceReview(invoiceId, finalExtractedData, finalBookingLines);
+  const saved = isGenerationRelearn
+    ? invoice
+    : saveInvoiceReview(invoiceId, finalExtractedData, finalBookingLines);
   if (!saved) {
     return null;
   }
@@ -1170,6 +1205,7 @@ export function learnInvoice(
   return saved;
 }
 
+export class InvoiceRevisionConflictError extends Error {}
 export class SupplierLearningNotFoundError extends Error {}
 export class SupplierLearningGenerationConflictError extends Error {}
 
@@ -1195,17 +1231,12 @@ function exactSupplierIdentityKeys(accountId: string) {
   if (!supplier) {
     return [];
   }
-  const compact = (value: string) => value.replace(/[^a-z0-9]/gi, "");
-  const dashed = (value: string) =>
-    value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  return [
-    supplier.vatNumber ? `vat:${compact(supplier.vatNumber).toUpperCase()}` : "",
-    supplier.iban ? `iban:${compact(supplier.iban).toLowerCase()}` : "",
-    supplier.chamberOfCommerceNumber
-      ? `coc:${dashed(supplier.chamberOfCommerceNumber)}`
-      : "",
-    supplier.name ? `name:${dashed(supplier.name)}` : "",
-  ].filter(Boolean);
+  return canonicalSupplierIdentityKeys({
+    supplierVatNumber: supplier.vatNumber,
+    iban: supplier.iban,
+    supplierChamberOfCommerceNumber: supplier.chamberOfCommerceNumber,
+    supplierName: supplier.name,
+  });
 }
 
 export function resetLearningForSupplier(
@@ -1225,12 +1256,14 @@ export function resetLearningForSupplier(
     );
   }
 
-  const supplierIdentities = new Set([
-    ...exactSupplierIdentityKeys(accountId),
-    ...store.learning.supplierSelections
-      .filter((item) => item.accountId === accountId)
-      .map((item) => item.supplierIdentity),
-  ]);
+  const supplierIdentities = new Set(
+    [
+      ...exactSupplierIdentityKeys(accountId),
+      ...store.learning.supplierSelections
+        .filter((item) => item.accountId === accountId)
+        .map((item) => item.supplierIdentity),
+    ].map(canonicalSupplierIdentityKey)
+  );
   const resetAt = now();
   Object.assign(
     store.learning,
@@ -1253,8 +1286,11 @@ export function resetLearningForSupplier(
   );
   store.learning.corrections = store.learning.corrections.filter(
     (item) =>
-      item.supplierAccountId !== accountId &&
-      !supplierIdentities.has(item.supplierIdentity)
+      item.supplierAccountId
+      ? item.supplierAccountId !== accountId
+      : !supplierIdentities.has(
+          canonicalSupplierIdentityKey(item.supplierIdentity)
+        )
   );
   addAuditEvent({
     type: "supplier_learning_reset",

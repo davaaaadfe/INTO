@@ -96,19 +96,45 @@ function normalizedVat(value: string) {
   return value.replace(/[^a-z0-9]/gi, "").toUpperCase();
 }
 
-function supplierIdentities(data: ExtractedInvoiceData) {
+export function canonicalSupplierIdentityKeys(
+  data: Pick<
+    ExtractedInvoiceData,
+    | "supplierVatNumber"
+    | "iban"
+    | "supplierChamberOfCommerceNumber"
+    | "supplierName"
+  >
+) {
   return [
-    data.supplierVatNumber ? `vat:${normalizedVat(data.supplierVatNumber)}` : "",
-    data.iban ? `iban:${normalizedValue(data.iban)}` : "",
+    data.supplierVatNumber ? `vat:${data.supplierVatNumber}` : "",
+    data.iban ? `iban:${data.iban}` : "",
     data.supplierChamberOfCommerceNumber
-      ? `coc:${normalizedValue(data.supplierChamberOfCommerceNumber)}`
+      ? `coc:${data.supplierChamberOfCommerceNumber}`
       : "",
-    data.supplierName ? `name:${normalizedValue(data.supplierName)}` : "",
-  ].filter(Boolean);
+    data.supplierName ? `name:${data.supplierName}` : "",
+  ]
+    .filter(Boolean)
+    .map(canonicalSupplierIdentityKey);
+}
+
+export function canonicalSupplierIdentityKey(identity: string) {
+  const separator = identity.indexOf(":");
+  if (separator < 0) return identity;
+  const kind = identity.slice(0, separator).toLowerCase();
+  const value = identity.slice(separator + 1);
+  if (kind === "vat") return `vat:${normalizedVat(value)}`;
+  if (kind === "iban" || kind === "coc") {
+    return `${kind}:${normalizeText(value).replace(/[^a-z0-9]/g, "")}`;
+  }
+  if (kind === "name") return `name:${normalizedValue(value)}`;
+  return identity;
 }
 
 function primarySupplierIdentity(data: ExtractedInvoiceData) {
-  return supplierIdentities(data)[0] ?? `name:${normalizedValue(data.supplierName)}`;
+  return (
+    canonicalSupplierIdentityKeys(data)[0] ??
+    `name:${normalizedValue(data.supplierName)}`
+  );
 }
 
 export function learningDescriptionKey(value: string) {
@@ -632,7 +658,11 @@ function supplierMatchConfidence(
   correction: LearnedCorrection,
   data: ExtractedInvoiceData
 ) {
-  if (supplierIdentities(data).includes(correction.supplierIdentity)) {
+  if (
+    canonicalSupplierIdentityKeys(data).includes(
+      canonicalSupplierIdentityKey(correction.supplierIdentity)
+    )
+  ) {
     return correction.supplierIdentity.startsWith("name:") ? 0.95 : 0.99;
   }
   if (normalizedValue(correction.supplierName) === normalizedValue(data.supplierName)) {

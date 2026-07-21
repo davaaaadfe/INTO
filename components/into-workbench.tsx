@@ -30,6 +30,7 @@ import type {
   PermissionAction,
   PurchaseJournalLine,
   PublicExactConnection,
+  SupplierLearningProfile,
   SupplierLearningSummary,
   SupplierOverviewImportStatus,
   UploadedInvoice,
@@ -1461,6 +1462,9 @@ export function IntoWorkbench() {
     selectedInvoice && draft
       ? getRequiredBookingDataIssues(draft, selectedPurchaseJournal)
       : [];
+  const contextualSupplierReviewVisible = Boolean(
+    selectedPurchaseJournal?.supplierResolution.reviewRequired
+  );
   const requiredIssueFor = (
     fields: ValidationError["field"][]
   ): FieldIssue | undefined => {
@@ -1491,15 +1495,12 @@ export function IntoWorkbench() {
           : `${label} was not linked to a labelled source value. Please confirm it.`,
     };
   };
-  const supplierIssue = validationIssueFor(
-    ["supplier", "supplierName"],
-    [
-      selectedPurchaseJournal?.supplierResolution.reviewRequired
-        ? selectedPurchaseJournal.supplierResolution.reasoning[0]
-        : undefined,
-    ]
-  );
-  const supplierFieldIssue = requiredIssueFor(["supplierName"]) ?? supplierIssue;
+  const supplierIssue = contextualSupplierReviewVisible
+    ? undefined
+    : validationIssueFor(["supplier", "supplierName"]);
+  const supplierFieldIssue = contextualSupplierReviewVisible
+    ? undefined
+    : requiredIssueFor(["supplierName"]) ?? supplierIssue;
   const expenseDescriptionIssue =
     requiredIssueFor(["expenseDescription"]) ??
     validationIssueFor(["expenseDescription"]);
@@ -1689,13 +1690,20 @@ export function IntoWorkbench() {
       : undefined);
   const visibleValidationMessages = selectedInvoice
     ? uniqueValidationMessages([
-        ...selectedInvoice.validationErrors.map((item) => ({
-          id: item.id,
-          message: item.message,
-        })),
+        ...selectedInvoice.validationErrors
+          .filter(
+            (item) =>
+              !contextualSupplierReviewVisible ||
+              (item.field !== "supplier" && item.field !== "supplierName")
+          )
+          .map((item) => ({
+            id: item.id,
+            message: item.message,
+          })),
         ...selectedRequiredBookingIssues
           .filter(
             (issue) =>
+              (!contextualSupplierReviewVisible || issue.field !== "supplierName") &&
               !selectedInvoice.validationErrors.some(
                 (error) => error.field === issue.field
               )
@@ -1975,8 +1983,14 @@ export function IntoWorkbench() {
     };
     const learningData = (await learningResponse.json()) as {
       suppliers?: SupplierLearningSummary[];
+      error?: string;
     };
-    setState({
+    if (!learningResponse.ok || !learningData.suppliers) {
+      setMessage(
+        learningData.error ?? "Supplier learning summaries could not be loaded."
+      );
+    }
+    setState((current) => ({
       permissions: [...SHARED_ACCESS_PERMISSIONS],
       invoices: invoiceData.invoices,
       exactConnection: exactData.connection,
@@ -1984,9 +1998,12 @@ export function IntoWorkbench() {
       exactMasterDataStale: exactData.masterDataStale,
       exactMasterDataReadOnly: exactData.masterDataReadOnly,
       supplierOverviewImport: exactData.supplierOverviewImport,
-      supplierLearning: learningData.suppliers ?? [],
+      supplierLearning:
+        learningResponse.ok && learningData.suppliers
+          ? learningData.suppliers
+          : current.supplierLearning,
       exactConfiguration: exactData.configuration,
-    });
+    }));
 
     if (!selectedInvoiceId && invoiceData.invoices[0]) {
       setSelectedInvoiceId(invoiceData.invoices[0].id);
@@ -2003,6 +2020,35 @@ export function IntoWorkbench() {
       throw new Error(data.error ?? "Supplier learning could not be refreshed.");
     }
     setState((current) => ({ ...current, supplierLearning: data.suppliers! }));
+  }
+
+  function applyResetProfile(
+    target: SupplierLearningSummary,
+    profile: SupplierLearningProfile
+  ) {
+    const summary: SupplierLearningSummary = {
+      ...target,
+      ...profile,
+      confidence: {
+        score: 35,
+        band: "Low",
+        baseline: 35,
+        exampleCount: 0,
+        volume: 0,
+        quality: 0,
+        driftPenalty: 0,
+      },
+    };
+    setState((current) => ({
+      ...current,
+      supplierLearning: current.supplierLearning.some(
+        (item) => item.supplierAccountId === summary.supplierAccountId
+      )
+        ? current.supplierLearning.map((item) =>
+            item.supplierAccountId === summary.supplierAccountId ? summary : item
+          )
+        : [...current.supplierLearning, summary],
+    }));
   }
 
   async function loadArchive(nextFilters = archiveFilters) {
@@ -2588,9 +2634,15 @@ export function IntoWorkbench() {
           invoice.id === data.invoice!.id ? data.invoice! : invoice
         ),
       }));
-      await refreshSupplierLearning();
       setMessage(data.message ?? "Learning saved for this supplier.");
       flashButton("learn", "success");
+      try {
+        await refreshSupplierLearning();
+      } catch {
+        setMessage(
+          "Supplier learning was saved, but its summary could not be refreshed."
+        );
+      }
     } catch (error) {
       setMessage(
         error instanceof Error ? error.message : "Learning could not be saved."
@@ -2620,17 +2672,27 @@ export function IntoWorkbench() {
           }),
         }
       );
-      const data = (await response.json()) as { error?: string };
-      if (!response.ok) {
+      const data = (await response.json()) as {
+        profile?: SupplierLearningProfile;
+        error?: string;
+      };
+      if (!response.ok || !data.profile) {
         throw new Error(data.error ?? "Supplier learning reset failed.");
       }
+      applyResetProfile(learningResetTarget, data.profile);
       setLearningResetTarget(null);
-      await refreshSupplierLearning();
       setMessage(`Learning reset for ${learningResetTarget.supplierName}.`);
       flashButton(
         `reset-learning-${learningResetTarget.supplierAccountId}`,
         "success"
       );
+      try {
+        await refreshSupplierLearning();
+      } catch {
+        setMessage(
+          "Supplier learning was reset, but its summary could not be refreshed."
+        );
+      }
     } catch (error) {
       setMessage(
         error instanceof Error ? error.message : "Supplier learning reset failed."
@@ -5479,6 +5541,12 @@ export function IntoWorkbench() {
           aria-labelledby="supplier-learning-reset-title"
           onCancel={(event) => {
             event.preventDefault();
+            if (
+              learningResetTarget &&
+              busy === `reset-learning-${learningResetTarget.supplierAccountId}`
+            ) {
+              return;
+            }
             setLearningResetTarget(null);
           }}
           onClose={() => setLearningResetTarget(null)}

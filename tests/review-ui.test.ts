@@ -57,6 +57,8 @@ test("places Learn between saving and approval and sends the live revision", () 
   assert.ok(learn > save);
   assert.ok(review > learn);
   assert.match(activeReviewSource, /expectedRevision:\s*selectedInvoice\.revision/);
+  assert.match(activeReviewSource, /extractedData:\s*draft/);
+  assert.match(activeReviewSource, /bookingLines:\s*bookingLinePayloads/);
   assert.match(activeReviewSource, /Learning saved for this supplier\./);
 });
 
@@ -70,6 +72,11 @@ test("adds a Supplier learning view with separate reliability copy", () => {
   assert.match(activeReviewSource, /INTO usually reads this supplier correctly\./);
   assert.match(activeReviewSource, /Review recommended\./);
   assert.match(activeReviewSource, /More training invoices needed\./);
+  assert.match(activeReviewSource, /score:\s*35/);
+  assert.match(
+    activeReviewSource,
+    /activeSupplierGeneration > invoice\.learningMetadata\.generation/
+  );
 });
 
 test("uses a contextual supplier chooser without the duplicated warning title", () => {
@@ -77,6 +84,7 @@ test("uses a contextual supplier chooser without the duplicated warning title", 
   assert.match(activeReviewSource, /supplierResolution\.reviewRequired/);
   assert.match(activeReviewSource, /supplierResolution\.candidates\.map/);
   assert.match(activeReviewSource, /Search all Exact suppliers/);
+  assert.match(activeReviewSource, /contextualSupplierReviewVisible/);
 });
 
 test("uses an accessible reset dialog with the approved destructive-action copy", () => {
@@ -88,4 +96,18 @@ test("uses an accessible reset dialog with the approved destructive-action copy"
   );
   assert.match(activeReviewSource, />\s*Cancel\s*</);
   assert.match(activeReviewSource, />\s*Reset learning\s*</);
+  assert.match(activeReviewSource, /ref=\{resetLearningCancelRef\}/);
+  assert.match(
+    activeReviewSource,
+    /expectedGeneration:\s*learningResetTarget\.generation/
+  );
+});
+
+test("does not turn committed mutations or failed summary reads into false training state", () => {
+  assert.match(activeReviewSource, /if \(!learningResponse\.ok/);
+  assert.match(activeReviewSource, /profile\?: SupplierLearningProfile/);
+  assert.match(activeReviewSource, /applyResetProfile/);
+  assert.match(activeReviewSource, /Supplier learning was saved, but its summary could not be refreshed\./);
+  assert.match(activeReviewSource, /Supplier learning was reset, but its summary could not be refreshed\./);
+  assert.match(activeReviewSource, /busy === `reset-learning-\$\{learningResetTarget\.supplierAccountId\}`/);
 });

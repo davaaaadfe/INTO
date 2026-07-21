@@ -6,6 +6,7 @@ import type {
   SupplierLearningPattern,
   SupplierLearningProfile,
 } from "../domain/invoice";
+export * from "./supplier-reliability";
 
 type LearningInput = Omit<SupplierLearningExample, "generation"> & {
   patterns?: Array<

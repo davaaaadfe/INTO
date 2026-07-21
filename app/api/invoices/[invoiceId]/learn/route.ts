@@ -34,6 +34,7 @@ export async function POST(request: Request, context: RouteContext) {
     try {
       const payload = (await request.json()) as {
         expectedRevision?: unknown;
+        requestKey?: unknown;
         extractedData?: Partial<ExtractedInvoiceData>;
         bookingLines?: PurchaseJournalLine[];
       };
@@ -54,7 +55,8 @@ export async function POST(request: Request, context: RouteContext) {
         invoiceId,
         correctedData,
         bookingLines,
-        payload.expectedRevision as number
+        payload.expectedRevision as number,
+        typeof payload.requestKey === "string" ? payload.requestKey : undefined
       );
       return Response.json({
         message: "Learning saved for this supplier.",

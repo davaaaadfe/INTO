@@ -201,6 +201,48 @@ test("Learn route accepts the exact original retry and rejects a changed stale r
   assert.equal(changedResponse.status, 409);
 });
 
+test("Learn route keeps retries isolated when invoices share a content hash", async () => {
+  const firstInvoice = routeLearningInvoice();
+  const secondInvoice = routeLearningInvoice();
+  firstInvoice.checksum = "route-shared-content-hash";
+  secondInvoice.checksum = "route-shared-content-hash";
+  const payloadFor = (invoice: typeof firstInvoice, description: string) => ({
+    expectedRevision: invoice.revision!,
+    requestKey: `request-${invoice.id}`,
+    extractedData: { ...invoice.extractedData, expenseDescription: description },
+    bookingLines: invoice.purchaseJournal!.lines,
+  });
+  const firstPayload = payloadFor(firstInvoice, "First route correction");
+  const secondPayload = payloadFor(secondInvoice, "Second route correction");
+  const post = (invoice: typeof firstInvoice, payload: typeof firstPayload) =>
+    learnInvoiceRoute(
+      new Request(`http://localhost/api/invoices/${invoice.id}/learn`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      }),
+      { params: { invoiceId: invoice.id } }
+    );
+
+  assert.equal((await post(firstInvoice, firstPayload)).status, 200);
+  assert.equal((await post(secondInvoice, secondPayload)).status, 200);
+  assert.equal((await post(firstInvoice, firstPayload)).status, 200);
+  assert.equal((await post(secondInvoice, secondPayload)).status, 200);
+  assert.equal(
+    (await post(secondInvoice, { ...secondPayload, requestKey: "wrong-key" })).status,
+    409
+  );
+  assert.equal(
+    (
+      await post(secondInvoice, {
+        ...secondPayload,
+        extractedData: firstPayload.extractedData,
+      })
+    ).status,
+    409
+  );
+});
+
 test("single booking rejects learning-only invoices before attempts or connection work", async () => {
   const invoice = createUploadedInvoice({
     fileName: "single-learning-only.pdf",

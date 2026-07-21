@@ -835,12 +835,63 @@ function uniqueValidationErrors(errors: ValidationError[]) {
   });
 }
 
+function canonicalJson(value: unknown) {
+  return JSON.stringify(value, (_key, item: unknown) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      return item;
+    }
+    return Object.fromEntries(
+      Object.entries(item as Record<string, unknown>)
+        .filter(([, entry]) => entry !== undefined)
+        .sort(([left], [right]) => left.localeCompare(right))
+    );
+  });
+}
+
+function learnRequestFingerprint(input: {
+  correctedData: ExtractedInvoiceData;
+  bookingLines: PurchaseJournalLine[];
+  generation: number;
+  requestKey?: string;
+}) {
+  return createHash("sha256").update(canonicalJson(input)).digest("hex");
+}
+
+function recomputedLearnInputs(invoice: UploadedInvoice) {
+  if (!invoice.purchaseJournal) {
+    return null;
+  }
+  return canonicalJson({
+    supplierAccountId:
+      invoice.purchaseJournal.supplierResolution.selectedAccountId ?? null,
+    bookingLines: invoice.purchaseJournal.lines.map((line) => ({
+      glAccount: line.glAccount,
+      finalSelectedAccount: line.finalSelectedAccount,
+      description: line.description,
+      from: line.from,
+      to: line.to,
+      benefitStartDate: line.benefitStartDate,
+      benefitEndDate: line.benefitEndDate,
+      costCentre: line.costCentre,
+      costUnit: line.costUnit,
+      vatCode: line.vatCode,
+      percentage: line.percentage,
+      amount: line.amount,
+      vatAmount: line.vatAmount,
+      country: line.country,
+      intercompany: line.intercompany,
+      roundingAdjustment: line.roundingAdjustment,
+    })),
+  });
+}
+
 function recomputeInvoiceInStore(store: IntoStore, invoiceId: string) {
   const invoice = store.invoices.find((item) => item.id === invoiceId);
   if (!invoice) {
     return null;
   }
 
+  const previousLearnInputs = recomputedLearnInputs(invoice);
   const baseValidationErrors = validateInvoiceData(
     invoice.id,
     invoice.extractedData,
@@ -881,6 +932,12 @@ function recomputeInvoiceInStore(store: IntoStore, invoiceId: string) {
   invoice.lastError = invoice.validationErrors.length
     ? invoice.validationErrors.map((item) => item.message).join(" ")
     : undefined;
+  if (
+    previousLearnInputs !== null &&
+    previousLearnInputs !== recomputedLearnInputs(invoice)
+  ) {
+    invoice.revision = (invoice.revision ?? 1) + 1;
+  }
   invoice.updatedAt = now();
   return invoice;
 }
@@ -1077,7 +1134,8 @@ export function learnInvoice(
   invoiceId: string,
   correctedData: ExtractedInvoiceData,
   bookingLines: PurchaseJournalLine[],
-  expectedRevision: number
+  expectedRevision: number,
+  requestKey?: string
 ) {
   const store = getStore();
   const invoice = store.invoices.find((item) => item.id === invoiceId);
@@ -1098,12 +1156,19 @@ export function learnInvoice(
   const activeGenerationSaved =
     invoice.learningState === "saved" &&
     invoice.learningMetadata?.generation === activeProfile?.generation;
+  const retryFingerprint = invoice.learningMetadata
+    ? learnRequestFingerprint({
+        correctedData,
+        bookingLines,
+        generation: invoice.learningMetadata.generation,
+        requestKey,
+      })
+    : "";
   const exactRetry =
     activeGenerationSaved &&
     expectedRevision === (invoice.revision ?? 1) - 1 &&
-    JSON.stringify(correctedData) ===
-      JSON.stringify(previousExample?.finalExtractedData) &&
-    JSON.stringify(bookingLines) === JSON.stringify(previousExample?.bookingLines);
+    Boolean(invoice.learningMetadata?.requestFingerprint) &&
+    retryFingerprint === invoice.learningMetadata?.requestFingerprint;
   if (invoice.revision !== expectedRevision && !exactRetry) {
     throw new InvoiceRevisionConflictError(
       "Invoice revision changed. Refresh and try again."
@@ -1201,6 +1266,12 @@ export function learnInvoice(
     supplierAccountId,
     generation: profile.generation,
     contentHash,
+    requestFingerprint: learnRequestFingerprint({
+      correctedData: finalExtractedData,
+      bookingLines: finalBookingLines,
+      generation: profile.generation,
+      requestKey,
+    }),
     learnedAt,
     learnedByUserId: getCurrentUser().id,
   };
@@ -1432,6 +1503,7 @@ export function replaceInvoiceExtractionFromReread(
   invoice.intelligenceApprovedAt = undefined;
   invoice.purchaseJournal = null;
   invoice.lastError = undefined;
+  invoice.revision = (invoice.revision ?? 1) + 1;
   invoice.updatedAt = now();
   addAuditEvent({
     invoiceId,

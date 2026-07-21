@@ -15,8 +15,10 @@ import {
   markInvoiceBookingFailed,
   markInvoiceNeedsReview,
   recomputeInvoiceState,
+  replaceInvoiceExtractionFromReread,
   resetLearningForSupplier,
   saveInvoiceReview,
+  selectInvoiceSupplier,
   updateInvoiceExtraction,
 } from "../lib/repository/invoice-store";
 import { createMockExactMasterData } from "../lib/services/exact-master-data-service";
@@ -218,6 +220,86 @@ test("Learn rejects an earlier draft after intervening extraction and review edi
   assert.deepEqual(getStore().auditEvents, auditsBefore);
 });
 
+test("re-read and supplier selection each invalidate an earlier Learn draft", () => {
+  const { invoice, extractedData } = learningInvoice();
+  const beforeRereadRevision = invoice.revision!;
+  const reread = replaceInvoiceExtractionFromReread(invoice.id, {
+    ...extractedData,
+    expenseDescription: "Re-read description",
+  })!;
+
+  assert.equal(reread.revision, beforeRereadRevision + 1);
+  assert.throws(
+    () =>
+      learnInvoice(
+        invoice.id,
+        extractedData,
+        reread.purchaseJournal!.lines,
+        beforeRereadRevision
+      ),
+    /revision changed/i
+  );
+
+  updateInvoiceExtraction(
+    invoice.id,
+    {
+      ...extractedData,
+      supplierName: "Acme Supplies BV",
+      supplierVatNumber: "NL123456789B01",
+      supplierChamberOfCommerceNumber: "",
+      supplierAddress: "",
+      supplierCountry: "",
+      iban: "",
+    },
+    { applyLearning: false }
+  );
+  const ambiguous = recomputeInvoiceState(invoice.id)!;
+  assert.equal(ambiguous.purchaseJournal!.supplierResolution.selectedAccountId, undefined);
+  const beforeSelectionRevision = ambiguous.revision!;
+  const selected = selectInvoiceSupplier(invoice.id, "supplier_ambiguous_a")!;
+
+  assert.equal(
+    selected.purchaseJournal!.supplierResolution.selectedAccountId,
+    "supplier_ambiguous_a"
+  );
+  assert.equal(selected.revision, beforeSelectionRevision + 1);
+  assert.throws(
+    () =>
+      learnInvoice(
+        invoice.id,
+        selected.extractedData,
+        selected.purchaseJournal!.lines,
+        beforeSelectionRevision
+      ),
+    /revision changed/i
+  );
+});
+
+test("a recompute that changes Learn-visible supplier data increments the revision", () => {
+  const { invoice, extractedData } = learningInvoice();
+  const staleRevision = invoice.revision!;
+  const store = getStore();
+  const cache = store.exactMasterDataCaches[0]!.cache;
+  cache.suppliers = cache.suppliers.filter(
+    (supplier) => supplier.id !== "supplier_noordzee"
+  );
+
+  const recomputed = recomputeInvoiceState(invoice.id)!;
+
+  assert.equal(recomputed.revision, staleRevision + 1);
+  assert.equal(recomputed.purchaseJournal!.supplierResolution.selectedAccountId, undefined);
+  assert.throws(
+    () =>
+      learnInvoice(
+        invoice.id,
+        extractedData,
+        invoice.purchaseJournal!.lines,
+        staleRevision
+      ),
+    /revision changed/i
+  );
+});
+
 test("an exact Learn retry is idempotent but a different stale payload conflicts", () => {
   const { invoice, extractedData } = learningInvoice();
   const requestRevision = invoice.revision!;
@@ -261,6 +343,61 @@ test("an exact Learn retry is idempotent but a different stale payload conflicts
   assert.deepEqual(learned, learnedBeforeRetry);
   assert.deepEqual(getStore().learning, learningBeforeRetry);
   assert.deepEqual(getStore().auditEvents, auditsBeforeRetry);
+});
+
+test("same-content invoices replay only their own canonical Learn request", () => {
+  const first = learningInvoice();
+  const second = learningInvoice();
+  first.invoice.checksum = "shared-content-hash";
+  second.invoice.checksum = "shared-content-hash";
+  const firstRevision = first.invoice.revision!;
+  const secondRevision = second.invoice.revision!;
+  const firstData = {
+    ...first.extractedData,
+    expenseDescription: "First correction",
+  };
+  const secondData = {
+    ...second.extractedData,
+    expenseDescription: "Second correction",
+  };
+  const firstLines = first.invoice.purchaseJournal!.lines;
+  const secondLines = second.invoice.purchaseJournal!.lines;
+
+  const firstLearned = learnInvoice(
+    first.invoice.id,
+    firstData,
+    firstLines,
+    firstRevision
+  )!;
+  const secondLearned = learnInvoice(
+    second.invoice.id,
+    secondData,
+    secondLines,
+    secondRevision
+  )!;
+
+  assert.notEqual(
+    firstLearned.learningMetadata?.requestFingerprint,
+    secondLearned.learningMetadata?.requestFingerprint
+  );
+  assert.equal(
+    learnInvoice(first.invoice.id, firstData, firstLines, firstRevision)?.revision,
+    firstLearned.revision
+  );
+  assert.equal(
+    learnInvoice(second.invoice.id, secondData, secondLines, secondRevision)?.revision,
+    secondLearned.revision
+  );
+  assert.throws(
+    () =>
+      learnInvoice(
+        second.invoice.id,
+        firstData,
+        secondLines,
+        secondRevision
+      ),
+    /revision changed/i
+  );
 });
 
 test("learning-only repository booking mutations reject before changing state", () => {

@@ -540,6 +540,7 @@ export type UploadedInvoice = {
     supplierAccountId: string;
     generation: number;
     contentHash: string;
+    requestFingerprint?: string;
     learnedAt: string;
     learnedByUserId: string;
   };

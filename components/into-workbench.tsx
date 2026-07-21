@@ -30,6 +30,7 @@ import type {
   PermissionAction,
   PurchaseJournalLine,
   PublicExactConnection,
+  SupplierLearningSummary,
   SupplierOverviewImportStatus,
   UploadedInvoice,
   ValidationError,
@@ -60,6 +61,7 @@ type ApiState = {
   exactMasterDataStale: boolean;
   exactMasterDataReadOnly: boolean;
   supplierOverviewImport: SupplierOverviewImportStatus | null;
+  supplierLearning: SupplierLearningSummary[];
   exactConfiguration: {
     ready: boolean;
     missingEnv: string[];
@@ -91,7 +93,7 @@ type UploadItem = {
 type ButtonFeedback = "success" | "error";
 type PreviewFileStatus = "checking" | "available" | "missing";
 type ResolvedPreviewFileStatus = Exclude<PreviewFileStatus, "checking">;
-type ActiveView = "queue" | "archive";
+type ActiveView = "queue" | "archive" | "supplier-learning";
 type FieldTone = "neutral" | "warning" | "error";
 
 type SelectOption = {
@@ -160,6 +162,42 @@ const missingInvoiceFileMessage =
   "Original invoice file could not be found. Please re-upload or re-read this invoice.";
 const learnedCorrectionNote = "Applied from previous user correction.";
 const exactHistorySuggestionNote = "Suggested from previous Exact bookings.";
+const resetLearningConfirmation = "Reset learning for this supplier? INTO will forget previous training patterns for this supplier. Existing invoices and Exact bookings will not be deleted.";
+
+function supplierReliabilityCopy(band: SupplierLearningSummary["confidence"]["band"]) {
+  if (band === "High") {
+    return "INTO usually reads this supplier correctly.";
+  }
+  if (band === "Medium") {
+    return "Review recommended.";
+  }
+  return "More training invoices needed.";
+}
+
+function SupplierReliabilityBadge({
+  summary,
+}: {
+  summary: Pick<SupplierLearningSummary, "confidence">;
+}) {
+  const tone =
+    summary.confidence.band === "High"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+      : summary.confidence.band === "Medium"
+        ? "border-amber-200 bg-amber-50 text-amber-900"
+        : "border-stone-300 bg-stone-50 text-stone-700";
+
+  return (
+    <span
+      className={`inline-flex flex-col rounded-md border px-2 py-1 text-xs ${tone}`}
+      title={supplierReliabilityCopy(summary.confidence.band)}
+    >
+      <span className="font-semibold">
+        Supplier reliability {summary.confidence.score}% · {summary.confidence.band}
+      </span>
+      <span>{supplierReliabilityCopy(summary.confidence.band)}</span>
+    </span>
+  );
+}
 
 function uniqueValidationMessages<T extends { message: string }>(items: T[]) {
   const seen = new Set<string>();
@@ -237,6 +275,7 @@ const statusTone: Record<string, string> = {
     "border-violet-300 bg-violet-50 text-violet-900",
   "Possible Duplicate": "border-fuchsia-300 bg-fuchsia-50 text-fuchsia-900",
   "Ready to Book": "border-emerald-300 bg-emerald-50 text-emerald-800",
+  Learned: "border-sky-300 bg-sky-50 text-sky-800",
   Booked: "border-teal-300 bg-teal-50 text-teal-800",
   "Booking Failed": "border-rose-300 bg-rose-50 text-rose-800",
 };
@@ -1204,6 +1243,8 @@ function PreviewDocument({
 export function IntoWorkbench() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const supplierOverviewInputRef = useRef<HTMLInputElement | null>(null);
+  const resetLearningDialogRef = useRef<HTMLDialogElement | null>(null);
+  const resetLearningCancelRef = useRef<HTMLButtonElement | null>(null);
   const previewViewportRef = useRef<HTMLDivElement | null>(null);
   const previewDragStartRef = useRef<{
     x: number;
@@ -1219,6 +1260,7 @@ export function IntoWorkbench() {
     exactMasterDataStale: true,
     exactMasterDataReadOnly: true,
     supplierOverviewImport: null,
+    supplierLearning: [],
     exactConfiguration: null,
   });
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<string>("");
@@ -1248,6 +1290,8 @@ export function IntoWorkbench() {
     useState<ArchiveFilterState>(defaultArchiveFilters);
   const [archive, setArchive] = useState<InvoiceArchiveResult | null>(null);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
+  const [learningResetTarget, setLearningResetTarget] =
+    useState<SupplierLearningSummary | null>(null);
 
   const selectedInvoice = useMemo(
     () =>
@@ -1280,6 +1324,46 @@ export function IntoWorkbench() {
     .filter((supplier) => supplier.name && supplier.isSupplier !== false)
     .slice()
     .sort((left, right) => left.name.localeCompare(right.name));
+  const recordedSupplierLearningByAccount = new Map(
+    state.supplierLearning.map((summary) => [summary.supplierAccountId, summary])
+  );
+  const supplierLearningRows = [
+    ...exactSupplierAccounts.map(
+      (supplier): SupplierLearningSummary =>
+        recordedSupplierLearningByAccount.get(supplier.id) ?? {
+          supplierAccountId: supplier.id,
+          supplierCode: supplier.code,
+          supplierName: supplier.name,
+          generation: 0,
+          exampleCount: 0,
+          formatDrift: "none",
+          confidence: {
+            score: 35,
+            band: "Low",
+            baseline: 35,
+            exampleCount: 0,
+            volume: 0,
+            quality: 0,
+            driftPenalty: 0,
+          },
+        }
+    ),
+    ...state.supplierLearning.filter(
+      (summary) =>
+        !exactSupplierAccounts.some(
+          (supplier) => supplier.id === summary.supplierAccountId
+        )
+    ),
+  ];
+  const supplierLearningByAccount = new Map(
+    supplierLearningRows.map((summary) => [summary.supplierAccountId, summary])
+  );
+  const selectedSupplierLearning = selectedPurchaseJournal?.supplierResolution
+    .selectedAccountId
+    ? supplierLearningByAccount.get(
+        selectedPurchaseJournal.supplierResolution.selectedAccountId
+      )
+    : undefined;
   const supplierOptions: SelectOption[] = exactSupplierAccounts
     .map((supplier) => ({
       value: supplier.name,
@@ -1674,6 +1758,16 @@ export function IntoWorkbench() {
           disabledReason: saveChangesDisabledReason(),
         },
         {
+          key: "learn",
+          label: "Learn",
+          variant: "secondary",
+          onClick: learnSelectedInvoice,
+          loading: busy === "learn",
+          feedback: buttonFeedbackFor("learn", "learn"),
+          disabled: Boolean(learnDisabledReason(selectedInvoice)),
+          disabledReason: learnDisabledReason(selectedInvoice),
+        },
+        {
           key: `reread-${selectedInvoice.id}`,
           label: "Re-read invoice",
           variant: "ghost",
@@ -1863,9 +1957,10 @@ export function IntoWorkbench() {
   }
 
   async function refreshAll() {
-    const [invoiceResponse, exactResponse] = await Promise.all([
+    const [invoiceResponse, exactResponse, learningResponse] = await Promise.all([
       fetch("/api/invoices"),
       fetch("/api/exact/status"),
+      fetch("/api/suppliers/learning"),
     ]);
     const invoiceData = (await invoiceResponse.json()) as {
       invoices: UploadedInvoice[];
@@ -1878,6 +1973,9 @@ export function IntoWorkbench() {
       supplierOverviewImport: SupplierOverviewImportStatus | null;
       configuration: NonNullable<ApiState["exactConfiguration"]>;
     };
+    const learningData = (await learningResponse.json()) as {
+      suppliers?: SupplierLearningSummary[];
+    };
     setState({
       permissions: [...SHARED_ACCESS_PERMISSIONS],
       invoices: invoiceData.invoices,
@@ -1886,12 +1984,25 @@ export function IntoWorkbench() {
       exactMasterDataStale: exactData.masterDataStale,
       exactMasterDataReadOnly: exactData.masterDataReadOnly,
       supplierOverviewImport: exactData.supplierOverviewImport,
+      supplierLearning: learningData.suppliers ?? [],
       exactConfiguration: exactData.configuration,
     });
 
     if (!selectedInvoiceId && invoiceData.invoices[0]) {
       setSelectedInvoiceId(invoiceData.invoices[0].id);
     }
+  }
+
+  async function refreshSupplierLearning() {
+    const response = await fetch("/api/suppliers/learning");
+    const data = (await response.json()) as {
+      suppliers?: SupplierLearningSummary[];
+      error?: string;
+    };
+    if (!response.ok || !data.suppliers) {
+      throw new Error(data.error ?? "Supplier learning could not be refreshed.");
+    }
+    setState((current) => ({ ...current, supplierLearning: data.suppliers! }));
   }
 
   async function loadArchive(nextFilters = archiveFilters) {
@@ -2066,6 +2177,20 @@ export function IntoWorkbench() {
     }, 0);
     return () => window.clearTimeout(timeoutId);
   }, [selectedInvoice?.id]);
+
+  useEffect(() => {
+    const dialog = resetLearningDialogRef.current;
+    if (!dialog) {
+      return;
+    }
+
+    if (learningResetTarget && !dialog.open) {
+      dialog.showModal();
+      window.setTimeout(() => resetLearningCancelRef.current?.focus(), 0);
+    } else if (!learningResetTarget && dialog.open) {
+      dialog.close();
+    }
+  }, [learningResetTarget]);
 
   async function processFiles(fileList: FileList | File[]) {
     if (!hasPermission("upload")) {
@@ -2420,6 +2545,100 @@ export function IntoWorkbench() {
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Save failed.");
       flashButton("save", "error");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function learnSelectedInvoice() {
+    if (!selectedInvoice || !draft) {
+      return;
+    }
+
+    const disabledReason = learnDisabledReason(selectedInvoice);
+    if (disabledReason) {
+      setMessage(disabledReason);
+      return;
+    }
+
+    setBusy("learn");
+    try {
+      const response = await fetch(`/api/invoices/${selectedInvoice.id}/learn`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          requestKey: `learn-${selectedInvoice.id}-${selectedInvoice.revision}`,
+          expectedRevision: selectedInvoice.revision,
+          extractedData: draft,
+          bookingLines: bookingLinePayloads,
+        }),
+      });
+      const data = (await response.json()) as {
+        invoice?: UploadedInvoice;
+        message?: string;
+        error?: string;
+      };
+      if (!response.ok || !data.invoice) {
+        throw new Error(data.error ?? "Learning could not be saved.");
+      }
+
+      setState((current) => ({
+        ...current,
+        invoices: current.invoices.map((invoice) =>
+          invoice.id === data.invoice!.id ? data.invoice! : invoice
+        ),
+      }));
+      await refreshSupplierLearning();
+      setMessage(data.message ?? "Learning saved for this supplier.");
+      flashButton("learn", "success");
+    } catch (error) {
+      setMessage(
+        error instanceof Error ? error.message : "Learning could not be saved."
+      );
+      flashButton("learn", "error");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function confirmResetSupplierLearning() {
+    if (!learningResetTarget) {
+      return;
+    }
+
+    setBusy(`reset-learning-${learningResetTarget.supplierAccountId}`);
+    try {
+      const response = await fetch(
+        `/api/suppliers/${encodeURIComponent(
+          learningResetTarget.supplierAccountId
+        )}/learning/reset`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expectedGeneration: learningResetTarget.generation,
+          }),
+        }
+      );
+      const data = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        throw new Error(data.error ?? "Supplier learning reset failed.");
+      }
+      setLearningResetTarget(null);
+      await refreshSupplierLearning();
+      setMessage(`Learning reset for ${learningResetTarget.supplierName}.`);
+      flashButton(
+        `reset-learning-${learningResetTarget.supplierAccountId}`,
+        "success"
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error ? error.message : "Supplier learning reset failed."
+      );
+      flashButton(
+        `reset-learning-${learningResetTarget.supplierAccountId}`,
+        "error"
+      );
     } finally {
       setBusy("");
     }
@@ -2910,6 +3129,63 @@ export function IntoWorkbench() {
 
     if (!hasUnsavedChanges) {
       return "Save changes is disabled because there are no unsaved changes.";
+    }
+
+    return "";
+  }
+
+  function learnDisabledReason(invoice: UploadedInvoice) {
+    const busyReason = busyDisabledReason("learn");
+    if (busyReason) {
+      return busyReason;
+    }
+
+    if (!hasPermission("train")) {
+      return "Your INTO account is not verified for supplier training.";
+    }
+
+    const activeSupplierGeneration = invoice.learningMetadata
+      ? supplierLearningByAccount.get(invoice.learningMetadata.supplierAccountId)
+          ?.generation
+      : undefined;
+    const canRelearnAfterReset = Boolean(
+      invoice.learningMetadata &&
+        typeof activeSupplierGeneration === "number" &&
+        activeSupplierGeneration > invoice.learningMetadata.generation
+    );
+
+    if (
+      invoice.status === "Reading" ||
+      invoice.status === "Booked" ||
+      ((invoice.status === "Learned" ||
+        invoice.processingPurpose === "learning_only") &&
+        !canRelearnAfterReset)
+    ) {
+      return "This invoice cannot be saved as a new learning example.";
+    }
+
+    if (!selectedPurchaseJournal?.supplierResolution.selectedAccountId) {
+      return "Select one Exact supplier before saving learning.";
+    }
+
+    if (
+      !draft?.rawText?.trim() &&
+      (!draft?.documentTextMode || draft.documentTextMode === "unavailable")
+    ) {
+      return "Document analysis must finish before saving learning.";
+    }
+
+    const trainableValue =
+      draft.referenceCode ||
+      draft.invoiceDate ||
+      draft.paymentTerms ||
+      draft.expenseDescription ||
+      typeof draft.netAmount === "number" ||
+      typeof draft.vatAmount === "number" ||
+      typeof draft.grossAmount === "number" ||
+      bookingLinePayloads.length > 0;
+    if (!trainableValue) {
+      return "Add at least one trainable invoice or booking field.";
     }
 
     return "";
@@ -3558,7 +3834,7 @@ export function IntoWorkbench() {
         ) : null}
 
         <div className="flex flex-wrap gap-2">
-          {(["queue", "archive"] as ActiveView[]).map((view) => (
+          {(["queue", "archive", "supplier-learning"] as ActiveView[]).map((view) => (
             <ActionButton
               key={view}
               variant={activeView === view ? "secondary" : "ghost"}
@@ -3573,7 +3849,11 @@ export function IntoWorkbench() {
               disabled={view === "archive" && !hasPermission("search_archive")}
               disabledReason="Your INTO account is not verified for archive search."
             >
-              {view === "queue" ? "Processing queue" : "Invoice archive"}
+              {view === "queue"
+                ? "Processing queue"
+                : view === "archive"
+                  ? "Invoice archive"
+                  : "Supplier learning"}
             </ActionButton>
           ))}
         </div>
@@ -3903,6 +4183,96 @@ export function IntoWorkbench() {
                   Next
                 </ActionButton>
               </div>
+            </div>
+          </section>
+        ) : null}
+
+        {activeView === "supplier-learning" ? (
+          <section className="rounded-lg border border-stone-300 bg-white p-4">
+            <div>
+              <h2 className="text-lg font-semibold">Supplier learning</h2>
+              <p className="text-sm text-stone-500">
+                Reliability is supplier-specific and separate from the match confidence
+                for one invoice.
+              </p>
+            </div>
+
+            <div className="mt-4 overflow-x-auto rounded-lg border border-stone-200">
+              <table className="w-full min-w-[880px] border-collapse text-left text-sm">
+                <thead className="bg-stone-100 text-xs font-semibold text-stone-600">
+                  <tr>
+                    <th className="px-3 py-2">Supplier</th>
+                    <th className="px-3 py-2">Supplier reliability</th>
+                    <th className="px-3 py-2">Learned invoices</th>
+                    <th className="px-3 py-2">Format drift</th>
+                    <th className="px-3 py-2">Last learned</th>
+                    <th className="px-3 py-2">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {supplierLearningRows.map((summary) => {
+                    const actionKey = `reset-learning-${summary.supplierAccountId}`;
+                    return (
+                      <tr
+                        key={summary.supplierAccountId}
+                        className="border-t border-stone-200"
+                      >
+                        <td className="px-3 py-3">
+                          <div className="font-semibold text-stone-900">
+                            {summary.supplierName}
+                          </div>
+                          <div className="text-xs text-stone-500">
+                            {summary.supplierCode}
+                          </div>
+                        </td>
+                        <td className="px-3 py-3">
+                          <SupplierReliabilityBadge summary={summary} />
+                          <div className="mt-1 text-xs text-stone-500">
+                            Evidence {Math.round(summary.confidence.volume * 100)}% ·
+                            quality {Math.round(summary.confidence.quality * 100)}%
+                          </div>
+                        </td>
+                        <td className="px-3 py-3">{summary.exampleCount}</td>
+                        <td className="px-3 py-3 capitalize">
+                          {summary.formatDrift}
+                        </td>
+                        <td className="px-3 py-3">
+                          {summary.lastLearnedAt
+                            ? formatTimestamp(summary.lastLearnedAt)
+                            : "Not trained"}
+                        </td>
+                        <td className="px-3 py-3">
+                          <ActionButton
+                            variant="danger"
+                            onClick={() => setLearningResetTarget(summary)}
+                            loading={busy === actionKey}
+                            feedback={buttonFeedbackFor(actionKey, actionKey)}
+                            disabled={
+                              !hasPermission("manage_learning") ||
+                              summary.exampleCount === 0 ||
+                              Boolean(busy)
+                            }
+                            disabledReason={
+                              !hasPermission("manage_learning")
+                                ? "Your INTO account cannot reset supplier learning."
+                                : summary.exampleCount === 0
+                                  ? "This supplier has no active learning to reset."
+                                  : "Another action is already running."
+                            }
+                          >
+                            Reset learning
+                          </ActionButton>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {!supplierLearningRows.length ? (
+                <p className="p-4 text-sm text-stone-500">
+                  Sync Exact supplier data to begin supplier learning.
+                </p>
+              ) : null}
             </div>
           </section>
         ) : null}
@@ -4255,12 +4625,17 @@ export function IntoWorkbench() {
                       }
                       threshold={confidenceThreshold}
                     />
+                    {selectedSupplierLearning ? (
+                      <div className="sm:col-span-2">
+                        <SupplierReliabilityBadge summary={selectedSupplierLearning} />
+                      </div>
+                    ) : null}
                     {selectedPurchaseJournal?.supplierResolution.reviewRequired ? (
-                      <div className="sm:col-span-2 rounded-lg border border-orange-200 bg-orange-50 p-3">
-                        <p className="text-sm font-semibold text-orange-950">
-                          Supplier review required
+                      <div className="sm:col-span-2 rounded-lg border border-stone-300 bg-stone-50 p-3">
+                        <p className="text-sm font-semibold text-stone-950">
+                          Choose the Exact supplier
                         </p>
-                        <p className="mt-1 text-xs leading-5 text-orange-900">
+                        <p className="mt-1 text-xs leading-5 text-stone-700">
                           {selectedPurchaseJournal.supplierResolution.reasoning[0]}
                         </p>
                         {selectedPurchaseJournal.supplierResolution.candidates.length ? (
@@ -4285,14 +4660,27 @@ export function IntoWorkbench() {
                                   disabledReason="Supplier selection is not available."
                                   className="justify-start text-left"
                                 >
-                                  {candidate.account.code} - {candidate.account.name} (
-                                  {percentScore(candidate.confidence)})
+                                  <span>
+                                    {candidate.account.code} - {candidate.account.name} (
+                                    {percentScore(candidate.confidence)} match)
+                                    {supplierLearningByAccount.get(candidate.account.id) ? (
+                                      <span className="block text-xs font-normal text-stone-500">
+                                        Supplier reliability{" "}
+                                        {
+                                          supplierLearningByAccount.get(
+                                            candidate.account.id
+                                          )!.confidence.score
+                                        }
+                                        %
+                                      </span>
+                                    ) : null}
+                                  </span>
                                 </ActionButton>
                               )
                             )}
                           </div>
                         ) : null}
-                        <label className="mt-3 block text-xs font-semibold text-orange-950">
+                        <label className="mt-3 block text-xs font-semibold text-stone-800">
                           Search all Exact suppliers
                           <input
                             list={`supplier-resolution-options-${selectedInvoice.id}`}
@@ -4304,7 +4692,7 @@ export function IntoWorkbench() {
                               !exactSupplierAccounts.length
                             }
                             placeholder="Code or supplier name"
-                            className="mt-1.5 w-full cursor-text rounded-md border border-orange-300 bg-white px-3 py-2 text-sm font-normal text-stone-900 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100 disabled:cursor-not-allowed disabled:bg-stone-100 disabled:text-stone-500"
+                            className="mt-1.5 w-full cursor-text rounded-md border border-stone-300 bg-white px-3 py-2 text-sm font-normal text-stone-900 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100 disabled:cursor-not-allowed disabled:bg-stone-100 disabled:text-stone-500"
                           />
                         </label>
                         <datalist
@@ -5085,6 +5473,56 @@ export function IntoWorkbench() {
             No invoice selected.
           </section>
         )}
+
+        <dialog
+          ref={resetLearningDialogRef}
+          aria-labelledby="supplier-learning-reset-title"
+          onCancel={(event) => {
+            event.preventDefault();
+            setLearningResetTarget(null);
+          }}
+          onClose={() => setLearningResetTarget(null)}
+          className="m-auto max-w-lg rounded-xl border border-stone-300 bg-white p-0 text-stone-900 shadow-2xl backdrop:bg-stone-950/40"
+        >
+          <div className="p-5">
+            <h2 id="supplier-learning-reset-title" className="text-lg font-semibold">
+              Reset learning
+            </h2>
+            <p className="mt-3 text-sm leading-6 text-stone-700">
+              {resetLearningConfirmation}
+            </p>
+            {learningResetTarget ? (
+              <p className="mt-2 text-sm font-semibold text-stone-900">
+                {learningResetTarget.supplierCode} -{" "}
+                {learningResetTarget.supplierName}
+              </p>
+            ) : null}
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                ref={resetLearningCancelRef}
+                type="button"
+                onClick={() => setLearningResetTarget(null)}
+                disabled={Boolean(busy)}
+                className="inline-flex min-h-11 cursor-pointer items-center justify-center rounded-md border border-stone-300 bg-white px-4 py-2.5 text-sm font-semibold text-stone-700 shadow-sm hover:bg-stone-50 disabled:cursor-not-allowed disabled:bg-stone-100 disabled:text-stone-500"
+              >
+                Cancel
+              </button>
+              <ActionButton
+                variant="danger"
+                onClick={confirmResetSupplierLearning}
+                loading={Boolean(
+                  learningResetTarget &&
+                    busy ===
+                      `reset-learning-${learningResetTarget.supplierAccountId}`
+                )}
+                disabled={!learningResetTarget || Boolean(busy)}
+                disabledReason="Choose a supplier before resetting learning."
+              >
+                Reset learning
+              </ActionButton>
+            </div>
+          </div>
+        </dialog>
 
       </div>
     </main>

@@ -3,6 +3,7 @@ import type {
   ExactMasterDataCache,
   UploadedInvoice,
 } from "../domain/invoice";
+import { assertInvoiceBookingAllowed } from "../domain/invoice";
 import { isExactMasterDataStale } from "./exact-master-data-service";
 import { getStoredInvoiceFile } from "./storage-service";
 import { createId } from "../utils/id";
@@ -130,6 +131,7 @@ export async function bookInvoiceInExact(
   invoice: UploadedInvoice,
   masterData: ExactMasterDataCache | null
 ) {
+  assertInvoiceBookingAllowed(invoice);
   if (!connection || connection.status !== "connected") {
     throw new Error("Exact Online is not connected.");
   }

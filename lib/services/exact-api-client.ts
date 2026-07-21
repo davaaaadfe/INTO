@@ -11,7 +11,10 @@ import type {
   ExactVatCode,
   UploadedInvoice,
 } from "../domain/invoice";
-import { isIntoPurchaseVatCode } from "../domain/invoice";
+import {
+  assertInvoiceBookingAllowed,
+  isIntoPurchaseVatCode,
+} from "../domain/invoice";
 import { Buffer } from "node:buffer";
 import { createId } from "../utils/id";
 import { getStoredInvoiceFile } from "./storage-service";
@@ -954,6 +957,7 @@ export async function createRealExactPurchaseBooking(
   invoice: UploadedInvoice,
   masterData: ExactMasterDataCache
 ): Promise<ExactBookingResult> {
+  assertInvoiceBookingAllowed(invoice);
   if (!isRealExactBookingEnabled()) {
     throw new Error(
       "Real Exact Online booking is disabled. Set EXACT_ONLINE_ENABLE_REAL_BOOKING=true only after validating the purchase-entry payload with your Exact Online division."

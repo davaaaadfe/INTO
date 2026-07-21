@@ -15,6 +15,8 @@ export const INVOICE_STATUSES = [
 
 export type InvoiceStatus = (typeof INVOICE_STATUSES)[number];
 export type InvoiceSource = "manual_upload";
+export const LEARNING_ONLY_BOOKING_MESSAGE =
+  "Learning-only invoices cannot be booked to Exact Online.";
 export type LocalInvoiceFileStatus =
   | "available"
   | "deleted_after_booking"
@@ -80,6 +82,8 @@ export type AuditEventType =
   | "invoice_file_cleanup"
   | "duplicate_decision"
   | "invoice_reread"
+  | "invoice_learned"
+  | "supplier_learning_reset"
   | "connection_connected"
   | "connection_disconnected"
   | "token_refresh_success"
@@ -529,7 +533,10 @@ export type UploadedInvoice = {
   localFileStatus: LocalInvoiceFileStatus;
   status: InvoiceStatus;
   processingPurpose?: "booking" | "learning_only";
+  learningState?: "none" | "saved";
+  revision?: number;
   learningMetadata?: {
+    exampleId: string;
     supplierAccountId: string;
     generation: number;
     contentHash: string;
@@ -693,12 +700,17 @@ export type SupplierLearningProfile = {
 };
 
 export type SupplierLearningExample = {
+  id?: string;
   supplierAccountId: string;
   generation: number;
   invoiceId: string;
   contentHash: string;
   formatFingerprint: string;
   learnedAt: string;
+  learnedByUserId?: string;
+  originalExtractedData?: ExtractedInvoiceData;
+  finalExtractedData?: ExtractedInvoiceData;
+  bookingLines?: PurchaseJournalLine[];
 };
 
 export type SupplierLearningPattern = {
@@ -723,6 +735,20 @@ export type SupplierConfidenceBreakdown = {
   quality: number;
   driftPenalty: 0 | 10 | 20;
 };
+
+export type SupplierLearningSummary = SupplierLearningProfile & {
+  confidence: SupplierConfidenceBreakdown;
+  supplierCode: string;
+  supplierName: string;
+};
+
+export function assertInvoiceBookingAllowed(
+  invoice: Pick<UploadedInvoice, "processingPurpose" | "status">
+) {
+  if (invoice.processingPurpose === "learning_only" || invoice.status === "Learned") {
+    throw new Error(LEARNING_ONLY_BOOKING_MESSAGE);
+  }
+}
 
 export type BookingLearningStore = {
   revision: 1;

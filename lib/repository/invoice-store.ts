@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import {
+  assertInvoiceBookingAllowed,
   emptyExtractedInvoiceData,
   SHARED_ACCESS_PERMISSIONS,
 } from "../domain/invoice";
@@ -25,6 +27,7 @@ import type {
   SupplierOverviewImport,
   SupplierOverviewImportStatus,
   SupplierOverviewRecord,
+  SupplierLearningSummary,
   UploadedInvoice,
   ValidationError,
 } from "../domain/invoice";
@@ -53,6 +56,12 @@ import {
 } from "../services/correction-learning";
 import { refreshExactTokenIfNeeded } from "../services/exact-online-service";
 import { mergeSupplierOverviewWithExactSuppliers } from "../services/supplier-overview-import";
+import {
+  formatFingerprint,
+  learnSupplierInvoice,
+  resetSupplierLearning,
+  supplierConfidence,
+} from "../services/supplier-learning";
 import { createId } from "../utils/id";
 import {
   isPostgresPersistenceEnabled,
@@ -163,6 +172,9 @@ function createSeedInvoice(overrides: Partial<UploadedInvoice>): UploadedInvoice
     storageKey: "seed/seed-invoice.pdf",
     localFileStatus: "available",
     status: "Ready to Book",
+    processingPurpose: "booking",
+    learningState: "none",
+    revision: 1,
     exactBookingStatus: "not_booked",
     extractedData: {
       ...emptyExtractedInvoiceData(),
@@ -341,13 +353,26 @@ export function getStore() {
     if (!invoice.localFileStatus) {
       invoice.localFileStatus = invoice.storageKey ? "available" : "missing";
     }
+    invoice.processingPurpose ??=
+      invoice.status === "Learned" ? "learning_only" : "booking";
+    invoice.learningState ??= invoice.status === "Learned" ? "saved" : "none";
+    invoice.revision ??= 1;
+    if (invoice.status === "Learned") {
+      invoice.processingPurpose = "learning_only";
+      invoice.learningState = "saved";
+      invoice.exactBookingStatus = "not_booked";
+    }
   }
 
   if (!globalStore.__INTO_STORE.learning) {
     globalStore.__INTO_STORE.learning = createInitialLearningStore();
   }
-  if (!Array.isArray(globalStore.__INTO_STORE.learning.corrections)) {
-    globalStore.__INTO_STORE.learning.corrections = [];
+  const learningDefaults = createInitialLearningStore();
+  globalStore.__INTO_STORE.learning.revision = 1;
+  for (const key of Object.keys(learningDefaults) as Array<keyof BookingLearningStore>) {
+    if (key !== "revision" && !Array.isArray(globalStore.__INTO_STORE.learning[key])) {
+      Object.assign(globalStore.__INTO_STORE.learning, { [key]: [] });
+    }
   }
   if (globalStore.__INTO_STORE.supplierOverviewImport === undefined) {
     globalStore.__INTO_STORE.supplierOverviewImport = null;
@@ -842,11 +867,13 @@ function recomputeInvoiceInStore(store: IntoStore, invoiceId: string) {
   ]);
 
   if (invoice.status !== "Booked" && invoice.status !== "Possible Duplicate") {
-    invoice.status = statusFromPurchaseJournal(
-      baseValidationErrors,
-      purchaseJournal,
-      invoice.extractedData
-    );
+    if (invoice.status !== "Learned") {
+      invoice.status = statusFromPurchaseJournal(
+        baseValidationErrors,
+        purchaseJournal,
+        invoice.extractedData
+      );
+    }
   }
 
   invoice.lastError = invoice.validationErrors.length
@@ -887,6 +914,9 @@ export function createUploadedInvoice(input: {
     storageKey: input.storageKey,
     localFileStatus: input.storageKey ? "available" : "missing",
     status: "Uploaded",
+    processingPurpose: "booking",
+    learningState: "none",
+    revision: 1,
     exactBookingStatus: "not_booked",
     extractedData: emptyExtractedInvoiceData(),
     extractionHistory: [],
@@ -945,6 +975,9 @@ export function updateInvoiceExtraction(
   if (!invoice) {
     return null;
   }
+  if (invoice.processingPurpose === "learning_only" || invoice.status === "Learned") {
+    throw new Error("Learned invoices cannot be reprocessed.");
+  }
 
   const learned = options.applyLearning === false
     ? { data: extractedData, appliedFields: [] }
@@ -965,6 +998,9 @@ export function saveInvoiceReview(
   const invoice = getInvoice(invoiceId);
   if (!invoice) {
     return null;
+  }
+  if (invoice.processingPurpose === "learning_only" || invoice.status === "Learned") {
+    throw new Error("Learned invoices cannot be edited.");
   }
 
   const user = getCurrentUser();
@@ -1016,6 +1052,223 @@ export function saveInvoiceReview(
   invoice.updatedAt = now();
   persistStoreSoon();
   return recomputeInvoiceState(invoiceId);
+}
+
+function trustedContentHash(invoice: UploadedInvoice) {
+  return (
+    invoice.checksum ||
+    createHash("sha256")
+      .update(
+        invoice.extractedData.rawText ||
+          `${invoice.fileName}:${invoice.fileSize}:${invoice.storageKey}`
+      )
+      .digest("hex")
+  );
+}
+
+export function learnInvoice(
+  invoiceId: string,
+  correctedData: ExtractedInvoiceData,
+  bookingLines: PurchaseJournalLine[]
+) {
+  const store = getStore();
+  const invoice = store.invoices.find((item) => item.id === invoiceId);
+  if (!invoice) {
+    return null;
+  }
+  if (invoice.status === "Booked" || invoice.exactBookingId) {
+    throw new Error("Booked invoices cannot be used as learning-only drafts.");
+  }
+  if (invoice.learningState === "saved" && invoice.learningMetadata) {
+    return invoice;
+  }
+
+  const originalExtractedData = structuredClone(invoice.extractedData);
+  const finalExtractedData = structuredClone(correctedData);
+  const finalBookingLines = structuredClone(bookingLines);
+  const draft: UploadedInvoice = {
+    ...structuredClone(invoice),
+    extractedData: finalExtractedData,
+    bookingLineOverrides: finalBookingLines,
+    purchaseJournal: null,
+  };
+  const draftInvoices = store.invoices.map((item) =>
+    item.id === invoiceId ? draft : item
+  );
+  const draftBooking = generatePurchaseJournalBooking(
+    draft,
+    draftInvoices,
+    store.learning,
+    exactMasterDataForUser(store, COMPANY_CONNECTION_USER_ID)
+  );
+  const supplierAccountId = draftBooking.supplierResolution.selectedAccountId;
+  if (!supplierAccountId) {
+    throw new Error("Select one Exact supplier before saving learning.");
+  }
+
+  const saved = saveInvoiceReview(invoiceId, finalExtractedData, finalBookingLines);
+  if (!saved) {
+    return null;
+  }
+  const learnedAt = now();
+  const exampleId = createId("supplier_learning_example");
+  const contentHash = trustedContentHash(saved);
+  const nextLearning = learnSupplierInvoice(store.learning, {
+    id: exampleId,
+    supplierAccountId,
+    invoiceId,
+    contentHash,
+    formatFingerprint: formatFingerprint(finalExtractedData.rawText ?? ""),
+    learnedAt,
+    learnedByUserId: getCurrentUser().id,
+    originalExtractedData,
+    finalExtractedData,
+    bookingLines: finalBookingLines,
+  });
+  Object.assign(store.learning, nextLearning);
+  const profile = store.learning.supplierProfiles.find(
+    (item) => item.supplierAccountId === supplierAccountId
+  );
+  const example = store.learning.supplierExamples.find(
+    (item) =>
+      item.supplierAccountId === supplierAccountId &&
+      item.generation === profile?.generation &&
+      item.contentHash === contentHash
+  );
+  if (!profile || !example) {
+    throw new Error("Supplier learning could not be saved.");
+  }
+
+  saved.processingPurpose = "learning_only";
+  saved.learningState = "saved";
+  saved.status = "Learned";
+  saved.exactBookingId = undefined;
+  saved.exactBookingStatus = "not_booked";
+  saved.intelligenceApprovedAt = undefined;
+  saved.revision = (saved.revision ?? 1) + 1;
+  saved.learningMetadata = {
+    exampleId: example.id ?? exampleId,
+    supplierAccountId,
+    generation: profile.generation,
+    contentHash,
+    learnedAt,
+    learnedByUserId: getCurrentUser().id,
+  };
+  recomputeInvoiceInStore(store, invoiceId);
+  addAuditEvent({
+    invoiceId,
+    type: "invoice_learned",
+    message: "Learning saved for this supplier.",
+    metadata: {
+      exampleId: saved.learningMetadata.exampleId,
+      supplierAccountId,
+      generation: profile.generation,
+      invoiceRevision: saved.revision,
+    },
+  });
+  persistStoreSoon();
+  return saved;
+}
+
+export class SupplierLearningNotFoundError extends Error {}
+export class SupplierLearningGenerationConflictError extends Error {}
+
+export function listSupplierLearningSummaries(): SupplierLearningSummary[] {
+  const store = getStore();
+  const suppliers = exactMasterDataForUser(store, COMPANY_CONNECTION_USER_ID)?.suppliers ?? [];
+  return store.learning.supplierProfiles.map((profile) => {
+    const supplier = suppliers.find((item) => item.id === profile.supplierAccountId);
+    return {
+      ...profile,
+      confidence: supplierConfidence(profile, store.learning.supplierPatterns),
+      supplierCode: supplier?.code ?? "",
+      supplierName: supplier?.name ?? profile.supplierAccountId,
+    };
+  });
+}
+
+function exactSupplierIdentityKeys(accountId: string) {
+  const supplier = exactMasterDataForUser(
+    getStore(),
+    COMPANY_CONNECTION_USER_ID
+  )?.suppliers.find((item) => item.id === accountId);
+  if (!supplier) {
+    return [];
+  }
+  const compact = (value: string) => value.replace(/[^a-z0-9]/gi, "");
+  const dashed = (value: string) =>
+    value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  return [
+    supplier.vatNumber ? `vat:${compact(supplier.vatNumber).toUpperCase()}` : "",
+    supplier.iban ? `iban:${compact(supplier.iban).toLowerCase()}` : "",
+    supplier.chamberOfCommerceNumber
+      ? `coc:${dashed(supplier.chamberOfCommerceNumber)}`
+      : "",
+    supplier.name ? `name:${dashed(supplier.name)}` : "",
+  ].filter(Boolean);
+}
+
+export function resetLearningForSupplier(
+  accountId: string,
+  expectedGeneration: number
+) {
+  const store = getStore();
+  const profile = store.learning.supplierProfiles.find(
+    (item) => item.supplierAccountId === accountId
+  );
+  if (!profile) {
+    throw new SupplierLearningNotFoundError("Supplier learning profile not found.");
+  }
+  if (profile.generation !== expectedGeneration) {
+    throw new SupplierLearningGenerationConflictError(
+      "Supplier learning generation changed. Refresh and try again."
+    );
+  }
+
+  const supplierIdentities = new Set([
+    ...exactSupplierIdentityKeys(accountId),
+    ...store.learning.supplierSelections
+      .filter((item) => item.accountId === accountId)
+      .map((item) => item.supplierIdentity),
+  ]);
+  const resetAt = now();
+  Object.assign(
+    store.learning,
+    resetSupplierLearning(store.learning, accountId, resetAt)
+  );
+  store.learning.supplierSelections = store.learning.supplierSelections.filter(
+    (item) => item.accountId !== accountId
+  );
+  store.learning.glAccountSelections = store.learning.glAccountSelections.filter(
+    (item) => item.supplierAccountId !== accountId
+  );
+  store.learning.vatCodeSelections = store.learning.vatCodeSelections.filter(
+    (item) => item.supplierAccountId !== accountId
+  );
+  store.learning.costCentreSelections = store.learning.costCentreSelections.filter(
+    (item) => item.supplierAccountId !== accountId
+  );
+  store.learning.costUnitSelections = store.learning.costUnitSelections.filter(
+    (item) => item.supplierAccountId !== accountId
+  );
+  store.learning.corrections = store.learning.corrections.filter(
+    (item) =>
+      item.supplierAccountId !== accountId &&
+      !supplierIdentities.has(item.supplierIdentity)
+  );
+  addAuditEvent({
+    type: "supplier_learning_reset",
+    message: "Supplier learning was reset.",
+    metadata: {
+      supplierAccountId: accountId,
+      previousGeneration: expectedGeneration,
+      generation: expectedGeneration + 1,
+    },
+  });
+  persistStoreSoon();
+  return store.learning.supplierProfiles.find(
+    (item) => item.supplierAccountId === accountId
+  )!;
 }
 
 export function applyValidation(
@@ -1113,6 +1366,9 @@ export function replaceInvoiceExtractionFromReread(
   const invoice = getInvoice(invoiceId);
   if (!invoice) {
     return null;
+  }
+  if (invoice.processingPurpose === "learning_only" || invoice.status === "Learned") {
+    throw new Error("Learned invoices cannot be re-read.");
   }
 
   pushExtractionHistory(invoice, "duplicate_re_read", decision);
@@ -1215,6 +1471,7 @@ export function markInvoiceBooked(invoiceId: string, exactBookingId: string) {
   if (!invoice) {
     return null;
   }
+  assertInvoiceBookingAllowed(invoice);
 
   invoice.status = "Booked";
   invoice.exactBookingId = exactBookingId;
@@ -1324,6 +1581,7 @@ export function markInvoiceBookingFailed(invoiceId: string, message: string) {
   if (!invoice) {
     return null;
   }
+  assertInvoiceBookingAllowed(invoice);
 
   invoice.status = "Booking Failed";
   invoice.exactBookingStatus = "failed";
@@ -1347,6 +1605,9 @@ export function markInvoiceNeedsReview(
   const invoice = getInvoice(invoiceId);
   if (!invoice || invoice.status === "Booked") {
     return null;
+  }
+  if (invoice.processingPurpose === "learning_only" || invoice.status === "Learned") {
+    throw new Error("Learned invoices cannot be returned to review.");
   }
 
   const previousStatus = invoice.status;
@@ -1381,6 +1642,9 @@ export function approveInvoiceIntelligence(invoiceId: string) {
   if (!invoice) {
     return null;
   }
+  if (invoice.processingPurpose === "learning_only" || invoice.status === "Learned") {
+    throw new Error("Learned invoices cannot be approved for booking.");
+  }
 
   invoice.intelligenceApprovedAt = now();
   const updatedInvoice = recomputeInvoiceState(invoiceId);
@@ -1412,6 +1676,9 @@ export function selectInvoiceSupplier(invoiceId: string, accountId: string) {
 
   if (!invoice || !account) {
     return null;
+  }
+  if (invoice.processingPurpose === "learning_only" || invoice.status === "Learned") {
+    throw new Error("Learned invoices cannot change supplier.");
   }
 
   const supplierIdentity = supplierIdentityForInvoice(invoice);

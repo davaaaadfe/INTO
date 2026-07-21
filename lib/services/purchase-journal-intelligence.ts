@@ -13,6 +13,7 @@ import type {
 } from "../domain/invoice";
 import {
   INTO_PURCHASE_VAT_CODES,
+  LEARNING_ONLY_BOOKING_MESSAGE,
   UNSUPPORTED_VAT_CODE_WARNING,
   intoPurchaseVatCodeOrFallback,
   isIntoPurchaseVatCode,
@@ -2098,6 +2099,9 @@ export function generatePurchaseJournalBooking(
   const userApproved = Boolean(invoice.intelligenceApprovedAt);
   const criticalReasons = [
     ...masterDataIssues,
+    invoice.processingPurpose === "learning_only" || invoice.status === "Learned"
+      ? LEARNING_ONLY_BOOKING_MESSAGE
+      : "",
     !attachmentPresent ? "Original invoice attachment is required before booking." : "",
     supplierResolution.reviewRequired
       ? supplierResolution.reasoning[0] ??
@@ -2171,6 +2175,8 @@ export function generatePurchaseJournalBooking(
     confidenceScores: confidence,
     confidenceThreshold: companyConfig.confidenceThreshold,
     autoBookAllowed:
+      invoice.processingPurpose !== "learning_only" &&
+      invoice.status !== "Learned" &&
       attachmentPresent &&
       criticalReasons.length === 0 &&
       (!reviewableReasons.length || userApproved),

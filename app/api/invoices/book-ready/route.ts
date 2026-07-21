@@ -12,6 +12,7 @@ import {
 } from "../../../../lib/repository/invoice-store";
 import { withPersistentStore } from "../../../../lib/repository/persistent-request";
 import { bookInvoiceInExact } from "../../../../lib/services/exact-online-service";
+import { assertInvoiceBookingAllowed } from "../../../../lib/domain/invoice";
 import { logger } from "../../../../lib/utils/logger";
 
 export async function POST() {
@@ -27,6 +28,21 @@ export async function POST() {
       return Response.json({ error: message, invoices: listInvoices(), results }, { status: 403 });
     }
 
+    const readyInvoices = listInvoices().filter(
+      (invoice) => invoice.status === "Ready to Book"
+    );
+    try {
+      for (const invoice of readyInvoices) {
+        assertInvoiceBookingAllowed(invoice);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Booking not allowed.";
+      return Response.json(
+        { error: message, invoices: listInvoices(), results },
+        { status: 409 }
+      );
+    }
+
     try {
       connection = await refreshExactConnectionForUser();
       if (isCachedExactMasterDataStale()) {
@@ -37,10 +53,6 @@ export async function POST() {
         error instanceof Error ? error.message : "Exact master-data sync failed.";
       return Response.json({ error: message, invoices: listInvoices(), results }, { status: 409 });
     }
-
-    const readyInvoices = listInvoices().filter(
-      (invoice) => invoice.status === "Ready to Book"
-    );
 
     for (const invoice of readyInvoices) {
       try {

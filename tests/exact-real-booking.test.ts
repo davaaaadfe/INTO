@@ -6,6 +6,7 @@ import type {
   ExactMasterDataCache,
   UploadedInvoice,
 } from "../lib/domain/invoice";
+import { LEARNING_ONLY_BOOKING_MESSAGE } from "../lib/domain/invoice";
 import { createRealExactPurchaseBooking } from "../lib/services/exact-api-client";
 import { encryptExactSecret } from "../lib/services/exact-token-crypto";
 import {
@@ -146,6 +147,21 @@ async function exactConnection(): Promise<ExactConnection> {
     updatedAt: new Date().toISOString(),
   };
 }
+
+test("real Exact booking rejects learning-only invoices before configuration or file access", async () => {
+  const learningInvoice = invoice("missing-learning-file.pdf");
+  learningInvoice.processingPurpose = "learning_only";
+
+  await assert.rejects(
+    createRealExactPurchaseBooking(
+      {} as ExactConnection,
+      learningInvoice,
+      masterData()
+    ),
+    new RegExp(LEARNING_ONLY_BOOKING_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+  );
+  assert.equal(await getStoredInvoiceFile("missing-learning-file.pdf"), null);
+});
 
 test("creates and attaches the original document before posting the Exact purchase entry", async () => {
   await withExactBookingEnv(async () => {

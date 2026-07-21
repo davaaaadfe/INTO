@@ -13,6 +13,7 @@ import {
 } from "../../../../../lib/repository/invoice-store";
 import { withPersistentStore } from "../../../../../lib/repository/persistent-request";
 import { bookInvoiceInExact } from "../../../../../lib/services/exact-online-service";
+import { assertInvoiceBookingAllowed } from "../../../../../lib/domain/invoice";
 import { logger } from "../../../../../lib/utils/logger";
 
 type RouteContext = {
@@ -38,6 +39,13 @@ export async function POST(_request: Request, context: RouteContext) {
     } catch (error) {
       const message = error instanceof Error ? error.message : "Not allowed.";
       return Response.json({ error: message, invoice }, { status: 403 });
+    }
+
+    try {
+      assertInvoiceBookingAllowed(invoice);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Booking not allowed.";
+      return Response.json({ error: message, invoice }, { status: 409 });
     }
 
     try {

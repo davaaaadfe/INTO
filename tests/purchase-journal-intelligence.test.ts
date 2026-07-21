@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   emptyExtractedInvoiceData,
+  LEARNING_ONLY_BOOKING_MESSAGE,
   type ExactSupplierAccount,
   type ExtractedInvoiceData,
   type UploadedInvoice,
@@ -148,6 +149,31 @@ test("blocks booking when the original invoice attachment is missing", () => {
     ),
     true
   );
+});
+
+test("learning-only invoices stay non-bookable during intelligence recompute", () => {
+  const invoice = uploadedInvoice({
+    status: "Learned",
+    processingPurpose: "learning_only",
+  });
+  const booking = buildBooking(invoice);
+
+  assert.equal(booking.autoBookAllowed, false);
+  assert.equal(booking.reviewReasons.includes(LEARNING_ONLY_BOOKING_MESSAGE), true);
+});
+
+test("direct Exact booking rejects learning-only invoices before connection checks", async () => {
+  const invoice = uploadedInvoice({
+    status: "Ready to Book",
+    processingPurpose: "learning_only",
+  });
+  invoice.purchaseJournal = buildBooking(invoice);
+
+  await assert.rejects(
+    bookInvoiceInExact(null, invoice, null),
+    new RegExp(LEARNING_ONLY_BOOKING_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+  );
+  assert.deepEqual(invoice.bookingAttempts, []);
 });
 
 test("requires booking data fields but ignores empty additional and removed fields", () => {

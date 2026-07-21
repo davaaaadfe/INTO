@@ -105,8 +105,12 @@ test("uses an accessible reset dialog with the approved destructive-action copy"
 
 test("does not turn committed mutations or failed summary reads into false training state", () => {
   assert.match(activeReviewSource, /if \(!learningResponse\.ok/);
+  assert.match(activeReviewSource, /supplierLearningLoaded:\s*false/);
+  assert.match(activeReviewSource, /state\.supplierLearningLoaded\s*\?/);
   assert.match(activeReviewSource, /profile\?: SupplierLearningProfile/);
   assert.match(activeReviewSource, /applyResetProfile/);
+  assert.match(activeReviewSource, /lastLearnedAt:\s*profile\.lastLearnedAt/);
+  assert.match(activeReviewSource, /formatFingerprint:\s*profile\.formatFingerprint/);
   assert.match(activeReviewSource, /Supplier learning was saved, but its summary could not be refreshed\./);
   assert.match(activeReviewSource, /Supplier learning was reset, but its summary could not be refreshed\./);
   assert.match(activeReviewSource, /busy === `reset-learning-\$\{learningResetTarget\.supplierAccountId\}`/);

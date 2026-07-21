@@ -63,6 +63,7 @@ type ApiState = {
   exactMasterDataReadOnly: boolean;
   supplierOverviewImport: SupplierOverviewImportStatus | null;
   supplierLearning: SupplierLearningSummary[];
+  supplierLearningLoaded: boolean;
   exactConfiguration: {
     ready: boolean;
     missingEnv: string[];
@@ -1262,6 +1263,7 @@ export function IntoWorkbench() {
     exactMasterDataReadOnly: true,
     supplierOverviewImport: null,
     supplierLearning: [],
+    supplierLearningLoaded: false,
     exactConfiguration: null,
   });
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<string>("");
@@ -1328,7 +1330,7 @@ export function IntoWorkbench() {
   const recordedSupplierLearningByAccount = new Map(
     state.supplierLearning.map((summary) => [summary.supplierAccountId, summary])
   );
-  const supplierLearningRows = [
+  const supplierLearningRows = state.supplierLearningLoaded ? [
     ...exactSupplierAccounts.map(
       (supplier): SupplierLearningSummary =>
         recordedSupplierLearningByAccount.get(supplier.id) ?? {
@@ -1355,7 +1357,7 @@ export function IntoWorkbench() {
           (supplier) => supplier.id === summary.supplierAccountId
         )
     ),
-  ];
+  ] : [];
   const supplierLearningByAccount = new Map(
     supplierLearningRows.map((summary) => [summary.supplierAccountId, summary])
   );
@@ -2002,6 +2004,10 @@ export function IntoWorkbench() {
         learningResponse.ok && learningData.suppliers
           ? learningData.suppliers
           : current.supplierLearning,
+      supplierLearningLoaded:
+        learningResponse.ok && Boolean(learningData.suppliers)
+          ? true
+          : current.supplierLearningLoaded,
       exactConfiguration: exactData.configuration,
     }));
 
@@ -2019,7 +2025,11 @@ export function IntoWorkbench() {
     if (!response.ok || !data.suppliers) {
       throw new Error(data.error ?? "Supplier learning could not be refreshed.");
     }
-    setState((current) => ({ ...current, supplierLearning: data.suppliers! }));
+    setState((current) => ({
+      ...current,
+      supplierLearning: data.suppliers!,
+      supplierLearningLoaded: true,
+    }));
   }
 
   function applyResetProfile(
@@ -2029,6 +2039,8 @@ export function IntoWorkbench() {
     const summary: SupplierLearningSummary = {
       ...target,
       ...profile,
+      lastLearnedAt: profile.lastLearnedAt,
+      formatFingerprint: profile.formatFingerprint,
       confidence: {
         score: 35,
         band: "Low",
@@ -2041,6 +2053,7 @@ export function IntoWorkbench() {
     };
     setState((current) => ({
       ...current,
+      supplierLearningLoaded: true,
       supplierLearning: current.supplierLearning.some(
         (item) => item.supplierAccountId === summary.supplierAccountId
       )
@@ -4332,7 +4345,9 @@ export function IntoWorkbench() {
               </table>
               {!supplierLearningRows.length ? (
                 <p className="p-4 text-sm text-stone-500">
-                  Sync Exact supplier data to begin supplier learning.
+                  {state.supplierLearningLoaded
+                    ? "Sync Exact supplier data to begin supplier learning."
+                    : "Supplier reliability is unavailable until learning summaries load."}
                 </p>
               ) : null}
             </div>

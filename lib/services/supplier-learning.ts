@@ -163,12 +163,37 @@ export function resetSupplierLearning(
   };
 }
 
+const stableLabel = new RegExp(
+  "^(invoice number|invoice date|document reference|amount due|due date|" +
+    "net amount|vat amount|tax amount|invoice|reference|date|issued|" +
+    "description|total|net|vat|tax|supplier|customer|iban|bic|currency)\\b"
+);
+
+function fingerprintLine(rawLine: string) {
+  const line = rawLine.normalize("NFKC").trim().toLowerCase();
+  const field = line.match(/^([^:=]{1,80})([:=]).+$/);
+  if (field) {
+    return `${field[1].trim().replace(/\s+/g, " ")}${field[2]}<value>`;
+  }
+
+  if (/[|\t]/.test(line)) {
+    const columns = line.split(/[|\t]/).map((column) => column.trim());
+    return columns.some((column) => /\d/.test(column))
+      ? columns.map((column) => (/\d/.test(column) ? "<number>" : "<text>")).join("|")
+      : columns.join("|");
+  }
+
+  const label = line.match(stableLabel)?.[0];
+  if (label) {
+    return line === label ? label : `${label}:<value>`;
+  }
+  return line ? "<text>" : "";
+}
+
 export function formatFingerprint(documentText: string) {
   const normalized = documentText
-    .normalize("NFKC")
-    .toLowerCase()
     .split(/\r?\n/)
-    .map((line) => line.trim().replace(/\s+/g, " ").replace(/\d+/g, "#"))
+    .map(fingerprintLine)
     .filter(Boolean)
     .join("\n");
   return createHash("sha256").update(normalized).digest("hex").slice(0, 16);

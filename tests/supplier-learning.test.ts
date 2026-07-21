@@ -60,6 +60,52 @@ test("trusted examples raise supplier confidence gradually", () => {
   ).band, "Medium");
 });
 
+test("supplier confidence uses only weighted metrics for the active supplier generation", () => {
+  const profile = {
+    supplierAccountId: "supplier-a",
+    generation: 2,
+    exampleCount: 4,
+    formatDrift: "none" as const,
+  };
+  const confidence = supplierConfidence(profile, [
+    {
+      supplierAccountId: "supplier-a",
+      generation: 2,
+      key: "invoice-date",
+      successes: 3,
+      attempts: 4,
+      weight: 2,
+    },
+    {
+      supplierAccountId: "supplier-a",
+      generation: 2,
+      key: "total",
+      successes: 1,
+      attempts: 4,
+      weight: 1,
+    },
+    {
+      supplierAccountId: "supplier-b",
+      generation: 2,
+      key: "other-supplier",
+      successes: 100,
+      attempts: 100,
+      weight: 100,
+    },
+    {
+      supplierAccountId: "supplier-a",
+      generation: 1,
+      key: "old-generation",
+      successes: 100,
+      attempts: 100,
+      weight: 100,
+    },
+  ]);
+
+  assert.ok(Math.abs(confidence.quality - 5 / 9) < 1e-12);
+  assert.equal(confidence.score, 59);
+});
+
 test("one content hash contributes only once per supplier generation", () => {
   const once = learn(createInitialLearningStore(), "supplier-a", "same-hash");
   const twice = learn(once, "supplier-a", "same-hash");
@@ -142,6 +188,36 @@ test("format fingerprints ignore invoice literals and expose format drift", () =
 
   assert.equal(profile.formatDrift, "possible");
   assert.equal(supplierConfidence(profile).driftPenalty, 10);
+});
+
+test("format fingerprints ignore alphabetic field values and line-item descriptions", () => {
+  const firstDocument = [
+    "Invoice number: INV-2026-001",
+    "Description: Ergonomic office chairs",
+    "Description | Quantity | Price",
+    "Blue mesh chair | 2 | EUR 100.00",
+    "Total: EUR 200.00",
+  ].join("\n");
+  const sameTemplate = [
+    "Invoice number: BILL-2026-999",
+    "Description: Annual cloud subscriptions",
+    "Description | Quantity | Price",
+    "Enterprise software license | 12 | EUR 500.00",
+    "Total: EUR 6000.00",
+  ].join("\n");
+  const reorderedTemplate = [
+    "Description: Annual cloud subscriptions",
+    "Invoice number: BILL-2026-999",
+    "Description | Quantity | Price",
+    "Enterprise software license | 12 | EUR 500.00",
+    "Total: EUR 6000.00",
+  ].join("\n");
+
+  assert.equal(formatFingerprint(firstDocument), formatFingerprint(sameTemplate));
+  assert.notEqual(
+    formatFingerprint(firstDocument),
+    formatFingerprint(reorderedTemplate)
+  );
 });
 
 test("shared learning types expose the approved status, permissions, and revision", () => {

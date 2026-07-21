@@ -658,4 +658,30 @@ test("does not invent reference or invoice date from the filename", async () => 
 
   assert.equal(data.referenceCode, "");
   assert.equal(data.invoiceDate, "");
+  assert.equal(data.supplierName, "");
+  assert.equal(data.supplierVatNumber, "");
+  assert.equal(data.iban, "");
+});
+
+test("extracts supplier identity from document content instead of the filename", async () => {
+  const data = await extractInvoiceData({
+    name: "google-booking-klm.pdf",
+    type: "application/pdf",
+    size: 100,
+    text: async () =>
+      [
+        "Supplier: Content Driven Services B.V.",
+        "Supplier VAT: NL123456789B01",
+        "IBAN: NL91 ABNA 0417 1643 00",
+        "Chamber of Commerce: 12345678",
+        "Supplier address: Teststraat 1, Utrecht",
+        "Invoice number: CONTENT-100",
+      ].join("\n"),
+  });
+
+  assert.equal(data.supplierName, "Content Driven Services B.V.");
+  assert.equal(data.supplierVatNumber, "NL123456789B01");
+  assert.equal(data.iban, "NL91ABNA0417164300");
+  assert.equal(data.supplierChamberOfCommerceNumber, "12345678");
+  assert.equal(data.supplierAddress, "Teststraat 1, Utrecht");
 });

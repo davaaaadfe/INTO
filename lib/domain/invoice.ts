@@ -351,7 +351,8 @@ export type SupplierMatchCandidate = {
     | "Exact history"
     | "Name similarity"
     | "Address"
-    | "City and country";
+    | "City and country"
+    | "Evidence fusion";
   reasoning: string[];
 };
 
@@ -363,6 +364,7 @@ export type SupplierResolution = {
   threshold: number;
   method: string;
   reviewRequired: boolean;
+  reasonCode?: "supplier_ambiguous" | "supplier_low_confidence";
   candidates: SupplierMatchCandidate[];
   reasoning: string[];
 };
@@ -637,6 +639,8 @@ export type SupplierLearningDecision = {
   supplierIdentity: string;
   accountId: string;
   decidedAt: string;
+  invoiceId?: string;
+  trustState?: "pending" | "trusted" | "legacy";
 };
 
 export type GlAccountLearningDecision = {
@@ -682,6 +686,9 @@ export type LearnedCorrection = {
   correctedAt: string;
   correctedByUserId: string;
   correctedByUserName: string;
+  trustState?: "pending" | "trusted" | "legacy";
+  trustedAt?: string;
+  trustReason?: "learn" | "approval" | "booking";
   metadata?: Record<string, unknown>;
 };
 

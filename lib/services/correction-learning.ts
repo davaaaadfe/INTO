@@ -10,6 +10,13 @@ import type {
 import { createId } from "../utils/id";
 import { detectInvoiceReference } from "./invoice-extraction-service";
 import { amountToMinorUnits, normalizeText } from "./invoice-validation";
+import {
+  normalizeSupplierChamberOfCommerce,
+  normalizeSupplierIban,
+  normalizeSupplierName,
+  normalizeSupplierVat,
+  supplierIdentityKeys,
+} from "./supplier-identity";
 
 export const LEARNED_CORRECTION_NOTE =
   "Applied from previous user correction.";
@@ -92,10 +99,6 @@ function normalizedValue(value: unknown) {
   return normalizeText(String(value ?? "")).replace(/[^a-z0-9]+/g, "-");
 }
 
-function normalizedVat(value: string) {
-  return value.replace(/[^a-z0-9]/gi, "").toUpperCase();
-}
-
 export function canonicalSupplierIdentityKeys(
   data: Pick<
     ExtractedInvoiceData,
@@ -105,16 +108,7 @@ export function canonicalSupplierIdentityKeys(
     | "supplierName"
   >
 ) {
-  return [
-    data.supplierVatNumber ? `vat:${data.supplierVatNumber}` : "",
-    data.iban ? `iban:${data.iban}` : "",
-    data.supplierChamberOfCommerceNumber
-      ? `coc:${data.supplierChamberOfCommerceNumber}`
-      : "",
-    data.supplierName ? `name:${data.supplierName}` : "",
-  ]
-    .filter(Boolean)
-    .map(canonicalSupplierIdentityKey);
+  return supplierIdentityKeys({ ...data, supplierAddress: "" });
 }
 
 export function canonicalSupplierIdentityKey(identity: string) {
@@ -122,11 +116,14 @@ export function canonicalSupplierIdentityKey(identity: string) {
   if (separator < 0) return identity;
   const kind = identity.slice(0, separator).toLowerCase();
   const value = identity.slice(separator + 1);
-  if (kind === "vat") return `vat:${normalizedVat(value)}`;
-  if (kind === "iban" || kind === "coc") {
-    return `${kind}:${normalizeText(value).replace(/[^a-z0-9]/g, "")}`;
+  if (kind === "vat") return `vat:${normalizeSupplierVat(value)}`;
+  if (kind === "iban") return `iban:${normalizeSupplierIban(value).toLowerCase()}`;
+  if (kind === "coc") {
+    return `coc:${normalizeSupplierChamberOfCommerce(value).toLowerCase()}`;
   }
-  if (kind === "name") return `name:${normalizedValue(value)}`;
+  if (kind === "name") {
+    return `name:${normalizeSupplierName(value).replace(/\s/g, "-")}`;
+  }
   return identity;
 }
 
@@ -253,6 +250,8 @@ function upsertCorrection(
   const item: LearnedCorrection = {
     ...correction,
     id: existingIndex >= 0 ? items[existingIndex].id : createId("learned"),
+    originalValue:
+      existingIndex >= 0 ? items[existingIndex].originalValue : correction.originalValue,
   };
 
   if (existingIndex >= 0) {
@@ -383,6 +382,14 @@ function record(
       field !== "supplier" ||
       item.metadata?.correctionKind === metadata?.correctionKind;
     return sameLine && sameKind;
+  }) ?? corrections(input.learning).find((item) => {
+    const sameLine =
+      String(item.metadata?.lineIndex ?? "invoice") ===
+      String(metadata?.lineIndex ?? "invoice");
+    const sameKind =
+      field !== "supplier" ||
+      item.metadata?.correctionKind === metadata?.correctionKind;
+    return item.invoiceId === input.invoice.id && item.field === field && sameLine && sameKind;
   });
   const resolvedMetadata = { ...(priorRule?.metadata ?? {}) };
   for (const [key, value] of Object.entries(metadata ?? {})) {
@@ -410,17 +417,10 @@ function record(
     correctedAt: decidedAt,
     correctedByUserId: input.user.id,
     correctedByUserName: input.user.name,
+    trustState: "pending",
     metadata:
       Object.keys(resolvedMetadata).length > 0 ? resolvedMetadata : undefined,
   });
-}
-
-function upsertDecision<T>(items: T[], predicate: (item: T) => boolean, value: T) {
-  const index = items.findIndex(predicate);
-  if (index >= 0) {
-    items.splice(index, 1);
-  }
-  items.unshift(value);
 }
 
 export function captureUserCorrections(input: CaptureInput) {
@@ -482,10 +482,6 @@ export function captureUserCorrections(input: CaptureInput) {
 
   const previousLines =
     input.invoice.bookingLineOverrides ?? input.invoice.purchaseJournal?.lines ?? [];
-  const supplierAccountId =
-    input.invoice.purchaseJournal?.supplierResolution.selectedAccountId;
-  const decidedAt = input.correctedAt ?? new Date().toISOString();
-
   input.nextBookingLines.forEach((nextLine, index) => {
     const previousLine = previousLines[index];
     if (!previousLine) {
@@ -496,9 +492,6 @@ export function captureUserCorrections(input: CaptureInput) {
       lineIndex: index,
       sourceLineItemId: nextLine.sourceLineItemId,
     };
-    const descriptionKey = learningDescriptionKey(
-      previousLine.description || nextLine.description
-    );
     const nextGl = nextLine.finalSelectedAccount || nextLine.glAccount;
     const previousGl = previousLine.finalSelectedAccount || previousLine.glAccount;
 
@@ -527,71 +520,6 @@ export function captureUserCorrections(input: CaptureInput) {
     );
     add(record(input, "accrualFrom", previousLine.from, nextLine.from, metadata));
     add(record(input, "accrualTo", previousLine.to, nextLine.to, metadata));
-
-    if (supplierAccountId && previousGl !== nextGl) {
-      upsertDecision(
-        input.learning.glAccountSelections,
-        (item) =>
-          item.supplierAccountId === supplierAccountId &&
-          item.descriptionKey === descriptionKey,
-        {
-          supplierAccountId,
-          descriptionKey,
-          glAccount: nextGl,
-          decidedAt,
-        }
-      );
-    }
-    if (supplierAccountId && previousLine.vatCode !== nextLine.vatCode) {
-      upsertDecision(
-        input.learning.vatCodeSelections,
-        (item) =>
-          item.supplierAccountId === supplierAccountId &&
-          item.descriptionKey === descriptionKey,
-        {
-          supplierAccountId,
-          descriptionKey,
-          vatCode: nextLine.vatCode,
-          decidedAt,
-        }
-      );
-    }
-    if (supplierAccountId && previousLine.costCentre !== nextLine.costCentre) {
-      const items = input.learning.costCentreSelections;
-      const index = items.findIndex(
-        (item) =>
-          item.supplierAccountId === supplierAccountId && item.glAccount === nextGl
-      );
-      if (index >= 0) {
-        items.splice(index, 1);
-      }
-      if (nextLine.costCentre) {
-        items.unshift({
-          supplierAccountId,
-          glAccount: nextGl,
-          costCentre: nextLine.costCentre,
-          decidedAt,
-        });
-      }
-    }
-    if (supplierAccountId && previousLine.costUnit !== nextLine.costUnit) {
-      const items = input.learning.costUnitSelections;
-      const index = items.findIndex(
-        (item) =>
-          item.supplierAccountId === supplierAccountId && item.glAccount === nextGl
-      );
-      if (index >= 0) {
-        items.splice(index, 1);
-      }
-      if (nextLine.costUnit) {
-        items.unshift({
-          supplierAccountId,
-          glAccount: nextGl,
-          costUnit: nextLine.costUnit,
-          decidedAt,
-        });
-      }
-    }
   });
 
   if (!lineValuesEqual(previousLines, input.nextBookingLines)) {
@@ -647,6 +575,7 @@ export function captureSupplierAccountCorrection(input: {
     correctedAt: input.correctedAt ?? new Date().toISOString(),
     correctedByUserId: input.user.id,
     correctedByUserName: input.user.name,
+    trustState: "pending",
     metadata: {
       correctionKind: "exactAccount",
       accountName: input.accountName,
@@ -693,11 +622,31 @@ function matchingCorrections(
       );
     return (
       item.field === field &&
+      item.trustState === "trusted" &&
       item.confidence >= highConfidenceThreshold &&
       supplierConfidence >= highConfidenceThreshold &&
       (field === "supplier" || field === "yourRefPattern" || contextualMatch)
     );
   });
+}
+
+export function promoteInvoiceCorrections(
+  learning: BookingLearningStore,
+  invoiceId: string,
+  reason: "learn" | "approval" | "booking",
+  trustedAt = new Date().toISOString()
+) {
+  let promoted = 0;
+  for (const correction of corrections(learning)) {
+    if (correction.invoiceId !== invoiceId || correction.trustState === "trusted") {
+      continue;
+    }
+    correction.trustState = "trusted";
+    correction.trustedAt = trustedAt;
+    correction.trustReason = reason;
+    promoted += 1;
+  }
+  return promoted;
 }
 
 function referenceFromLearnedLabel(rawText: string, label: string) {

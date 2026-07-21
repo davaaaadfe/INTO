@@ -8,6 +8,7 @@ import type {
   PurchaseJournalBooking,
   PurchaseJournalLine,
   SupplierMatchCandidate,
+  SupplierResolution,
   UploadedInvoice,
   ValidationError,
 } from "../domain/invoice";
@@ -35,6 +36,17 @@ import {
   learnedBookingLinesForInvoice,
   learningDescriptionKey,
 } from "./correction-learning";
+import {
+  normalizeSupplierBic,
+  normalizeSupplierCode,
+  normalizeSupplierCountry,
+  normalizeSupplierIban,
+  normalizeSupplierVat,
+  supplierAddressSimilarity,
+  supplierIdentityKeys as canonicalSupplierIdentityKeys,
+  supplierNameSimilarity,
+} from "./supplier-identity";
+import { formatFingerprint } from "./supplier-learning";
 
 type VatCode = PurchaseJournalLine["vatCode"];
 
@@ -127,19 +139,19 @@ function roundMoney(value: number) {
 }
 
 function normalizedVat(value: string | null | undefined) {
-  return (value ?? "").replace(/[^a-z0-9]/gi, "").toUpperCase();
+  return normalizeSupplierVat(value);
 }
 
 function normalizedIban(value: string | null | undefined) {
-  return (value ?? "").replace(/[^a-z0-9]/gi, "").toUpperCase();
+  return normalizeSupplierIban(value);
 }
 
 function normalizedBic(value: string | null | undefined) {
-  return (value ?? "").replace(/[^a-z0-9]/gi, "").toUpperCase();
+  return normalizeSupplierBic(value);
 }
 
 function normalizedSupplierCode(value: string | null | undefined) {
-  return (value ?? "").replace(/[^a-z0-9]/gi, "").toUpperCase();
+  return normalizeSupplierCode(value);
 }
 
 function invoiceBic(data: ExtractedInvoiceData) {
@@ -152,7 +164,7 @@ function invoiceBic(data: ExtractedInvoiceData) {
 
 function invoiceSupplierCode(data: ExtractedInvoiceData) {
   const match = (data.rawText ?? "").match(
-    /(?:supplier\s*(?:code|number|no\.?|nr\.?)|vendor\s*(?:code|number|no\.?|nr\.?)|leveranciers(?:code|nummer)|crediteur(?:code|nummer)|creditor\s*(?:code|number|no\.?|nr\.?)|account\s*code)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._\/-]{1,30})/i
+    /(?:supplier\s*(?:code|number|no\.?|nr\.?)|vendor\s*(?:code|number|no\.?|nr\.?)|leveranciers(?:code|nummer)|crediteur(?:code|nummer)|creditor\s*(?:code|number|no\.?|nr\.?))\s*[:#-]?\s*([A-Z0-9][A-Z0-9._\/-]{1,30})/i
   );
   return normalizedSupplierCode(match?.[1]);
 }
@@ -168,42 +180,11 @@ function normalizedWords(value: string | null | undefined) {
 }
 
 function addressSimilarity(left: string, right: string) {
-  const leftWords = new Set(normalizedWords(left));
-  const rightWords = new Set(normalizedWords(right));
-  if (leftWords.size < 2 || rightWords.size < 2) {
-    return 0;
-  }
-
-  const overlap = [...leftWords].filter((word) => rightWords.has(word)).length;
-  return overlap / Math.min(leftWords.size, rightWords.size);
+  return supplierAddressSimilarity(left, right);
 }
 
-const countryAliases: Record<string, string> = {
-  belgium: "BE",
-  belgie: "BE",
-  belgique: "BE",
-  deutschland: "DE",
-  germany: "DE",
-  france: "FR",
-  nederland: "NL",
-  netherlands: "NL",
-  thenetherlands: "NL",
-  unitedkingdom: "GB",
-  uk: "GB",
-  unitedstates: "US",
-  unitedstatesofamerica: "US",
-  usa: "US",
-};
-
 function normalizedCountry(value: string | null | undefined) {
-  const compact = normalizedWords(value).join("");
-  if (!compact) {
-    return "";
-  }
-  if (compact.length === 2) {
-    return compact.toUpperCase();
-  }
-  return countryAliases[compact] ?? compact.toUpperCase();
+  return normalizeSupplierCountry(value);
 }
 
 function invoiceMentionsCity(data: ExtractedInvoiceData, city: string | undefined) {
@@ -218,19 +199,11 @@ function invoiceMentionsCity(data: ExtractedInvoiceData, city: string | undefine
 }
 
 function supplierIdentityKeys(data: ExtractedInvoiceData) {
-  return [
-    data.supplierVatNumber ? `vat:${normalizedVat(data.supplierVatNumber)}` : "",
-    data.iban ? `iban:${normalizedIban(data.iban).toLowerCase()}` : "",
-    invoiceBic(data) ? `bic:${invoiceBic(data).toLowerCase()}` : "",
-    invoiceSupplierCode(data)
-      ? `code:${invoiceSupplierCode(data).toLowerCase()}`
-      : "",
-    data.supplierChamberOfCommerceNumber
-      ? `coc:${normalizeText(data.supplierChamberOfCommerceNumber)}`
-      : "",
-    data.supplierAddress ? `address:${normalizeText(data.supplierAddress)}` : "",
-    data.supplierName ? `name:${normalizeText(data.supplierName)}` : "",
-  ].filter(Boolean);
+  return canonicalSupplierIdentityKeys({
+    ...data,
+    bic: invoiceBic(data),
+    supplierCode: invoiceSupplierCode(data),
+  });
 }
 
 function primarySupplierIdentity(data: ExtractedInvoiceData) {
@@ -241,71 +214,8 @@ function descriptionKey(value: string) {
   return learningDescriptionKey(value);
 }
 
-function mergeCandidate(
-  candidates: Map<string, SupplierMatchCandidate>,
-  account: ExactSupplierAccount,
-  confidence: number,
-  method: SupplierMatchCandidate["method"],
-  reasoning: string
-) {
-  const current = candidates.get(account.id);
-  if (!current || confidence > current.confidence) {
-    candidates.set(account.id, {
-      account,
-      confidence,
-      method,
-      reasoning: [reasoning],
-    });
-    return;
-  }
-
-  current.reasoning.push(reasoning);
-}
-
 function nameSimilarity(left: string, right: string) {
-  const legalSuffixes = new Set([
-    "ag",
-    "bv",
-    "b",
-    "v",
-    "co",
-    "corp",
-    "corporation",
-    "gmbh",
-    "inc",
-    "incorporated",
-    "limited",
-    "llc",
-    "ltd",
-    "nv",
-    "plc",
-    "sa",
-    "sas",
-    "spa",
-    "srl",
-  ]);
-  const words = (value: string) =>
-    normalizeText(value)
-      .normalize("NFKD")
-      .replace(/[\u0300-\u036f]/g, "")
-      .replace(/[^a-z0-9]+/g, " ")
-      .split(" ")
-      .filter((word) => word && !legalSuffixes.has(word));
-  const leftList = words(left);
-  const rightList = words(right);
-  const leftWords = new Set(leftList);
-  const rightWords = new Set(rightList);
-
-  if (!leftWords.size || !rightWords.size) {
-    return 0;
-  }
-
-  if (leftList.join(" ") === rightList.join(" ")) {
-    return 1;
-  }
-
-  const overlap = [...leftWords].filter((word) => rightWords.has(word)).length;
-  return overlap / Math.max(leftWords.size, rightWords.size);
+  return supplierNameSimilarity(left, right);
 }
 
 function exactSuppliers(exactMasterData: ExactMasterDataCache | null) {
@@ -600,9 +510,8 @@ function resolveSupplier(
   allInvoices: UploadedInvoice[],
   learning: BookingLearningStore,
   exactMasterData: ExactMasterDataCache | null
-) {
+): SupplierResolution {
   const data = invoice.extractedData;
-  const candidates = new Map<string, SupplierMatchCandidate>();
   const identities = supplierIdentityKeys(data);
   const suppliers = exactSuppliers(exactMasterData);
 
@@ -615,286 +524,343 @@ function resolveSupplier(
       threshold: companyConfig.confidenceThreshold,
       method: "Exact master data missing",
       reviewRequired: true,
+      reasonCode: "supplier_low_confidence" as const,
       candidates: [],
       reasoning: ["Sync Exact Online master data before supplier matching."],
     };
   }
 
-  const uniqueAccounts = (accounts: ExactSupplierAccount[]) => [
-    ...new Map(accounts.map((account) => [account.id, account])).values(),
-  ];
-  const sortedCandidates = (accountScope?: ExactSupplierAccount[]) => {
-    const allowedIds = accountScope
-      ? new Set(accountScope.map((account) => account.id))
-      : null;
-    return [...candidates.values()]
-      .filter((candidate) => !allowedIds || allowedIds.has(candidate.account.id))
-      .sort((left, right) => right.confidence - left.confidence)
-      .slice(0, 5);
-  };
-  const resolved = (
-    account: ExactSupplierAccount,
-    confidence: number,
-    method: SupplierMatchCandidate["method"],
-    reasoning: string
-  ) => {
-    mergeCandidate(candidates, account, confidence, method, reasoning);
+  const currentManualSelection = learning.supplierSelections.find(
+    (decision) =>
+      decision.trustState === "pending" &&
+      decision.invoiceId === invoice.id &&
+      identities.includes(decision.supplierIdentity)
+  );
+  const manuallySelectedAccount = currentManualSelection
+    ? suppliers.find((supplier) => supplier.id === currentManualSelection.accountId)
+    : undefined;
+  if (manuallySelectedAccount) {
     return {
-      selectedAccountId: account.id,
-      selectedAccountCode: account.code,
-      selectedAccountName: account.name,
-      matchConfidence: confidence,
-      threshold: companyConfig.confidenceThreshold,
-      method,
+      selectedAccountId: manuallySelectedAccount.id,
+      selectedAccountCode: manuallySelectedAccount.code,
+      selectedAccountName: manuallySelectedAccount.name,
+      matchConfidence: 1,
+      threshold: 0.9,
+      method: "Learned decision",
       reviewRequired: false,
-      candidates: sortedCandidates(),
-      reasoning: [...new Set(candidates.get(account.id)?.reasoning ?? [reasoning])],
+      candidates: [],
+      reasoning: ["Applied the supplier explicitly selected for this invoice."],
     };
+  }
+
+  type Evidence = {
+    account: ExactSupplierAccount;
+    hardMethods: Set<SupplierMatchCandidate["method"]>;
+    familyScores: Map<"name" | "address" | "history", number>;
+    bicScore: number;
+    reasoning: string[];
+    preferredMethod: SupplierMatchCandidate["method"];
   };
-  const matchState: { unresolvedPool: ExactSupplierAccount[] | null } = {
-    unresolvedPool: null,
+  const evidence = new Map<string, Evidence>();
+  const forAccount = (account: ExactSupplierAccount) => {
+    const current = evidence.get(account.id);
+    if (current) return current;
+    const created: Evidence = {
+      account,
+      hardMethods: new Set(),
+      familyScores: new Map(),
+      bicScore: 0,
+      reasoning: [],
+      preferredMethod: "Name similarity",
+    };
+    evidence.set(account.id, created);
+    return created;
   };
-  const considerTier = (
-    matches: ExactSupplierAccount[],
-    confidence: number | ((account: ExactSupplierAccount) => number),
+  const addFamily = (
+    account: ExactSupplierAccount,
+    family: "name" | "address" | "history",
+    score: number,
     method: SupplierMatchCandidate["method"],
     reasoning: string
   ) => {
-    const allowedIds = matchState.unresolvedPool
-      ? new Set(matchState.unresolvedPool.map((account) => account.id))
-      : null;
-    const scoped = uniqueAccounts(
-      matches.filter((account) => !allowedIds || allowedIds.has(account.id))
-    );
-    if (!scoped.length) {
-      return null;
+    const item = forAccount(account);
+    if (score > (item.familyScores.get(family) ?? 0)) {
+      item.familyScores.set(family, score);
+      item.preferredMethod = method;
     }
-
-    for (const account of scoped) {
-      mergeCandidate(
-        candidates,
-        account,
-        typeof confidence === "function" ? confidence(account) : confidence,
-        method,
-        reasoning
-      );
+    item.reasoning.push(reasoning);
+  };
+  const hardAccountIds = new Set<string>();
+  let hardConflict = false;
+  const addHard = (
+    value: string,
+    matches: ExactSupplierAccount[],
+    method: SupplierMatchCandidate["method"],
+    reasoning: string
+  ) => {
+    if (!value || !matches.length) return;
+    if (matches.length !== 1) hardConflict = true;
+    for (const account of matches) {
+      const item = forAccount(account);
+      item.hardMethods.add(method);
+      item.preferredMethod = method;
+      item.reasoning.push(reasoning);
+      if (matches.length === 1) hardAccountIds.add(account.id);
     }
-    matchState.unresolvedPool = scoped;
-
-    if (scoped.length !== 1) {
-      return null;
-    }
-
-    const account = scoped[0];
-    return resolved(
-      account,
-      typeof confidence === "function" ? confidence(account) : confidence,
-      method,
-      reasoning
-    );
   };
 
+  const dataVat = normalizedVat(data.supplierVatNumber);
+  addHard(
+    dataVat,
+    suppliers.filter((account) => normalizedVat(account.vatNumber) === dataVat),
+    "VAT number",
+    "VAT number matched Exact supplier master data."
+  );
   const dataIban = normalizedIban(data.iban);
-  if (dataIban) {
-    const ibanResolution = considerTier(
-      suppliers.filter((account) => normalizedIban(account.iban) === dataIban),
-      1,
-      "IBAN",
-      "Bank account / IBAN matched the imported Exact supplier overview."
-    );
-    if (ibanResolution) {
-      return ibanResolution;
-    }
-  }
+  addHard(
+    dataIban,
+    suppliers.filter((account) => normalizedIban(account.iban) === dataIban),
+    "IBAN",
+    "Bank account / IBAN matched the imported Exact supplier overview."
+  );
+  const dataSupplierCode = invoiceSupplierCode(data);
+  addHard(
+    dataSupplierCode,
+    suppliers.filter(
+      (account) => normalizedSupplierCode(account.code) === dataSupplierCode
+    ),
+    "Supplier code",
+    "Clearly labelled supplier code matched the Exact supplier overview."
+  );
+  if (hardAccountIds.size > 1) hardConflict = true;
 
   const dataBic = invoiceBic(data);
   if (dataBic) {
-    const bicResolution = considerTier(
-      suppliers.filter((account) => normalizedBic(account.bicCode) === dataBic),
-      0.98,
-      "BIC",
-      "BIC matched the imported Exact supplier overview."
-    );
-    if (bicResolution) {
-      return bicResolution;
+    for (const account of suppliers.filter(
+      (candidate) => normalizedBic(candidate.bicCode) === dataBic
+    )) {
+      const item = forAccount(account);
+      item.bicScore = 0.12;
+      item.reasoning.push("BIC matched as supporting evidence only.");
     }
-  }
-
-  const dataSupplierCode = invoiceSupplierCode(data);
-  if (dataSupplierCode) {
-    const codeResolution = considerTier(
-      suppliers.filter(
-        (account) => normalizedSupplierCode(account.code) === dataSupplierCode
-      ),
-      0.97,
-      "Supplier code",
-      "Supplier code matched the imported Exact supplier overview."
-    );
-    if (codeResolution) {
-      return codeResolution;
-    }
-  }
-
-  const learnedAccounts = learning.supplierSelections
-    .filter((decision) => identities.includes(decision.supplierIdentity))
-    .map((decision) => suppliers.find((supplier) => supplier.id === decision.accountId))
-    .filter((account): account is ExactSupplierAccount => Boolean(account));
-  const learnedResolution = considerTier(
-    learnedAccounts,
-    0.97,
-    "Learned decision",
-    "Matched a previously approved supplier resolution."
-  );
-  if (learnedResolution) {
-    return learnedResolution;
-  }
-
-  const nameScores = new Map(
-    suppliers.map((account) => [account.id, nameSimilarity(data.supplierName, account.name)])
-  );
-  const nameResolution = considerTier(
-    suppliers.filter(
-      (account) =>
-        (nameScores.get(account.id) ?? 0) >= companyConfig.confidenceThreshold
-    ),
-    (account) => roundMoney(nameScores.get(account.id) ?? 0),
-    "Name similarity",
-    "Supplier name matched the imported Exact supplier overview."
-  );
-  if (nameResolution) {
-    return nameResolution;
-  }
-
-  const addressScores = new Map(
-    suppliers.map((account) => [
-      account.id,
-      addressSimilarity(data.supplierAddress, account.address),
-    ])
-  );
-  const addressResolution = considerTier(
-    suppliers.filter((account) => (addressScores.get(account.id) ?? 0) >= 0.75),
-    (account) =>
-      roundMoney(0.87 + Math.min(addressScores.get(account.id) ?? 0, 1) * 0.08),
-    "Address",
-    "Supplier address matched the imported Exact supplier overview."
-  );
-  if (addressResolution) {
-    return addressResolution;
   }
 
   const dataCountry = normalizedCountry(data.supplierCountry);
-  const cityCountryResolution = considerTier(
-    dataCountry
-      ? suppliers.filter(
-          (account) =>
-            normalizedCountry(account.country) === dataCountry &&
-            invoiceMentionsCity(data, account.city)
-        )
-      : [],
-    0.87,
-    "City and country",
-    "Supplier city and country matched the imported Exact supplier overview."
-  );
-  if (cityCountryResolution) {
-    return cityCountryResolution;
-  }
-
-  const dataVat = normalizedVat(data.supplierVatNumber);
-  if (dataVat) {
-    const vatResolution = considerTier(
-      suppliers.filter((account) => normalizedVat(account.vatNumber) === dataVat),
-      0.96,
-      "VAT number",
-      "VAT number matched Exact supplier master data."
-    );
-    if (vatResolution) {
-      return vatResolution;
+  const dataCoc = normalizeSupplierCode(data.supplierChamberOfCommerceNumber);
+  for (const account of suppliers) {
+    const nameScore = nameSimilarity(data.supplierName, account.name);
+    if (nameScore >= 0.55) {
+      addFamily(
+        account,
+        "name",
+        0.45 + nameScore * 0.2,
+        "Name similarity",
+        "Supplier name matched the imported Exact supplier overview."
+      );
+    }
+    const addressScore = addressSimilarity(data.supplierAddress, account.address);
+    if (addressScore >= 0.6) {
+      addFamily(
+        account,
+        "address",
+        0.25 + addressScore * 0.1,
+        "Address",
+        "Supplier address matched the imported Exact supplier overview."
+      );
+    }
+    if (
+      dataCountry &&
+      normalizedCountry(account.country) === dataCountry &&
+      invoiceMentionsCity(data, account.city)
+    ) {
+      addFamily(
+        account,
+        "address",
+        0.3,
+        "City and country",
+        "Supplier city and country matched the imported Exact supplier overview."
+      );
+    }
+    if (
+      dataCoc &&
+      normalizeSupplierCode(account.chamberOfCommerceNumber) === dataCoc
+    ) {
+      addFamily(
+        account,
+        "address",
+        0.35,
+        "Address",
+        "Chamber of Commerce number matched as supporting identity evidence."
+      );
     }
   }
 
-  const historicalAccounts: ExactSupplierAccount[] = [];
-  for (const previous of allInvoices) {
-    if (previous.id === invoice.id || !previous.purchaseJournal) {
+  for (const decision of learning.supplierSelections) {
+    if (
+      !identities.includes(decision.supplierIdentity) ||
+      !(
+        decision.trustState === "trusted" ||
+        (decision.trustState === "pending" && decision.invoiceId === invoice.id)
+      )
+    ) {
       continue;
     }
+    const account = suppliers.find((supplier) => supplier.id === decision.accountId);
+    if (account) {
+      addFamily(
+        account,
+        "history",
+        0.4,
+        "Learned decision",
+        decision.trustState === "trusted"
+          ? "Matched a previously trusted supplier resolution."
+          : "Applied the supplier selected for this invoice."
+      );
+    }
+  }
 
-    const previousSupplier = selectedSupplierFromBooking(previous, exactMasterData);
+  for (const previous of allInvoices) {
+    if (previous.id === invoice.id || !previous.purchaseJournal) continue;
+    const account = selectedSupplierFromBooking(previous, exactMasterData);
     if (
-      previousSupplier &&
-      nameSimilarity(previous.extractedData.supplierName, data.supplierName) >=
-        companyConfig.confidenceThreshold
+      account &&
+      nameSimilarity(previous.extractedData.supplierName, data.supplierName) >= 0.75
     ) {
-      historicalAccounts.push(previousSupplier);
+      addFamily(
+        account,
+        "history",
+        0.35,
+        "Exact history",
+        "Matched a previously approved invoice for this supplier."
+      );
     }
   }
 
   const invoiceDescriptionKey = descriptionKey(humanDescription(data));
   for (const historical of exactMasterData.historicalPurchaseBookings) {
     if (
-      historical.descriptionKey &&
-      invoiceDescriptionKey &&
-      (invoiceDescriptionKey === historical.descriptionKey ||
-        invoiceDescriptionKey.includes(historical.descriptionKey))
+      !historical.descriptionKey ||
+      !invoiceDescriptionKey ||
+      !(
+        invoiceDescriptionKey === historical.descriptionKey ||
+        invoiceDescriptionKey.includes(historical.descriptionKey)
+      )
     ) {
+      continue;
+    }
+    const account = suppliers.find(
+      (supplier) => supplier.id === historical.supplierAccountId
+    );
+    if (account) {
+      addFamily(
+        account,
+        "history",
+        0.35,
+        "Exact history",
+        "Matched historical Exact purchase bookings for this supplier."
+      );
+    }
+  }
+
+  const layout = formatFingerprint(data.rawText ?? "");
+  if (layout) {
+    for (const profile of learning.supplierProfiles) {
+      if (profile.formatFingerprint !== layout) continue;
       const account = suppliers.find(
-        (supplier) => supplier.id === historical.supplierAccountId
+        (supplier) => supplier.id === profile.supplierAccountId
       );
       if (account) {
-        historicalAccounts.push(account);
+        addFamily(
+          account,
+          "history",
+          0.35,
+          "Learned decision",
+          "Document layout matched trusted supplier examples."
+        );
       }
     }
   }
-  const historyResolution = considerTier(
-    historicalAccounts,
-    0.93,
-    "Exact history",
-    "Matched historical Exact purchase bookings for this supplier."
-  );
-  if (historyResolution) {
-    return historyResolution;
-  }
 
-  if (matchState.unresolvedPool && matchState.unresolvedPool.length > 1) {
-    const sorted = sortedCandidates(matchState.unresolvedPool);
+  const score = (item: Evidence) => {
+    if (item.hardMethods.size) {
+      return Math.min(
+        0.99,
+        0.96 +
+          Math.min(
+            0.03,
+            [...item.familyScores.values()].reduce((sum, value) => sum + value, 0) *
+              0.03
+          )
+      );
+    }
+    return Math.min(
+      0.99,
+      [...item.familyScores.values()].reduce((sum, value) => sum + value, 0) +
+        item.bicScore
+    );
+  };
+  const ranked = [...evidence.values()]
+    .map((item) => ({ item, confidence: roundMoney(score(item)) }))
+    .sort(
+      (left, right) =>
+        right.confidence - left.confidence ||
+        left.item.account.id.localeCompare(right.item.account.id)
+    );
+  const meaningful = ranked.filter(({ confidence }) => confidence >= 0.3);
+  const candidates: SupplierMatchCandidate[] =
+    meaningful.length >= 2
+      ? meaningful.slice(0, 5).map(({ item, confidence }) => ({
+          account: item.account,
+          confidence,
+          method: item.preferredMethod,
+          reasoning: [...new Set(item.reasoning)],
+        }))
+      : [];
+  const best = ranked[0];
+  const runnerUp = ranked[1];
+  const margin = best
+    ? best.confidence - (runnerUp?.confidence ?? 0)
+    : 0;
+  const bestHasUniqueHard = best
+    ? hardAccountIds.size === 1 && hardAccountIds.has(best.item.account.id)
+    : false;
+  const bestSoftFamilies = best?.item.familyScores.size ?? 0;
+  const autoSelect = Boolean(
+    best &&
+      !hardConflict &&
+      best.confidence >= 0.9 &&
+      margin >= 0.12 &&
+      (bestHasUniqueHard || bestSoftFamilies >= 2)
+  );
+  if (best && autoSelect) {
     return {
-      selectedAccountId: undefined,
-      selectedAccountCode: undefined,
-      selectedAccountName: undefined,
-      matchConfidence: sorted[0]?.confidence ?? 0,
-      threshold: companyConfig.confidenceThreshold,
-      method: "Multiple matches",
-      reviewRequired: true,
-      candidates: sorted,
-      reasoning: [
-        MULTIPLE_EXACT_SUPPLIERS_MESSAGE,
-        ...sorted.flatMap((candidate) => candidate.reasoning),
-      ],
+      selectedAccountId: best.item.account.id,
+      selectedAccountCode: best.item.account.code,
+      selectedAccountName: best.item.account.name,
+      matchConfidence: best.confidence,
+      threshold: 0.9,
+      method: bestHasUniqueHard ? best.item.preferredMethod : "Evidence fusion",
+      reviewRequired: false,
+      candidates,
+      reasoning: [...new Set(best.item.reasoning)],
     };
   }
 
-  for (const account of suppliers) {
-    const score = nameScores.get(account.id) ?? 0;
-    if (score >= 0.55) {
-      mergeCandidate(
-        candidates,
-        account,
-        roundMoney(score),
-        "Name similarity",
-        "Supplier name is similar to the Exact account name."
-      );
-    }
-  }
-  const sorted = sortedCandidates();
+  const ambiguous = hardConflict || Boolean(best && runnerUp && margin < 0.12);
   return {
     selectedAccountId: undefined,
     selectedAccountCode: undefined,
     selectedAccountName: undefined,
-    matchConfidence: sorted[0]?.confidence ?? 0,
-    threshold: companyConfig.confidenceThreshold,
-    method: "No match",
+    matchConfidence: best?.confidence ?? 0,
+    threshold: 0.9,
+    method: ambiguous ? "Multiple matches" : "No match",
     reviewRequired: true,
-    candidates: sorted,
-    reasoning: [SUPPLIER_NOT_MATCHED_MESSAGE],
+    reasonCode: ambiguous ? "supplier_ambiguous" : "supplier_low_confidence",
+    candidates,
+    reasoning: [
+      ambiguous ? MULTIPLE_EXACT_SUPPLIERS_MESSAGE : SUPPLIER_NOT_MATCHED_MESSAGE,
+      ...candidates.flatMap((candidate) => candidate.reasoning),
+    ],
   };
 }
 
@@ -2250,7 +2216,7 @@ export function purchaseJournalValidationErrors(
       purchaseError(
         "supplier",
         booking.supplierResolution.reasoning[0] ??
-          "Supplier Review Required: select an Exact supplier account."
+          "Booking Intelligence Review Required: select an Exact supplier account."
       )
     );
   }
@@ -2338,7 +2304,7 @@ export function statusFromPurchaseJournal(
   }
 
   if (booking.supplierResolution.reviewRequired) {
-    return "Supplier Review Required";
+    return "Booking Intelligence Review Required";
   }
 
   if (booking.paymentConditionMismatch && !booking.userApproved) {
@@ -2376,6 +2342,8 @@ export function rememberDecisionsFromInvoice(
     supplierIdentity,
     accountId: supplierAccountId,
     decidedAt,
+    invoiceId: invoice.id,
+    trustState: "trusted",
   });
 
   for (const line of booking.lines) {

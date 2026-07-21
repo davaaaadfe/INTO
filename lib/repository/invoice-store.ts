@@ -55,6 +55,7 @@ import {
   canonicalSupplierIdentityKeys,
   captureSupplierAccountCorrection,
   captureUserCorrections,
+  promoteInvoiceCorrections,
 } from "../services/correction-learning";
 import { refreshExactTokenIfNeeded } from "../services/exact-online-service";
 import { mergeSupplierOverviewWithExactSuppliers } from "../services/supplier-overview-import";
@@ -375,6 +376,15 @@ export function getStore() {
     if (key !== "revision" && !Array.isArray(globalStore.__INTO_STORE.learning[key])) {
       Object.assign(globalStore.__INTO_STORE.learning, { [key]: [] });
     }
+  }
+  for (const correction of globalStore.__INTO_STORE.learning.corrections) {
+    if (!correction.trustState) {
+      correction.trustState = "legacy";
+      correction.confidence = Math.min(correction.confidence, 0.8);
+    }
+  }
+  for (const decision of globalStore.__INTO_STORE.learning.supplierSelections) {
+    decision.trustState ??= "legacy";
   }
   if (globalStore.__INTO_STORE.supplierOverviewImport === undefined) {
     globalStore.__INTO_STORE.supplierOverviewImport = null;
@@ -1095,7 +1105,7 @@ export function saveInvoiceReview(
           : `bookingLine.${correction.field}`,
       oldValue: correction.originalValue,
       newValue: correction.correctedValue,
-      message: `${user.name} corrected ${correction.field}; the decision was saved for future similar invoices.`,
+      message: `${user.name} corrected ${correction.field}; the decision is pending until Learn, approval, or booking.`,
       metadata: {
         learnedCorrectionId: correction.id,
         lineIndex: correction.metadata?.lineIndex,
@@ -1226,6 +1236,7 @@ export function learnInvoice(
     return null;
   }
   const learnedAt = now();
+  promoteInvoiceCorrections(store.learning, invoiceId, "learn", learnedAt);
   const exampleId = createId("supplier_learning_example");
   const contentHash = trustedContentHash(saved);
   const nextLearning = learnSupplierInvoice(store.learning, {
@@ -1241,6 +1252,7 @@ export function learnInvoice(
     bookingLines: finalBookingLines,
   });
   Object.assign(store.learning, nextLearning);
+  rememberDecisionsFromInvoice(saved, store.learning);
   const profile = store.learning.supplierProfiles.find(
     (item) => item.supplierAccountId === supplierAccountId
   );
@@ -1600,6 +1612,7 @@ export function markInvoiceBooked(invoiceId: string, exactBookingId: string) {
   invoice.exactBookingId = exactBookingId;
   invoice.exactBookingStatus = "booked";
   invoice.lastError = undefined;
+  promoteInvoiceCorrections(getStore().learning, invoiceId, "booking", now());
   rememberDecisionsFromInvoice(invoice, getStore().learning);
   invoice.updatedAt = now();
   addAuditEvent({
@@ -1773,6 +1786,12 @@ export function approveInvoiceIntelligence(invoiceId: string) {
   const updatedInvoice = recomputeInvoiceState(invoiceId);
 
   if (updatedInvoice) {
+    promoteInvoiceCorrections(
+      getStore().learning,
+      invoiceId,
+      "approval",
+      invoice.intelligenceApprovedAt
+    );
     rememberDecisionsFromInvoice(updatedInvoice, getStore().learning);
     addAuditEvent({
       invoiceId,
@@ -1816,12 +1835,19 @@ export function selectInvoiceSupplier(invoiceId: string, accountId: string) {
     correctedAt: decidedAt,
   });
   store.learning.supplierSelections = store.learning.supplierSelections.filter(
-    (decision) => decision.supplierIdentity !== supplierIdentity
+    (decision) =>
+      !(
+        decision.supplierIdentity === supplierIdentity &&
+        decision.invoiceId === invoiceId &&
+        decision.trustState === "pending"
+      )
   );
   store.learning.supplierSelections.unshift({
     supplierIdentity,
     accountId: account.id,
     decidedAt,
+    invoiceId,
+    trustState: "pending",
   });
 
   const updatedInvoice = recomputeInvoiceState(invoiceId);

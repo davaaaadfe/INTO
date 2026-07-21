@@ -6,6 +6,7 @@ import {
   type BookingLearningStore,
 } from "../lib/domain/invoice";
 import {
+  approveInvoiceIntelligence,
   createUploadedInvoice,
   getCompanyConnectionUserId,
   getStore,
@@ -69,7 +70,19 @@ test("the active review save path persists booking-line corrections", () => {
   assert.ok(
     getStore().learning.corrections.some(
       (correction) =>
-        correction.field === "glAccount" && correction.correctedValue === "4420"
+        correction.field === "glAccount" &&
+        correction.correctedValue === "4420" &&
+        correction.trustState === "pending"
+    )
+  );
+  approveInvoiceIntelligence(invoice.id);
+  assert.ok(
+    getStore().learning.corrections.some(
+      (correction) =>
+        correction.invoiceId === invoice.id &&
+        correction.field === "glAccount" &&
+        correction.trustState === "trusted" &&
+        correction.trustReason === "approval"
     )
   );
 });
@@ -177,6 +190,44 @@ test("Learn stores the live corrected draft once and never books it", () => {
     1
   );
   assert.equal(listSupplierLearningSummaries()[0]?.supplierName, "Noordzee Office Supplies");
+  assert.equal(
+    getStore().learning.corrections
+      .filter((correction) => correction.invoiceId === invoice.id)
+      .every(
+        (correction) =>
+          correction.trustState === "trusted" &&
+          correction.trustReason === "learn"
+      ),
+    true
+  );
+});
+
+test("successful booking promotes pending corrections", () => {
+  const { invoice, extractedData } = learningInvoice();
+  const saved = saveInvoiceReview(
+    invoice.id,
+    { ...extractedData, expenseDescription: "Booked correction" },
+    invoice.purchaseJournal!.lines
+  )!;
+  assert.ok(
+    getStore().learning.corrections.some(
+      (correction) =>
+        correction.invoiceId === invoice.id && correction.trustState === "pending"
+    )
+  );
+
+  markInvoiceBooked(saved.id, "exact-trust-promotion");
+
+  assert.equal(
+    getStore().learning.corrections
+      .filter((correction) => correction.invoiceId === invoice.id)
+      .every(
+        (correction) =>
+          correction.trustState === "trusted" &&
+          correction.trustReason === "booking"
+      ),
+    true
+  );
 });
 
 test("Learn rejects an earlier draft after intervening extraction and review edits", () => {
@@ -255,6 +306,13 @@ test("re-read and supplier selection each invalidate an earlier Learn draft", ()
   );
   const ambiguous = recomputeInvoiceState(invoice.id)!;
   assert.equal(ambiguous.purchaseJournal!.supplierResolution.selectedAccountId, undefined);
+  getStore().learning.supplierSelections.unshift({
+    supplierIdentity: "vat:NL123456789B01",
+    accountId: "supplier_ambiguous_b",
+    decidedAt: "2026-07-20T00:00:00.000Z",
+    invoiceId: "previous-approved-invoice",
+    trustState: "trusted",
+  });
   const beforeSelectionRevision = ambiguous.revision!;
   const selected = selectInvoiceSupplier(invoice.id, "supplier_ambiguous_a")!;
 
@@ -263,6 +321,15 @@ test("re-read and supplier selection each invalidate an earlier Learn draft", ()
     "supplier_ambiguous_a"
   );
   assert.equal(selected.revision, beforeSelectionRevision + 1);
+  assert.ok(
+    getStore().learning.supplierSelections.some(
+      (decision) =>
+        decision.supplierIdentity === "vat:NL123456789B01" &&
+        decision.accountId === "supplier_ambiguous_b" &&
+        decision.trustState === "trusted"
+    ),
+    "an unapproved selection must not erase prior trusted evidence"
+  );
   assert.throws(
     () =>
       learnInvoice(

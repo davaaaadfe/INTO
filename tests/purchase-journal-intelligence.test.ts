@@ -341,7 +341,11 @@ test("marks multiple matching suppliers for manual supplier review", () => {
 
   assert.equal(booking.supplierResolution.reviewRequired, true);
   assert.equal(booking.supplierResolution.selectedAccountId, undefined);
-  assert.equal(statusFromPurchaseJournal([], booking), "Supplier Review Required");
+  assert.equal(
+    statusFromPurchaseJournal([], booking),
+    "Booking Intelligence Review Required"
+  );
+  assert.equal(booking.supplierResolution.reasonCode, "supplier_ambiguous");
   assert.equal(
     purchaseJournalValidationErrors(booking).some(
       (error) =>
@@ -450,6 +454,8 @@ test("matches an Exact supplier name despite legal suffix punctuation", () => {
       supplierName: "Booking.com B.V.",
       supplierVatNumber: "",
       supplierChamberOfCommerceNumber: "",
+      supplierAddress: "Herengracht 597, Amsterdam",
+      supplierCountry: "NL",
       iban: "",
       expenseDescription: "Unrelated expense",
       invoiceNumber: "INV-NAME-001",
@@ -459,7 +465,7 @@ test("matches an Exact supplier name despite legal suffix punctuation", () => {
 
   assert.equal(booking.supplierResolution.reviewRequired, false);
   assert.equal(booking.supplierResolution.selectedAccountId, "supplier_booking");
-  assert.equal(booking.supplierResolution.method, "Name similarity");
+  assert.equal(booking.supplierResolution.method, "Evidence fusion");
 });
 
 test("matches an Exact supplier IBAN despite invoice spacing", () => {
@@ -524,7 +530,7 @@ test("prioritizes an imported supplier IBAN over a conflicting supplier name", (
   assert.equal(booking.supplierResolution.method, "IBAN");
 });
 
-test("matches an imported supplier by labeled BIC before name similarity", () => {
+test("uses BIC only as supporting evidence and never auto-selects from BIC alone", () => {
   const masterData = {
     ...exactMasterData,
     suppliers: [
@@ -551,8 +557,98 @@ test("matches an imported supplier by labeled BIC before name similarity", () =>
     masterData
   );
 
-  assert.equal(booking.supplierResolution.selectedAccountId, "supplier_bic_match");
-  assert.equal(booking.supplierResolution.method, "BIC");
+  assert.equal(booking.supplierResolution.selectedAccountId, undefined);
+  assert.equal(booking.supplierResolution.reviewRequired, true);
+  assert.equal(booking.supplierResolution.reasonCode, "supplier_low_confidence");
+});
+
+test("conflicting hard supplier identifiers block automatic selection", () => {
+  const masterData = {
+    ...exactMasterData,
+    suppliers: [
+      supplierAccount({
+        id: "supplier_vat_hard_match",
+        code: "91001",
+        name: "VAT Match BV",
+        vatNumber: "NL111111111B01",
+        iban: "NL11BANK0000000001",
+        isSupplier: true,
+      }),
+      supplierAccount({
+        id: "supplier_iban_hard_match",
+        code: "91002",
+        name: "IBAN Match BV",
+        vatNumber: "NL222222222B01",
+        iban: "NL22BANK0000000002",
+        isSupplier: true,
+      }),
+    ],
+  };
+  const invoice = uploadedInvoice({}, {
+    supplierName: "VAT Match BV",
+    supplierVatNumber: "NL111111111B01",
+    iban: "NL22 BANK 0000 0000 02",
+    invoiceNumber: "INV-HARD-CONFLICT-1",
+  });
+  const booking = generatePurchaseJournalBooking(
+    invoice,
+    [invoice],
+    createInitialLearningStore(),
+    masterData
+  );
+
+  assert.equal(booking.supplierResolution.selectedAccountId, undefined);
+  assert.equal(booking.supplierResolution.reasonCode, "supplier_ambiguous");
+  assert.equal(booking.supplierResolution.candidates.length, 2);
+});
+
+test("a narrow score margin remains ambiguous even with multiple soft signals", () => {
+  const masterData = {
+    ...exactMasterData,
+    suppliers: [
+      supplierAccount({
+        id: "supplier_soft_a",
+        code: "92001",
+        name: "Northwind Services BV",
+        address: "Coolsingel 88, Rotterdam",
+        city: "Rotterdam",
+        country: "NL",
+        isSupplier: true,
+      }),
+      supplierAccount({
+        id: "supplier_soft_b",
+        code: "92002",
+        name: "Northwind Services B.V.",
+        address: "Coolsingel 88, Rotterdam",
+        city: "Rotterdam",
+        country: "NL",
+        isSupplier: true,
+      }),
+    ],
+  };
+  const invoice = uploadedInvoice({}, {
+    supplierName: "Northwind Services",
+    supplierVatNumber: "",
+    iban: "",
+    supplierAddress: "Coolsingel 88, Rotterdam",
+    supplierCountry: "NL",
+    invoiceNumber: "INV-SOFT-MARGIN-1",
+  });
+  const booking = generatePurchaseJournalBooking(
+    invoice,
+    [invoice],
+    createInitialLearningStore(),
+    masterData
+  );
+
+  assert.equal(booking.supplierResolution.selectedAccountId, undefined);
+  assert.equal(booking.supplierResolution.reasonCode, "supplier_ambiguous");
+  assert.ok(booking.supplierResolution.candidates.length >= 2);
+  assert.ok(
+    booking.supplierResolution.candidates[0].confidence -
+      booking.supplierResolution.candidates[1].confidence <
+      0.12
+  );
 });
 
 test("matches an imported supplier by a labeled supplier code", () => {
@@ -585,7 +681,7 @@ test("matches an imported supplier by a labeled supplier code", () => {
   assert.equal(booking.supplierResolution.method, "Supplier code");
 });
 
-test("matches an imported supplier by address when stronger identifiers are absent", () => {
+test("combines supplier name and address before automatic selection", () => {
   const masterData = {
     ...exactMasterData,
     suppliers: [
@@ -601,7 +697,7 @@ test("matches an imported supplier by address when stronger identifiers are abse
     ],
   };
   const invoice = uploadedInvoice({}, {
-    supplierName: "Unknown invoice supplier",
+    supplierName: "Address Matched Supplier",
     supplierVatNumber: "",
     iban: "",
     supplierAddress: "Coolsingel 88, 3011 AD Rotterdam",
@@ -616,7 +712,7 @@ test("matches an imported supplier by address when stronger identifiers are abse
   );
 
   assert.equal(booking.supplierResolution.selectedAccountId, "supplier_address_match");
-  assert.equal(booking.supplierResolution.method, "Address");
+  assert.equal(booking.supplierResolution.method, "Evidence fusion");
 });
 
 test("requires review when city and country identify multiple imported suppliers", () => {
@@ -696,15 +792,11 @@ test("limits unresolved supplier suggestions to the strongest useful candidates"
 
   assert.equal(booking.supplierResolution.reviewRequired, true);
   assert.equal(booking.supplierResolution.candidates.length, 5);
-  assert.deepEqual(
-    booking.supplierResolution.candidates.map((candidate) => candidate.account.id),
-    [
-      "supplier_city_0",
-      "supplier_city_1",
-      "supplier_city_2",
-      "supplier_city_3",
-      "supplier_city_4",
-    ]
+  assert.equal(
+    booking.supplierResolution.candidates.every((candidate) =>
+      candidate.account.id.startsWith("supplier_city_")
+    ),
+    true
   );
 });
 
@@ -740,16 +832,17 @@ test("does not match an imported account that is not marked as a supplier", () =
 test("uses learned supplier decisions to unblock future ambiguous matches", () => {
   const invoice = uploadedInvoice({}, {
     supplierName: "Acme Supplies BV",
-    supplierVatNumber: "NL123456789B01",
+    supplierVatNumber: "",
     supplierChamberOfCommerceNumber: "",
     iban: "",
     invoiceNumber: "INV-ACME-002",
   });
   const learning = createInitialLearningStore();
   learning.supplierSelections.push({
-    supplierIdentity: "vat:NL123456789B01",
+    supplierIdentity: "name:acme-supplies",
     accountId: "supplier_ambiguous_a",
     decidedAt: "2026-06-16T00:00:00.000Z",
+    trustState: "trusted",
   });
   const booking = generatePurchaseJournalBooking(
     invoice,

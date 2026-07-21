@@ -8,6 +8,11 @@ import {
   type DocumentTextPage,
 } from "./invoice-document-text";
 import { amountToMinorUnits } from "./invoice-validation";
+import {
+  normalizeSupplierChamberOfCommerce,
+  normalizeSupplierIban,
+  normalizeSupplierVat,
+} from "./supplier-identity";
 
 export type ExtractionFileInput = {
   name: string;
@@ -16,127 +21,6 @@ export type ExtractionFileInput = {
   text?: () => Promise<string>;
   arrayBuffer?: () => Promise<ArrayBuffer>;
 };
-
-type MockSupplierProfile = {
-  name: string;
-  vat: string;
-  iban: string;
-  chamberOfCommerceNumber: string;
-  address: string;
-  country: string;
-  paymentTerms: string;
-  expenseDescription: string;
-};
-
-const supplierProfiles: MockSupplierProfile[] = [
-  {
-    name: "Noordzee Office Supplies",
-    vat: "NL812345678B01",
-    iban: "NL91ABNA0417164300",
-    chamberOfCommerceNumber: "34123456",
-    address: "Keizersgracht 100, Amsterdam",
-    country: "NL",
-    paymentTerms: "7 days",
-    expenseDescription: "Office Supplies",
-  },
-  {
-    name: "Delta IT Services",
-    vat: "NL855512340B01",
-    iban: "NL39RABO0300065264",
-    chamberOfCommerceNumber: "55230119",
-    address: "Europalaan 21, Utrecht",
-    country: "NL",
-    paymentTerms: "30 days",
-    expenseDescription: "Google Workspace",
-  },
-  {
-    name: "Bright Logistics BV",
-    vat: "NL001234567B90",
-    iban: "NL02INGB0001234567",
-    chamberOfCommerceNumber: "60234111",
-    address: "Havenweg 9, Rotterdam",
-    country: "NL",
-    paymentTerms: "30 days",
-    expenseDescription: "Freight and logistics",
-  },
-];
-
-const namedProfiles: Record<string, MockSupplierProfile> = {
-  google: {
-    name: "Google Ireland Limited",
-    vat: "IE6388047V",
-    iban: "IE29AIBK93115212345678",
-    chamberOfCommerceNumber: "368047",
-    address: "Gordon House, Dublin",
-    country: "IE",
-    paymentTerms: "30 days",
-    expenseDescription: "Google Workspace",
-  },
-  booking: {
-    name: "Booking.com BV",
-    vat: "NL805734958B01",
-    iban: "NL44ABNA0123456789",
-    chamberOfCommerceNumber: "31047344",
-    address: "Herengracht 597, Amsterdam",
-    country: "NL",
-    paymentTerms: "7 days",
-    expenseDescription: "Hotel Amsterdam",
-  },
-  klm: {
-    name: "KLM Royal Dutch Airlines",
-    vat: "NL004983269B01",
-    iban: "NL20ABNA0999999999",
-    chamberOfCommerceNumber: "33014286",
-    address: "Amsterdamseweg 55, Amstelveen",
-    country: "NL",
-    paymentTerms: "7 days",
-    expenseDescription: "Air travel expenses",
-  },
-  insurance: {
-    name: "Atlas Insurance NV",
-    vat: "NL009988776B01",
-    iban: "NL18INGB0000111122",
-    chamberOfCommerceNumber: "27118901",
-    address: "Coolsingel 42, Rotterdam",
-    country: "NL",
-    paymentTerms: "30 days",
-    expenseDescription: "Insurance policy",
-  },
-  inbody: {
-    name: "InBody Co Ltd",
-    vat: "KR1208145299",
-    iban: "KR990000000000000001",
-    chamberOfCommerceNumber: "1208145299",
-    address: "625 Eonju-ro, Seoul",
-    country: "KR",
-    paymentTerms: "30 days",
-    expenseDescription: "Intercompany product purchase",
-  },
-  us: {
-    name: "US Cloud Inc",
-    vat: "US123456789",
-    iban: "US00000000000001",
-    chamberOfCommerceNumber: "US-2231",
-    address: "100 Market Street, San Francisco",
-    country: "US",
-    paymentTerms: "30 days",
-    expenseDescription: "Cloud subscription",
-  },
-  ambiguous: {
-    name: "Acme Supplies BV",
-    vat: "NL123456789B01",
-    iban: "",
-    chamberOfCommerceNumber: "",
-    address: "Netherlands",
-    country: "NL",
-    paymentTerms: "30 days",
-    expenseDescription: "Office Supplies",
-  },
-};
-
-function stableNumber(input: string) {
-  return [...input].reduce((sum, char) => sum + char.charCodeAt(0), 0);
-}
 
 export type InvoiceReferenceDetection = {
   value: string;
@@ -365,85 +249,6 @@ export function detectInvoiceDate(input: string): InvoiceDateDetection | null {
     }
   }
   return null;
-}
-
-function addDays(date: Date, days: number) {
-  const next = new Date(date);
-  next.setUTCDate(next.getUTCDate() + days);
-  return next;
-}
-
-function isoDate(date: Date) {
-  return date.toISOString().slice(0, 10);
-}
-
-function profileForFile(fileName: string, seed: number) {
-  if (/google|workspace|reverse|eu-acquisition|saas|subscription/i.test(fileName)) {
-    return namedProfiles.google;
-  }
-
-  if (/booking|hotel|restaurant/i.test(fileName)) {
-    return namedProfiles.booking;
-  }
-
-  if (/klm|flight|airline|eurostar/i.test(fileName)) {
-    return namedProfiles.klm;
-  }
-
-  if (/insurance|policy/i.test(fileName)) {
-    return namedProfiles.insurance;
-  }
-
-  if (/inbody|intercompany|internal/i.test(fileName)) {
-    return namedProfiles.inbody;
-  }
-
-  if (/ambiguous|acme|multiple-supplier/i.test(fileName)) {
-    return namedProfiles.ambiguous;
-  }
-
-  if (/non-eu|outside-eu|us-cloud|(^|[^a-z])us([^a-z]|$)/i.test(fileName)) {
-    return namedProfiles.us;
-  }
-
-  return supplierProfiles[seed % supplierProfiles.length];
-}
-
-function vatRateForFile(fileName: string, profile: MockSupplierProfile) {
-  if (/reverse|eu-acquisition|non-eu|outside-eu|flight|klm|hotel|booking|insurance|restaurant|zero-vat/i.test(fileName)) {
-    return 0;
-  }
-
-  if (/nine|9-vat|restaurant-vat/i.test(fileName)) {
-    return 0.09;
-  }
-
-  if (profile.country !== "NL") {
-    return 0;
-  }
-
-  return 0.21;
-}
-
-function servicePeriodFor(fileName: string, invoiceDate: Date) {
-  if (/subscription|saas|google|insurance|maintenance/i.test(fileName)) {
-    return {
-      start: "2026-01-15",
-      end: "2026-06-30",
-    };
-  }
-
-  if (/flight|hotel|booking|event/i.test(fileName)) {
-    const start = addDays(invoiceDate, 55);
-    const end = addDays(start, /hotel|booking/i.test(fileName) ? 2 : 0);
-
-    return {
-      start: isoDate(start),
-      end: isoDate(end),
-    };
-  }
-
-  return { start: "", end: "" };
 }
 
 function parsedAmount(value: string | undefined) {
@@ -773,34 +578,89 @@ function amountEvidence(
   return undefined;
 }
 
+function labelledText(input: string, labels: string[]) {
+  for (const label of labels) {
+    const match = new RegExp(
+      `(?:^|\\n)\\s*(?:${label})\\s*[:#-]\\s*([^\\n<]{1,160})`,
+      "i"
+    ).exec(input);
+    if (match?.[1]?.trim()) return match[1].trim();
+  }
+  return "";
+}
+
+function labelledDate(input: string, labels: string[]) {
+  const line = labelledText(input, labels);
+  if (!line) return "";
+  const raw =
+    /\d{1,4}[./-]\d{1,2}[./-]\d{1,4}/.exec(line)?.[0] ??
+    new RegExp(
+      `(?:${Object.keys(englishMonths).join("|")})\\s+\\d{1,2}(?:st|nd|rd|th)?[,]?\\s+\\d{4}`,
+      "i"
+    ).exec(line)?.[0] ??
+    "";
+  return normalizedDateValue(raw, true) || normalizedDateValue(raw, false);
+}
+
+function documentSupplierIdentity(input: string) {
+  const supplierName = labelledText(input, [
+    "supplier(?:\\s+name)?",
+    "vendor(?:\\s+name)?",
+    "leverancier(?:snaam)?",
+    "crediteur(?:snaam)?",
+  ]);
+  const supplierVat = labelledText(input, [
+    "supplier\\s+(?:vat|btw)(?:\\s+(?:number|no\\.?|nr\\.?))?",
+    "vendor\\s+(?:vat|tax)(?:\\s+(?:number|no\\.?|nr\\.?))?",
+    "vat\\s+(?:number|no\\.?|nr\\.?)",
+    "btw[- ]?(?:nummer|nr\\.?)",
+  ]);
+  const iban = /(?:^|\n)\s*IBAN\s*[:#-]?\s*([A-Z]{2}\d{2}(?:[ \t]?[A-Z0-9]){10,30})/im.exec(
+    input
+  )?.[1];
+  const chamberOfCommerce = labelledText(input, [
+    "chamber\\s+of\\s+commerce(?:\\s+(?:number|no\\.?))?",
+    "coc(?:\\s+(?:number|no\\.?))?",
+    "kvk(?:[- ]?(?:nummer|nr\\.?))?",
+  ]);
+  return {
+    supplierName,
+    supplierVatNumber: normalizeSupplierVat(supplierVat),
+    iban: normalizeSupplierIban(iban),
+    chamberOfCommerceNumber:
+      normalizeSupplierChamberOfCommerce(chamberOfCommerce),
+    address: labelledText(input, [
+      "supplier\\s+address",
+      "vendor\\s+address",
+      "leveranciersadres",
+      "address",
+    ]),
+    country: labelledText(input, ["supplier\\s+country", "vendor\\s+country", "country"]),
+  };
+}
+
+function documentCurrency(input: string) {
+  return /\b(EUR|USD|GBP|CHF|AUD|CAD|PLN|SEK|NOK|DKK|CZK|HUF|RON|BGN)\b/i.exec(
+    input
+  )?.[1]?.toUpperCase() ?? (input.includes("€") ? "EUR" : "");
+}
+
 export async function extractInvoiceData(
   file: ExtractionFileInput
 ): Promise<ExtractedInvoiceData> {
-  const seed = stableNumber(file.name);
-  const profile = profileForFile(file.name, seed);
-  const vatRate = vatRateForFile(file.name, profile);
-  const invalidByName = /invalid|missing|check/i.test(file.name);
-  const paymentMismatch = /payment-mismatch|immediate|already-paid|paid/i.test(file.name);
-  const reverseCharge =
-    /reverse|eu-acquisition|intra-community/i.test(file.name) ||
-    profile.name === "Google Ireland Limited";
   const document = await extractDocumentText(file);
   const documentText = document.text;
+  const supplier = documentSupplierIdentity(documentText);
+  const reverseCharge = /\b(?:reverse\s+charge|intra[- ]community)\b/i.test(
+    documentText
+  );
   const detectedDate = detectInvoiceDate(documentText);
   const invoiceDate = detectedDate?.value ?? "";
-  const parsedInvoiceDate = invoiceDate
-    ? new Date(`${invoiceDate}T00:00:00.000Z`)
-    : null;
-  const servicePeriod = parsedInvoiceDate
-    ? servicePeriodFor(file.name, parsedInvoiceDate)
-    : { start: "", end: "" };
-  const beneficiary = /david|kwon|flight|hotel|booking/i.test(file.name)
-    ? "David Kwon"
-    : "";
   const { netAmount, vatAmount, grossAmount } = extractInvoiceAmounts(documentText);
+  const vatRate = netAmount ? Math.round(((vatAmount ?? 0) / netAmount) * 10_000) / 10_000 : 0;
   const detectedReference = detectInvoiceReference(documentText);
   const confidentReference =
-    !invalidByName && detectedReference && detectedReference.confidence >= 0.8
+    detectedReference && detectedReference.confidence >= 0.8
       ? detectedReference
       : null;
   const invoiceNumber = confidentReference?.value ?? "";
@@ -828,36 +688,48 @@ export async function extractInvoiceData(
     vatAmount: amountEvidence(document.pages, "vatAmount", vatAmount),
     grossAmount: amountEvidence(document.pages, "grossAmount", grossAmount),
   };
+  const expenseDescription = labelledText(documentText, [
+    "expense\\s+description",
+    "description",
+    "omschrijving",
+    "service",
+  ]);
 
   return {
-    supplierName: profile.name,
-    supplierVatNumber: profile.vat,
-    supplierChamberOfCommerceNumber: profile.chamberOfCommerceNumber,
-    supplierAddress: profile.address,
-    supplierCountry: profile.country,
+    supplierName: supplier.supplierName,
+    supplierVatNumber: supplier.supplierVatNumber,
+    supplierChamberOfCommerceNumber: supplier.chamberOfCommerceNumber,
+    supplierAddress: supplier.address,
+    supplierCountry: supplier.country,
     invoiceNumber,
     referenceCode,
     referenceCodeConfidence: confidentReference?.confidence ?? 0,
     invoiceDate,
-    dueDate:
-      invalidByName || !parsedInvoiceDate
-        ? ""
-        : isoDate(addDays(parsedInvoiceDate, 30)),
-    paymentTerms: paymentMismatch ? "immediately" : profile.paymentTerms,
-    currency: "EUR",
+    dueDate: labelledDate(documentText, ["due\\s+date", "vervaldatum", "betaaldatum"]),
+    paymentTerms: labelledText(documentText, [
+      "payment\\s+terms?",
+      "betalingsvoorwaarden?",
+      "payment\\s+condition",
+    ]),
+    currency: documentCurrency(documentText),
     netAmount,
     vatAmount,
     grossAmount,
-    iban: profile.iban,
-    expenseDescription: profile.expenseDescription,
-    beneficiary,
-    serviceStartDate: servicePeriod.start,
-    serviceEndDate: servicePeriod.end,
-    companyVatNumber: "NL857017263B01",
+    iban: supplier.iban,
+    expenseDescription,
+    beneficiary: labelledText(documentText, ["beneficiary", "begunstigde", "traveller"]),
+    serviceStartDate: labelledDate(documentText, ["service\\s+(?:start|from)", "period\\s+from"]),
+    serviceEndDate: labelledDate(documentText, ["service\\s+(?:end|to)", "period\\s+to"]),
+    companyVatNumber: normalizeSupplierVat(
+      labelledText(documentText, [
+        "customer\\s+(?:vat|btw)(?:\\s+(?:number|no\\.?|nr\\.?))?",
+        "company\\s+(?:vat|btw)(?:\\s+(?:number|no\\.?|nr\\.?))?",
+      ])
+    ),
     reverseChargeMentioned: reverseCharge,
     intraCommunityMentioned: reverseCharge,
     confidence:
-      invalidByName || document.mode === "unavailable"
+      document.mode === "unavailable"
         ? 0.4
         : Math.min(
             0.98,
@@ -876,7 +748,7 @@ export async function extractInvoiceData(
         ? [
             {
               id: createId("line"),
-              description: profile.expenseDescription,
+              description: expenseDescription,
               quantity: 1,
               unitPrice: netAmount,
               netAmount,

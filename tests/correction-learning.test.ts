@@ -9,6 +9,7 @@ import {
 import {
   applyLearnedExtractedData,
   captureUserCorrections,
+  promoteInvoiceCorrections,
 } from "../lib/services/correction-learning";
 import {
   createInitialLearningStore,
@@ -125,6 +126,7 @@ test("stores correction provenance and replaces an older rule", () => {
   assert.equal(glCorrection.filenamePattern, "ah-invoice-#.pdf");
   assert.equal(glCorrection.correctedAt, "2026-06-16T10:00:00.000Z");
   assert.equal(glCorrection.correctedByUserId, "user-accountant");
+  assert.equal(glCorrection.trustState, "pending");
 
   current.purchaseJournal.lines = [firstLine];
   captureUserCorrections({
@@ -146,8 +148,53 @@ test("stores correction provenance and replaces an older rule", () => {
     (item) => item.field === "glAccount"
   );
   assert.equal(storedGlRules.length, 1);
+  assert.equal(storedGlRules[0].originalValue, originalLine.finalSelectedAccount);
   assert.equal(storedGlRules[0].correctedValue, "4510");
   assert.equal(storedGlRules[0].correctedByUserId, "user-owner");
+});
+
+test("pending corrections do not apply until a trusted workflow promotes them", () => {
+  const learning = createInitialLearningStore();
+  const original = invoice({}, {
+    supplierName: "Misspelled Supplier",
+    supplierVatNumber: "",
+  });
+  captureUserCorrections({
+    invoice: original,
+    nextExtractedData: {
+      ...original.extractedData,
+      supplierName: "Correct Supplier",
+    },
+    nextBookingLines: [],
+    learning,
+    user: { id: "shared_user", name: "Shared INTO User" },
+    correctedAt: "2026-06-16T10:00:00.000Z",
+  });
+  const future = invoice(
+    { id: "future-invoice" },
+    { supplierName: "Misspelled Supplier", supplierVatNumber: "" }
+  );
+
+  assert.equal(
+    applyLearnedExtractedData(future, future.extractedData, learning).data
+      .supplierName,
+    "Misspelled Supplier"
+  );
+
+  promoteInvoiceCorrections(
+    learning,
+    original.id,
+    "learn",
+    "2026-06-16T11:00:00.000Z"
+  );
+
+  assert.equal(learning.corrections[0].trustState, "trusted");
+  assert.equal(learning.corrections[0].trustedAt, "2026-06-16T11:00:00.000Z");
+  assert.equal(
+    applyLearnedExtractedData(future, future.extractedData, learning).data
+      .supplierName,
+    "Correct Supplier"
+  );
 });
 
 test("a correction to a learned value replaces the original rule", () => {
@@ -166,6 +213,7 @@ test("a correction to a learned value replaces the original rule", () => {
     learning,
     user: { id: "shared_user", name: "Shared INTO User" },
   });
+  promoteInvoiceCorrections(learning, original.id, "learn");
 
   const second = invoice(
     { id: "invoice-second", fileName: "AH-invoice-002.pdf" },
@@ -190,6 +238,7 @@ test("a correction to a learned value replaces the original rule", () => {
     learning,
     user: { id: "shared_user", name: "Shared INTO User" },
   });
+  promoteInvoiceCorrections(learning, second.id, "learn");
 
   const supplierRules = learning.corrections.filter(
     (item) =>
@@ -342,6 +391,7 @@ test("uses learned OCR labels for a future invoice date and amounts", () => {
     learning,
     user: { id: "shared_user", name: "Shared INTO User" },
   });
+  promoteInvoiceCorrections(learning, original.id, "learn");
 
   const future = invoice(
     { id: "invoice-future", fileName: "AH-invoice-002.pdf" },
@@ -387,6 +437,7 @@ test("does not treat a subtotal label as the learned invoice total", () => {
     learning,
     user: { id: "shared_user", name: "Shared INTO User" },
   });
+  promoteInvoiceCorrections(learning, original.id, "learn");
 
   const future = invoice(
     { id: "invoice-future", fileName: "AH-invoice-002.pdf" },
@@ -425,6 +476,7 @@ test("uses a learned Factuurnummer pattern for a future invoice", () => {
     user: { id: "user-accountant", name: "Tammy Park" },
     correctedAt: "2026-06-16T10:00:00.000Z",
   });
+  promoteInvoiceCorrections(learning, original.id, "learn");
 
   const future = invoice(
     { id: "invoice-future", fileName: "AH-invoice-002.pdf" },
@@ -542,6 +594,7 @@ test("applies a learned booking-line split before default suggestions", () => {
     user: { id: "user-accountant", name: "Tammy Park" },
     correctedAt: "2026-06-16T10:00:00.000Z",
   });
+  promoteInvoiceCorrections(learning, original.id, "learn");
 
   const future = invoice({ id: "invoice-future", fileName: "AH-invoice-002.pdf" }, {
     invoiceNumber: "INV-002",
@@ -606,6 +659,7 @@ test("applies learned line allocation and accrual behavior to current invoice to
     learning,
     user: { id: "shared_user", name: "Shared INTO User" },
   });
+  promoteInvoiceCorrections(learning, original.id, "learn");
 
   const future = invoice(
     { id: "invoice-future", fileName: "AH-invoice-002.pdf" },
@@ -666,6 +720,7 @@ test("preserves negative discount lines in a learned split", () => {
     learning,
     user: { id: "shared_user", name: "Shared INTO User" },
   });
+  promoteInvoiceCorrections(learning, original.id, "learn");
 
   const future = invoice(
     { id: "invoice-future", fileName: "AH-invoice-002.pdf" },
@@ -723,6 +778,7 @@ test("keeps untouched low-confidence line fields review-required", () => {
     learning,
     user: { id: "shared_user", name: "Shared INTO User" },
   });
+  promoteInvoiceCorrections(learning, original.id, "learn");
 
   const future = invoice(
     { id: "invoice-future", fileName: "AH-invoice-002.pdf" },

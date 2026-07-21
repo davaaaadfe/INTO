@@ -19,7 +19,11 @@ import {
 } from "../lib/repository/invoice-store";
 import { createMockExactMasterData } from "../lib/services/exact-master-data-service";
 
+let routeLearningInvoiceSequence = 0;
+
 function routeLearningInvoice() {
+  routeLearningInvoiceSequence += 1;
+  const sequence = routeLearningInvoiceSequence;
   getStore().exactMasterDataCaches = [
     {
       userId: getCompanyConnectionUserId(),
@@ -27,11 +31,11 @@ function routeLearningInvoice() {
     },
   ];
   const invoice = createUploadedInvoice({
-    fileName: "route-learning.pdf",
+    fileName: `route-learning-${sequence}.pdf`,
     fileType: "application/pdf",
     fileSize: 1_024,
-    checksum: "route-learning-hash",
-    storageKey: "storage/tmp-invoices/route-learning.pdf",
+    checksum: `route-learning-hash-${sequence}`,
+    storageKey: `storage/tmp-invoices/route-learning-${sequence}.pdf`,
   });
   const extractedData = {
     ...emptyExtractedInvoiceData(),
@@ -155,6 +159,46 @@ test("Learn route saves a reset Learned invoice into the active generation", asy
   const second = (await secondResponse.json()) as { invoice: typeof invoice };
   assert.equal(second.invoice.learningMetadata!.generation, firstGeneration + 1);
   assert.equal(second.invoice.revision, first.invoice.revision! + 1);
+});
+
+test("Learn route accepts the exact original retry and rejects a changed stale retry", async () => {
+  const invoice = routeLearningInvoice();
+  const requestPayload = {
+    expectedRevision: invoice.revision!,
+    extractedData: invoice.extractedData,
+    bookingLines: invoice.purchaseJournal!.lines,
+  };
+  const post = (payload: typeof requestPayload) =>
+    learnInvoiceRoute(
+      new Request(`http://localhost/api/invoices/${invoice.id}/learn`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      }),
+      { params: { invoiceId: invoice.id } }
+    );
+
+  const firstResponse = await post(requestPayload);
+  assert.equal(firstResponse.status, 200);
+  const first = (await firstResponse.json()) as { invoice: typeof invoice };
+
+  const retryResponse = await post(requestPayload);
+  assert.equal(retryResponse.status, 200);
+  const retry = (await retryResponse.json()) as { invoice: typeof invoice };
+  assert.equal(retry.invoice.revision, first.invoice.revision);
+  assert.equal(
+    retry.invoice.learningMetadata!.exampleId,
+    first.invoice.learningMetadata!.exampleId
+  );
+
+  const changedResponse = await post({
+    ...requestPayload,
+    extractedData: {
+      ...requestPayload.extractedData,
+      expenseDescription: "Different stale route payload",
+    },
+  });
+  assert.equal(changedResponse.status, 409);
 });
 
 test("single booking rejects learning-only invoices before attempts or connection work", async () => {

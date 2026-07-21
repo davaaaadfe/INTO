@@ -45,9 +45,11 @@ test("the active review save path persists booking-line corrections", () => {
     companyVatNumber: "NL857017263B01",
     rawText: "Factuurnummer INV-SAVE-001\nOffice Supplies",
   };
+  const initialRevision = invoice.revision!;
   updateInvoiceExtraction(invoice.id, extractedData, { applyLearning: false });
   const computed = recomputeInvoiceState(invoice.id);
   assert.ok(computed?.purchaseJournal?.lines[0]);
+  assert.equal(computed.revision, initialRevision + 1);
 
   const originalLine = computed.purchaseJournal.lines[0];
   const saved = saveInvoiceReview(invoice.id, extractedData, [
@@ -61,6 +63,7 @@ test("the active review save path persists booking-line corrections", () => {
 
   assert.equal(saved?.bookingLineOverrides?.[0].finalSelectedAccount, "4420");
   assert.equal(saved?.purchaseJournal?.lines[0].finalSelectedAccount, "4420");
+  assert.equal(saved?.revision, initialRevision + 2);
   assert.ok(
     getStore().learning.corrections.some(
       (correction) =>
@@ -69,7 +72,11 @@ test("the active review save path persists booking-line corrections", () => {
   );
 });
 
+let learningInvoiceSequence = 0;
+
 function learningInvoice() {
+  learningInvoiceSequence += 1;
+  const sequence = learningInvoiceSequence;
   const store = getStore();
   store.exactMasterDataCaches = [
     {
@@ -78,11 +85,11 @@ function learningInvoice() {
     },
   ];
   const invoice = createUploadedInvoice({
-    fileName: "trusted-learning-source.pdf",
+    fileName: `trusted-learning-source-${sequence}.pdf`,
     fileType: "application/pdf",
     fileSize: 2_048,
-    checksum: "trusted-content-hash",
-    storageKey: "storage/tmp-invoices/trusted-learning-source.pdf",
+    checksum: `trusted-content-hash-${sequence}`,
+    storageKey: `storage/tmp-invoices/trusted-learning-source-${sequence}.pdf`,
   });
   const extractedData = {
     ...emptyExtractedInvoiceData(),
@@ -105,9 +112,11 @@ function learningInvoice() {
     companyVatNumber: "NL857017263B01",
     rawText: "Invoice number INV-LEARN-001\nDescription Office Supplies",
   };
+  const initialRevision = invoice.revision!;
   updateInvoiceExtraction(invoice.id, extractedData, { applyLearning: false });
   const computed = recomputeInvoiceState(invoice.id);
   assert.ok(computed?.purchaseJournal?.lines[0]);
+  assert.equal(computed.revision, initialRevision + 1);
   return { invoice: computed, extractedData };
 }
 
@@ -126,18 +135,19 @@ test("Learn stores the live corrected draft once and never books it", () => {
       glAccountName: "Software subscriptions",
     },
   ];
+  const requestRevision = invoice.revision!;
 
   const learned = learnInvoice(
     invoice.id,
     correctedData,
     bookingLines,
-    invoice.revision!
+    requestRevision
   );
   const learnedAgain = learnInvoice(
     invoice.id,
     correctedData,
     bookingLines,
-    learned!.revision!
+    requestRevision
   );
 
   assert.equal(learned?.status, "Learned");
@@ -165,6 +175,92 @@ test("Learn stores the live corrected draft once and never books it", () => {
     1
   );
   assert.equal(listSupplierLearningSummaries()[0]?.supplierName, "Noordzee Office Supplies");
+});
+
+test("Learn rejects an earlier draft after intervening extraction and review edits", () => {
+  const { invoice, extractedData } = learningInvoice();
+  const staleRevision = invoice.revision!;
+  const extractionEdit = {
+    ...extractedData,
+    expenseDescription: "Extraction edit",
+  };
+  updateInvoiceExtraction(
+    invoice.id,
+    extractionEdit,
+    { applyLearning: false }
+  );
+  const afterExtraction = recomputeInvoiceState(invoice.id)!;
+  const extractionRevision = afterExtraction.revision;
+  const reviewLines = structuredClone(afterExtraction.purchaseJournal!.lines);
+  const afterReview = saveInvoiceReview(
+    invoice.id,
+    { ...extractionEdit, expenseDescription: "Review edit" },
+    reviewLines
+  )!;
+  const editedBeforeLearn = structuredClone(afterReview);
+  const learningBefore = structuredClone(getStore().learning);
+  const auditsBefore = structuredClone(getStore().auditEvents);
+
+  assert.equal(extractionRevision, staleRevision + 1);
+  assert.equal(afterReview.revision, staleRevision + 2);
+  assert.throws(
+    () =>
+      learnInvoice(
+        invoice.id,
+        extractedData,
+        afterReview.purchaseJournal!.lines,
+        staleRevision
+      ),
+    /revision changed/i
+  );
+  assert.deepEqual(afterReview, editedBeforeLearn);
+  assert.deepEqual(getStore().learning, learningBefore);
+  assert.deepEqual(getStore().auditEvents, auditsBefore);
+});
+
+test("an exact Learn retry is idempotent but a different stale payload conflicts", () => {
+  const { invoice, extractedData } = learningInvoice();
+  const requestRevision = invoice.revision!;
+  const bookingLines = invoice.purchaseJournal!.lines;
+  const learned = learnInvoice(
+    invoice.id,
+    extractedData,
+    bookingLines,
+    requestRevision
+  )!;
+  const learnedBeforeRetry = structuredClone(learned);
+  const learningBeforeRetry = structuredClone(getStore().learning);
+  const auditsBeforeRetry = structuredClone(getStore().auditEvents);
+  const savedExample = getStore().learning.supplierExamples.find(
+    (example) => example.id === learned.learningMetadata?.exampleId
+  )!;
+
+  assert.deepEqual(savedExample.finalExtractedData, extractedData);
+  assert.deepEqual(savedExample.bookingLines, bookingLines);
+
+  const retry = learnInvoice(
+    invoice.id,
+    extractedData,
+    bookingLines,
+    requestRevision
+  );
+  assert.deepEqual(retry, learnedBeforeRetry);
+  assert.deepEqual(getStore().learning, learningBeforeRetry);
+  assert.deepEqual(getStore().auditEvents, auditsBeforeRetry);
+
+  assert.throws(
+    () =>
+      learnInvoice(
+        invoice.id,
+        { ...extractedData, expenseDescription: "Different stale payload" },
+        bookingLines,
+        requestRevision
+      ),
+    /revision changed/i
+  );
+  assert.deepEqual(learned, learnedBeforeRetry);
+  assert.deepEqual(getStore().learning, learningBeforeRetry);
+  assert.deepEqual(getStore().auditEvents, auditsBeforeRetry);
 });
 
 test("learning-only repository booking mutations reject before changing state", () => {

@@ -988,6 +988,7 @@ export function updateInvoiceExtraction(
   invoice.learnedFieldsApplied = learned.appliedFields;
   invoice.intelligenceApprovedAt = undefined;
   invoice.purchaseJournal = null;
+  invoice.revision = (invoice.revision ?? 1) + 1;
   invoice.updatedAt = now();
   return invoice;
 }
@@ -995,7 +996,8 @@ export function updateInvoiceExtraction(
 export function saveInvoiceReview(
   invoiceId: string,
   nextData: ExtractedInvoiceData,
-  nextBookingLines?: PurchaseJournalLine[]
+  nextBookingLines?: PurchaseJournalLine[],
+  options: { incrementRevision?: boolean } = {}
 ) {
   const invoice = getInvoice(invoiceId);
   if (!invoice) {
@@ -1051,6 +1053,9 @@ export function saveInvoiceReview(
   }
   invoice.intelligenceApprovedAt = undefined;
   invoice.purchaseJournal = null;
+  if (options.incrementRevision !== false) {
+    invoice.revision = (invoice.revision ?? 1) + 1;
+  }
   invoice.updatedAt = now();
   persistStoreSoon();
   return recomputeInvoiceState(invoiceId);
@@ -1079,7 +1084,27 @@ export function learnInvoice(
   if (!invoice) {
     return null;
   }
-  if (invoice.revision !== expectedRevision) {
+  const activeProfile = invoice.learningMetadata
+    ? store.learning.supplierProfiles.find(
+        (item) =>
+          item.supplierAccountId === invoice.learningMetadata!.supplierAccountId
+      )
+    : undefined;
+  const previousExample = invoice.learningMetadata
+    ? store.learning.supplierExamples.find(
+        (item) => item.id === invoice.learningMetadata!.exampleId
+      )
+    : undefined;
+  const activeGenerationSaved =
+    invoice.learningState === "saved" &&
+    invoice.learningMetadata?.generation === activeProfile?.generation;
+  const exactRetry =
+    activeGenerationSaved &&
+    expectedRevision === (invoice.revision ?? 1) - 1 &&
+    JSON.stringify(correctedData) ===
+      JSON.stringify(previousExample?.finalExtractedData) &&
+    JSON.stringify(bookingLines) === JSON.stringify(previousExample?.bookingLines);
+  if (invoice.revision !== expectedRevision && !exactRetry) {
     throw new InvoiceRevisionConflictError(
       "Invoice revision changed. Refresh and try again."
     );
@@ -1087,24 +1112,12 @@ export function learnInvoice(
   if (invoice.status === "Booked" || invoice.exactBookingId) {
     throw new Error("Booked invoices cannot be used as learning-only drafts.");
   }
-  const activeProfile = invoice.learningMetadata
-    ? store.learning.supplierProfiles.find(
-        (item) =>
-          item.supplierAccountId === invoice.learningMetadata!.supplierAccountId
-      )
-    : undefined;
   if (
-    invoice.learningState === "saved" &&
-    invoice.learningMetadata?.generation === activeProfile?.generation
+    activeGenerationSaved
   ) {
     return invoice;
   }
 
-  const previousExample = invoice.learningMetadata
-    ? store.learning.supplierExamples.find(
-        (item) => item.id === invoice.learningMetadata!.exampleId
-      )
-    : undefined;
   const isGenerationRelearn = invoice.status === "Learned";
   const originalExtractedData = structuredClone(
     previousExample?.originalExtractedData ?? invoice.extractedData
@@ -1141,7 +1154,9 @@ export function learnInvoice(
 
   const saved = isGenerationRelearn
     ? invoice
-    : saveInvoiceReview(invoiceId, finalExtractedData, finalBookingLines);
+    : saveInvoiceReview(invoiceId, finalExtractedData, finalBookingLines, {
+        incrementRevision: false,
+      });
   if (!saved) {
     return null;
   }

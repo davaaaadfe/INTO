@@ -1,56 +1,56 @@
 export type DocumentAnalysisInput = {
-  name: string;
-  type: string;
-  text?: () => Promise<string>;
-  arrayBuffer?: () => Promise<ArrayBuffer>;
+  readonly name: string;
+  readonly type: string;
+  readonly text?: () => Promise<string>;
+  readonly arrayBuffer?: () => Promise<ArrayBuffer>;
 };
 
 export type NormalizedPoint = {
-  x: number;
-  y: number;
+  readonly x: number;
+  readonly y: number;
 };
 
 export type DocumentToken = {
-  text: string;
-  polygon: NormalizedPoint[];
-  confidence: number;
+  readonly text: string;
+  readonly polygon: readonly NormalizedPoint[];
+  readonly confidence: number;
 };
 
 export type DocumentTableCell = {
-  rowIndex: number;
-  columnIndex: number;
-  rowSpan: number;
-  columnSpan: number;
-  text: string;
-  polygon: NormalizedPoint[];
-  confidence: number;
+  readonly rowIndex: number;
+  readonly columnIndex: number;
+  readonly rowSpan: number;
+  readonly columnSpan: number;
+  readonly text: string;
+  readonly polygon: readonly NormalizedPoint[];
+  readonly confidence: number;
 };
 
 export type DocumentTable = {
-  rowCount: number;
-  columnCount: number;
-  cells: DocumentTableCell[];
+  readonly rowCount: number;
+  readonly columnCount: number;
+  readonly cells: readonly DocumentTableCell[];
 };
 
 export type FieldCandidate = {
-  value: string | number | boolean | null;
-  field: string;
-  label?: string;
-  page?: number;
-  polygon: NormalizedPoint[];
-  confidence: number;
-  source: string;
+  readonly value: string | number | boolean | null;
+  readonly field: string;
+  readonly label?: string;
+  readonly page?: number;
+  readonly polygon: readonly NormalizedPoint[];
+  readonly confidence: number;
+  readonly source: string;
 };
 
 export type DocumentAnalysisPage = {
-  pageNumber: number;
-  width: number;
-  height: number;
-  unit: "pixel" | "inch" | "normalized";
-  text: string;
-  tokens: DocumentToken[];
-  language?: string;
-  tables: DocumentTable[];
+  readonly pageNumber: number;
+  readonly width: number;
+  readonly height: number;
+  readonly unit: "pixel" | "inch" | "normalized";
+  readonly text: string;
+  readonly tokens: readonly DocumentToken[];
+  readonly language?: string;
+  readonly tables: readonly DocumentTable[];
 };
 
 export type DocumentAnalysisSourceMode =
@@ -61,28 +61,28 @@ export type DocumentAnalysisSourceMode =
   | "unavailable";
 
 export type DocumentAnalysis = {
-  pages: DocumentAnalysisPage[];
-  fieldCandidates: FieldCandidate[];
-  rawText: string;
-  confidence: number;
-  language?: string;
-  provider: {
-    name: string;
-    model?: string;
-    modelVersion?: string;
+  readonly pages: readonly DocumentAnalysisPage[];
+  readonly fieldCandidates: readonly FieldCandidate[];
+  readonly rawText: string;
+  readonly confidence: number;
+  readonly language?: string;
+  readonly provider: {
+    readonly name: string;
+    readonly model?: string;
+    readonly modelVersion?: string;
   };
-  sourceMode: DocumentAnalysisSourceMode;
+  readonly sourceMode: DocumentAnalysisSourceMode;
 };
 
 export type DocumentAnalysisProviderConfig = {
-  endpoint: string;
-  key: string;
-  modelId: string;
-  fetch: typeof fetch;
-  pollIntervalMs?: number;
-  pollTimeoutMs?: number;
-  now?: () => number;
-  sleep?: (milliseconds: number) => Promise<void>;
+  readonly endpoint: string;
+  readonly key: string;
+  readonly modelId: string;
+  readonly fetch: typeof fetch;
+  readonly pollIntervalMs?: number;
+  readonly pollTimeoutMs?: number;
+  readonly now?: () => number;
+  readonly sleep?: (milliseconds: number) => Promise<void>;
 };
 
 export type DocumentAnalysisProvider = (
@@ -91,9 +91,9 @@ export type DocumentAnalysisProvider = (
 ) => Promise<DocumentAnalysis>;
 
 export type DocumentAnalysisOptions = {
-  env?: Record<string, string | undefined>;
-  fetch?: typeof fetch;
-  provider?: DocumentAnalysisProvider;
+  readonly env?: Record<string, string | undefined>;
+  readonly fetch?: typeof fetch;
+  readonly provider?: DocumentAnalysisProvider;
 };
 
 function clamp(value: number) {
@@ -346,7 +346,7 @@ function azureFieldValue(field: Record<string, unknown>) {
 
 function azureFieldCandidates(
   result: Record<string, unknown>,
-  pages: DocumentAnalysisPage[]
+  pages: readonly DocumentAnalysisPage[]
 ) {
   const documents = Array.isArray(result.documents) ? result.documents : [];
   return documents.flatMap((rawDocument) => {

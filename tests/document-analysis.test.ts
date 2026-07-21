@@ -3,8 +3,21 @@ import test from "node:test";
 import {
   analyzeDocument,
   azureDocumentIntelligenceProvider,
+  type DocumentAnalysis,
   type DocumentAnalysisProvider,
 } from "../lib/services/document-analysis";
+import { extractDocumentText } from "../lib/services/invoice-document-text";
+
+function assertReadonlyAnalysisContract(analysis: DocumentAnalysis) {
+  if (false) {
+    // @ts-expect-error Document analysis pages are immutable after creation.
+    analysis.pages.push(analysis.pages[0]);
+    // @ts-expect-error Token geometry is immutable after creation.
+    analysis.pages[0].tokens[0].polygon[0].x = 0;
+    // @ts-expect-error Field candidates are immutable after creation.
+    analysis.fieldCandidates[0].confidence = 0;
+  }
+}
 
 function pdfBytesWithText(lines: string[]) {
   const content = [
@@ -51,6 +64,7 @@ test("local document analysis preserves pages and normalized token geometry", as
   assert.equal(analysis.pages.length, 2);
   assert.equal(analysis.pages[0].width, 1);
   assert.equal(analysis.pages[0].height, 1);
+  assertReadonlyAnalysisContract(analysis);
   assert.equal(analysis.pages[0].tokens.map((token) => token.text).join(" "), "Supplier: Example BV Invoice number: EX-100");
   for (const token of analysis.pages.flatMap((page) => page.tokens)) {
     assert.equal(token.polygon.length, 4);
@@ -61,6 +75,66 @@ test("local document analysis preserves pages and normalized token geometry", as
     );
     assert.equal(token.confidence, 1);
   }
+});
+
+test("document text keeps managed field candidates and token geometry", async () => {
+  const polygon = [
+    { x: 0.1, y: 0.2 },
+    { x: 0.4, y: 0.2 },
+    { x: 0.4, y: 0.3 },
+    { x: 0.1, y: 0.3 },
+  ];
+  const provider: DocumentAnalysisProvider = async () => ({
+    pages: [{
+      pageNumber: 1,
+      width: 1,
+      height: 1,
+      unit: "normalized",
+      text: "Structured Supplier BV",
+      tokens: [{ text: "Structured", polygon, confidence: 0.99 }],
+      tables: [],
+    }],
+    fieldCandidates: [{
+      field: "supplierName",
+      label: "VendorName",
+      value: "Structured Supplier BV",
+      page: 1,
+      polygon,
+      confidence: 0.98,
+      source: "test-provider",
+    }],
+    rawText: "Structured Supplier BV",
+    confidence: 0.99,
+    provider: { name: "test-provider" },
+    sourceMode: "ocr",
+  });
+
+  const document = await extractDocumentText(
+    {
+      name: "scan.png",
+      type: "image/png",
+      arrayBuffer: async () => Uint8Array.from([1, 2, 3]).buffer,
+    },
+    {
+      env: {
+        AZURE_DOCUMENT_INTELLIGENCE_ENABLED: "true",
+        AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT: "https://example.invalid",
+        AZURE_DOCUMENT_INTELLIGENCE_API_KEY: "secret",
+      },
+      provider,
+    }
+  );
+
+  assert.deepEqual(document.fieldCandidates[0], {
+    field: "supplierName",
+    label: "VendorName",
+    value: "Structured Supplier BV",
+    page: 1,
+    polygon,
+    confidence: 0.98,
+    source: "test-provider",
+  });
+  assert.deepEqual(document.pages[0].tokens[0].polygon, polygon);
 });
 
 test("document intelligence stays offline unless enabled and fully configured", async () => {

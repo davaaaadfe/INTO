@@ -1,26 +1,32 @@
 import type { DocumentTextMode } from "../domain/invoice";
 import {
   analyzeDocument,
+  type DocumentAnalysisOptions,
   type DocumentAnalysisInput,
+  type DocumentToken,
+  type FieldCandidate,
 } from "./document-analysis";
 
 export type DocumentTextPage = {
-  pageNumber: number;
-  text: string;
+  readonly pageNumber: number;
+  readonly text: string;
+  readonly tokens: readonly DocumentToken[];
 };
 
 export type DocumentTextResult = {
-  mode: DocumentTextMode;
-  pages: DocumentTextPage[];
-  text: string;
+  readonly mode: DocumentTextMode;
+  readonly pages: readonly DocumentTextPage[];
+  readonly text: string;
+  readonly fieldCandidates: readonly FieldCandidate[];
 };
 
 export type DocumentTextInput = DocumentAnalysisInput;
 
 export async function extractDocumentText(
-  input: DocumentTextInput
+  input: DocumentTextInput,
+  options: DocumentAnalysisOptions = {}
 ): Promise<DocumentTextResult> {
-  const analysis = await analyzeDocument(input);
+  const analysis = await analyzeDocument(input, options);
   const mode: DocumentTextMode =
     analysis.sourceMode === "ocr" ? "plain_text" : analysis.sourceMode;
   return {
@@ -28,7 +34,9 @@ export async function extractDocumentText(
     pages: analysis.pages.map((page) => ({
       pageNumber: page.pageNumber,
       text: page.text,
+      tokens: page.tokens,
     })),
     text: analysis.rawText,
+    fieldCandidates: analysis.fieldCandidates,
   };
 }

@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
 import {
   emptyExtractedInvoiceData,
@@ -21,6 +21,67 @@ import {
 import { storeMockInvoiceFile } from "../lib/services/storage-service";
 
 const exactMasterData = createMockExactMasterData();
+
+const originalSupplierResolutionV2Enabled =
+  process.env.SUPPLIER_RESOLUTION_V2_ENABLED;
+const originalLearningShadowMode = process.env.LEARNING_SHADOW_MODE;
+const originalSupplierLearningMode = process.env.SUPPLIER_LEARNING_MODE;
+
+function setEnvironmentValue(key: string, value: string | undefined) {
+  if (value === undefined) {
+    delete process.env[key];
+    return;
+  }
+  process.env[key] = value;
+}
+
+function withSupplierResolutionFlags<T>(
+  supplierResolutionV2Enabled: boolean,
+  learningShadowMode: boolean,
+  action: () => T
+) {
+  const previousSupplierResolutionV2Enabled =
+    process.env.SUPPLIER_RESOLUTION_V2_ENABLED;
+  const previousLearningShadowMode = process.env.LEARNING_SHADOW_MODE;
+  process.env.SUPPLIER_RESOLUTION_V2_ENABLED = String(
+    supplierResolutionV2Enabled
+  );
+  process.env.LEARNING_SHADOW_MODE = String(learningShadowMode);
+  try {
+    return action();
+  } finally {
+    setEnvironmentValue(
+      "SUPPLIER_RESOLUTION_V2_ENABLED",
+      previousSupplierResolutionV2Enabled
+    );
+    setEnvironmentValue("LEARNING_SHADOW_MODE", previousLearningShadowMode);
+  }
+}
+
+function withSupplierLearningMode<T>(mode: "off" | "observe" | "apply", action: () => T) {
+  const previous = process.env.SUPPLIER_LEARNING_MODE;
+  process.env.SUPPLIER_LEARNING_MODE = mode;
+  try {
+    return action();
+  } finally {
+    setEnvironmentValue("SUPPLIER_LEARNING_MODE", previous);
+  }
+}
+
+before(() => {
+  process.env.SUPPLIER_RESOLUTION_V2_ENABLED = "true";
+  process.env.LEARNING_SHADOW_MODE = "false";
+  process.env.SUPPLIER_LEARNING_MODE = "apply";
+});
+
+after(() => {
+  setEnvironmentValue(
+    "SUPPLIER_RESOLUTION_V2_ENABLED",
+    originalSupplierResolutionV2Enabled
+  );
+  setEnvironmentValue("LEARNING_SHADOW_MODE", originalLearningShadowMode);
+  setEnvironmentValue("SUPPLIER_LEARNING_MODE", originalSupplierLearningMode);
+});
 
 function extractedInvoice(
   overrides: Partial<ExtractedInvoiceData> = {}
@@ -602,6 +663,152 @@ test("conflicting hard supplier identifiers block automatic selection", () => {
   assert.equal(booking.supplierResolution.candidates.length, 2);
 });
 
+test("an unmatched hard supplier identifier blocks a contradictory soft match", () => {
+  const invoice = uploadedInvoice({}, {
+    supplierName: "Noordzee Office Supplies",
+    supplierVatNumber: "NL999999999B99",
+    supplierChamberOfCommerceNumber: "",
+    supplierAddress: "Keizersgracht 100, Amsterdam",
+    iban: "",
+    invoiceNumber: "INV-UNMATCHED-HARD-1",
+  });
+
+  const booking = buildBooking(invoice);
+
+  assert.equal(booking.supplierResolution.selectedAccountId, undefined);
+  assert.equal(booking.supplierResolution.reviewRequired, true);
+  assert.equal(booking.supplierResolution.reasonCode, "supplier_ambiguous");
+});
+
+test("uses raw confidence rather than rounded display confidence for auto-selection", () => {
+  const masterData = {
+    ...exactMasterData,
+    suppliers: [
+      supplierAccount({
+        id: "supplier_threshold",
+        code: "93001",
+        name: "Alpha Beta Gamma Delta Epsilon",
+        address: "one two three four",
+        country: "",
+        isSupplier: true,
+      }),
+    ],
+  };
+  const invoice = uploadedInvoice({}, {
+    supplierName: "Alpha Beta Gamma",
+    supplierVatNumber: "",
+    supplierChamberOfCommerceNumber: "",
+    supplierAddress: "one two three five",
+    supplierCountry: "",
+    iban: "",
+    invoiceNumber: "INV-RAW-THRESHOLD-1",
+  });
+
+  const booking = generatePurchaseJournalBooking(
+    invoice,
+    [invoice],
+    createInitialLearningStore(),
+    masterData
+  );
+
+  assert.equal(booking.supplierResolution.matchConfidence, 0.9);
+  assert.equal(booking.supplierResolution.selectedAccountId, undefined);
+  assert.equal(booking.supplierResolution.reviewRequired, true);
+});
+
+test("does not reuse a pending supplier choice from another invoice as trusted history", () => {
+  const learning = createInitialLearningStore();
+  const previous = uploadedInvoice(
+    { id: "invoice_pending_supplier_choice" },
+    {
+      supplierName: "Acme Supplies BV",
+      supplierVatNumber: "",
+      supplierChamberOfCommerceNumber: "",
+      supplierAddress: "",
+      supplierCountry: "",
+      iban: "",
+      invoiceNumber: "INV-PENDING-1",
+    }
+  );
+  learning.supplierSelections.push({
+    supplierIdentity: "name:acme-supplies",
+    accountId: "supplier_ambiguous_a",
+    decidedAt: "2026-06-16T00:00:00.000Z",
+    invoiceId: previous.id,
+    trustState: "pending",
+  });
+  previous.purchaseJournal = generatePurchaseJournalBooking(
+    previous,
+    [previous],
+    learning,
+    exactMasterData
+  );
+  const next = uploadedInvoice(
+    { id: "invoice_after_pending_supplier_choice" },
+    {
+      supplierName: "Acme Supplies BV",
+      supplierVatNumber: "",
+      supplierChamberOfCommerceNumber: "",
+      supplierAddress: "",
+      supplierCountry: "",
+      iban: "",
+      invoiceNumber: "INV-PENDING-2",
+    }
+  );
+
+  const booking = generatePurchaseJournalBooking(
+    next,
+    [previous, next],
+    learning,
+    exactMasterData
+  );
+
+  assert.equal(booking.supplierResolution.selectedAccountId, undefined);
+  assert.equal(booking.supplierResolution.reviewRequired, true);
+  assert.equal(booking.supplierResolution.reasonCode, "supplier_ambiguous");
+});
+
+test("keeps V2 supplier auto-selection off when its rollout flag is disabled", () => {
+  withSupplierResolutionFlags(false, false, () => {
+    const booking = buildBooking(uploadedInvoice());
+
+    assert.equal(booking.supplierResolution.selectedAccountId, undefined);
+    assert.equal(booking.supplierResolution.reviewRequired, true);
+    assert.equal(booking.supplierResolution.shadowEvaluation, undefined);
+  });
+});
+
+test("records a non-sensitive supplier comparison without selecting in shadow mode", () => {
+  withSupplierResolutionFlags(true, true, () => {
+    const booking = buildBooking(uploadedInvoice());
+
+    assert.equal(booking.supplierResolution.selectedAccountId, undefined);
+    assert.equal(booking.supplierResolution.reviewRequired, true);
+    assert.deepEqual(booking.supplierResolution.shadowEvaluation, {
+      selectedAccountId: "supplier_noordzee",
+      matchConfidence: 0.99,
+      reviewRequired: false,
+    });
+    assert.deepEqual(
+      Object.keys(booking.supplierResolution.shadowEvaluation ?? {}).sort(),
+      ["matchConfidence", "reviewRequired", "selectedAccountId"]
+    );
+  });
+});
+
+test("applies V2 supplier auto-selection only when enabled outside shadow mode", () => {
+  withSupplierResolutionFlags(true, false, () => {
+    const booking = buildBooking(uploadedInvoice());
+
+    assert.equal(
+      booking.supplierResolution.selectedAccountId,
+      "supplier_noordzee"
+    );
+    assert.equal(booking.supplierResolution.reviewRequired, false);
+    assert.equal(booking.supplierResolution.shadowEvaluation, undefined);
+  });
+});
+
 test("a narrow score margin remains ambiguous even with multiple soft signals", () => {
   const masterData = {
     ...exactMasterData,
@@ -856,6 +1063,124 @@ test("uses learned supplier decisions to unblock future ambiguous matches", () =
     booking.supplierResolution.selectedAccountId,
     "supplier_ambiguous_a"
   );
+});
+
+test("observe mode does not apply a trusted supplier decision", () => {
+  withSupplierLearningMode("observe", () => {
+    const invoice = uploadedInvoice({}, {
+      supplierName: "Acme Supplies BV",
+      supplierVatNumber: "",
+      supplierChamberOfCommerceNumber: "",
+      supplierAddress: "",
+      supplierCountry: "",
+      iban: "",
+      invoiceNumber: "INV-OBSERVE-SUPPLIER-1",
+    });
+    const learning = createInitialLearningStore();
+    learning.supplierSelections.push({
+      supplierIdentity: "name:acme-supplies",
+      accountId: "supplier_ambiguous_a",
+      decidedAt: "2026-06-16T00:00:00.000Z",
+      trustState: "trusted",
+    });
+
+    const booking = generatePurchaseJournalBooking(
+      invoice,
+      [invoice],
+      learning,
+      exactMasterData
+    );
+
+    assert.equal(booking.supplierResolution.selectedAccountId, undefined);
+    assert.equal(booking.supplierResolution.reviewRequired, true);
+  });
+});
+
+test("observe mode still honors the supplier manually selected for this invoice", () => {
+  withSupplierLearningMode("observe", () => {
+    const invoice = uploadedInvoice({}, {
+      supplierName: "Acme Supplies BV",
+      supplierVatNumber: "",
+      supplierChamberOfCommerceNumber: "",
+      supplierAddress: "",
+      supplierCountry: "",
+      iban: "",
+      invoiceNumber: "INV-OBSERVE-MANUAL-1",
+    });
+    const learning = createInitialLearningStore();
+    learning.supplierSelections.push({
+      supplierIdentity: "name:acme-supplies",
+      accountId: "supplier_ambiguous_a",
+      decidedAt: "2026-06-16T00:00:00.000Z",
+      invoiceId: invoice.id,
+      trustState: "pending",
+    });
+
+    const booking = generatePurchaseJournalBooking(
+      invoice,
+      [invoice],
+      learning,
+      exactMasterData
+    );
+
+    assert.equal(
+      booking.supplierResolution.selectedAccountId,
+      "supplier_ambiguous_a"
+    );
+    assert.equal(booking.supplierResolution.reviewRequired, false);
+  });
+});
+
+test("observe mode does not apply learned journal account, VAT, or cost mappings", () => {
+  withSupplierLearningMode("observe", () => {
+    const invoice = uploadedInvoice({}, {
+      invoiceNumber: "INV-OBSERVE-MAPPINGS-1",
+    });
+    const learning = createInitialLearningStore();
+    learning.glAccountSelections.push({
+      supplierAccountId: "supplier_noordzee",
+      descriptionKey: "office-supplies",
+      glAccount: "4420",
+      decidedAt: "2026-06-16T00:00:00.000Z",
+    });
+    learning.vatCodeSelections.push({
+      supplierAccountId: "supplier_noordzee",
+      descriptionKey: "office-supplies",
+      vatCode: "5",
+      decidedAt: "2026-06-16T00:00:00.000Z",
+    });
+    for (const glAccount of ["4400", "4420"]) {
+      learning.costCentreSelections.push({
+        supplierAccountId: "supplier_noordzee",
+        glAccount,
+        costCentre: "RTM",
+        decidedAt: "2026-06-16T00:00:00.000Z",
+      });
+      learning.costUnitSelections.push({
+        supplierAccountId: "supplier_noordzee",
+        glAccount,
+        costUnit: "IT",
+        decidedAt: "2026-06-16T00:00:00.000Z",
+      });
+    }
+
+    const booking = generatePurchaseJournalBooking(
+      invoice,
+      [invoice],
+      learning,
+      exactMasterData
+    );
+    const line = booking.lines[0];
+
+    assert.equal(line.finalSelectedAccount, "4400");
+    assert.equal(line.vatCode, "4");
+    assert.equal(line.costCentre, "AMS");
+    assert.equal(line.costUnit, "OPS");
+    assert.equal(
+      line.reasoning.includes("Applied from previous user correction."),
+      false
+    );
+  });
 });
 
 test("suggests booking fields from the most similar previous Exact purchase entry", () => {

@@ -17,6 +17,7 @@ import {
   normalizeSupplierVat,
   supplierIdentityKeys,
 } from "./supplier-identity";
+import { supplierLearningMode } from "./learning-feature-flags";
 
 export const LEARNED_CORRECTION_NOTE =
   "Applied from previous user correction.";
@@ -190,7 +191,7 @@ function referenceLabel(data: ExtractedInvoiceData, correctedValue: string) {
 }
 
 function containsLearnedLabel(line: string, label: string) {
-  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escaped = normalizeText(label).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`(^|[^a-z0-9])${escaped}(?=$|[^a-z0-9])`).test(
     normalizeText(line)
   );
@@ -650,9 +651,10 @@ export function promoteInvoiceCorrections(
 }
 
 function referenceFromLearnedLabel(rawText: string, label: string) {
+  const normalizedLabel = normalizeText(label);
   const line = rawText
     .split(/\r?\n/)
-    .find((item) => normalizeText(item).includes(label));
+    .find((item) => normalizeText(item).includes(normalizedLabel));
   return line ? detectInvoiceReference(line)?.value ?? "" : "";
 }
 
@@ -748,6 +750,9 @@ export function applyLearnedExtractedData(
 ) {
   const data = { ...extractedData };
   const appliedFields: LearnableCorrectionField[] = [];
+  if (supplierLearningMode() !== "apply") {
+    return { data, appliedFields };
+  }
   const apply = (field: LearnableCorrectionField) => {
     if (!appliedFields.includes(field)) {
       appliedFields.push(field);
@@ -910,6 +915,9 @@ export function learnedBookingLinesForInvoice(
   supplierAccountId: string | undefined,
   learning: BookingLearningStore
 ) {
+  if (supplierLearningMode() !== "apply") {
+    return null;
+  }
   const match = matchingCorrections(
     invoice,
     invoice.extractedData,

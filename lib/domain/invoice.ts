@@ -122,11 +122,23 @@ export type DocumentTextMode =
   | "unavailable";
 
 export type ExtractionEvidenceField =
+  | "supplierName"
+  | "supplierVatNumber"
+  | "supplierAddress"
   | "referenceCode"
   | "invoiceDate"
+  | "dueDate"
+  | "paymentTerms"
+  | "currency"
+  | "companyVatNumber"
   | "netAmount"
   | "vatAmount"
   | "grossAmount";
+
+export type ExtractionEvidencePoint = {
+  readonly x: number;
+  readonly y: number;
+};
 
 export type ExtractionFieldEvidence = {
   sourceLabel: string;
@@ -134,6 +146,7 @@ export type ExtractionFieldEvidence = {
   confidence: number;
   page?: number;
   context?: string;
+  polygon?: readonly ExtractionEvidencePoint[];
 };
 
 export type ExtractedInvoiceData = {
@@ -367,6 +380,12 @@ export type SupplierResolution = {
   reasonCode?: "supplier_ambiguous" | "supplier_low_confidence";
   candidates: SupplierMatchCandidate[];
   reasoning: string[];
+  shadowEvaluation?: {
+    selectedAccountId?: string;
+    matchConfidence: number;
+    reviewRequired: boolean;
+    reasonCode?: "supplier_ambiguous" | "supplier_low_confidence";
+  };
 };
 
 export type BookingDecisionConfidence = {

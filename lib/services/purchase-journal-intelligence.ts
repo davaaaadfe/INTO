@@ -47,6 +47,10 @@ import {
   supplierNameSimilarity,
 } from "./supplier-identity";
 import { formatFingerprint } from "./supplier-learning";
+import {
+  learningFeatureFlags,
+  supplierLearningMode,
+} from "./learning-feature-flags";
 
 type VatCode = PurchaseJournalLine["vatCode"];
 
@@ -497,23 +501,15 @@ function historicalLineFor(
     )[0]?.line;
 }
 
-function selectedSupplierFromBooking(
-  invoice: UploadedInvoice,
-  exactMasterData: ExactMasterDataCache | null
-) {
-  const selectedId = invoice.purchaseJournal?.supplierResolution.selectedAccountId;
-  return exactSuppliers(exactMasterData).find((account) => account.id === selectedId);
-}
-
 function resolveSupplier(
   invoice: UploadedInvoice,
-  allInvoices: UploadedInvoice[],
   learning: BookingLearningStore,
   exactMasterData: ExactMasterDataCache | null
 ): SupplierResolution {
   const data = invoice.extractedData;
   const identities = supplierIdentityKeys(data);
   const suppliers = exactSuppliers(exactMasterData);
+  const applyLearnedMappings = supplierLearningMode() === "apply";
 
   if (!exactMasterData) {
     return {
@@ -598,7 +594,11 @@ function resolveSupplier(
     method: SupplierMatchCandidate["method"],
     reasoning: string
   ) => {
-    if (!value || !matches.length) return;
+    if (!value) return;
+    if (!matches.length) {
+      hardConflict = true;
+      return;
+    }
     if (matches.length !== 1) hardConflict = true;
     for (const account of matches) {
       const item = forAccount(account);
@@ -699,7 +699,7 @@ function resolveSupplier(
     if (
       !identities.includes(decision.supplierIdentity) ||
       !(
-        decision.trustState === "trusted" ||
+        (applyLearnedMappings && decision.trustState === "trusted") ||
         (decision.trustState === "pending" && decision.invoiceId === invoice.id)
       )
     ) {
@@ -715,23 +715,6 @@ function resolveSupplier(
         decision.trustState === "trusted"
           ? "Matched a previously trusted supplier resolution."
           : "Applied the supplier selected for this invoice."
-      );
-    }
-  }
-
-  for (const previous of allInvoices) {
-    if (previous.id === invoice.id || !previous.purchaseJournal) continue;
-    const account = selectedSupplierFromBooking(previous, exactMasterData);
-    if (
-      account &&
-      nameSimilarity(previous.extractedData.supplierName, data.supplierName) >= 0.75
-    ) {
-      addFamily(
-        account,
-        "history",
-        0.35,
-        "Exact history",
-        "Matched a previously approved invoice for this supplier."
       );
     }
   }
@@ -763,7 +746,7 @@ function resolveSupplier(
   }
 
   const layout = formatFingerprint(data.rawText ?? "");
-  if (layout) {
+  if (layout && applyLearnedMappings) {
     for (const profile of learning.supplierProfiles) {
       if (profile.formatFingerprint !== layout) continue;
       const account = suppliers.find(
@@ -800,7 +783,7 @@ function resolveSupplier(
     );
   };
   const ranked = [...evidence.values()]
-    .map((item) => ({ item, confidence: roundMoney(score(item)) }))
+    .map((item) => ({ item, confidence: score(item) }))
     .sort(
       (left, right) =>
         right.confidence - left.confidence ||
@@ -811,7 +794,7 @@ function resolveSupplier(
     meaningful.length >= 2
       ? meaningful.slice(0, 5).map(({ item, confidence }) => ({
           account: item.account,
-          confidence,
+          confidence: roundMoney(confidence),
           method: item.preferredMethod,
           reasoning: [...new Set(item.reasoning)],
         }))
@@ -832,12 +815,32 @@ function resolveSupplier(
       margin >= 0.12 &&
       (bestHasUniqueHard || bestSoftFamilies >= 2)
   );
-  if (best && autoSelect) {
+  const ambiguous = hardConflict || Boolean(best && runnerUp && margin < 0.12);
+  const reasonCode = ambiguous
+    ? ("supplier_ambiguous" as const)
+    : ("supplier_low_confidence" as const);
+  const flags = learningFeatureFlags();
+  const shadowEvaluation =
+    flags.supplierResolutionV2Enabled && flags.learningShadowMode
+      ? {
+          ...(best && autoSelect
+            ? { selectedAccountId: best.item.account.id }
+            : { reasonCode }),
+          matchConfidence: roundMoney(best?.confidence ?? 0),
+          reviewRequired: !autoSelect,
+        }
+      : undefined;
+  if (
+    best &&
+    autoSelect &&
+    flags.supplierResolutionV2Enabled &&
+    !flags.learningShadowMode
+  ) {
     return {
       selectedAccountId: best.item.account.id,
       selectedAccountCode: best.item.account.code,
       selectedAccountName: best.item.account.name,
-      matchConfidence: best.confidence,
+      matchConfidence: roundMoney(best.confidence),
       threshold: 0.9,
       method: bestHasUniqueHard ? best.item.preferredMethod : "Evidence fusion",
       reviewRequired: false,
@@ -846,21 +849,21 @@ function resolveSupplier(
     };
   }
 
-  const ambiguous = hardConflict || Boolean(best && runnerUp && margin < 0.12);
   return {
     selectedAccountId: undefined,
     selectedAccountCode: undefined,
     selectedAccountName: undefined,
-    matchConfidence: best?.confidence ?? 0,
+    matchConfidence: roundMoney(best?.confidence ?? 0),
     threshold: 0.9,
     method: ambiguous ? "Multiple matches" : "No match",
     reviewRequired: true,
-    reasonCode: ambiguous ? "supplier_ambiguous" : "supplier_low_confidence",
+    reasonCode,
     candidates,
     reasoning: [
       ambiguous ? MULTIPLE_EXACT_SUPPLIERS_MESSAGE : SUPPLIER_NOT_MATCHED_MESSAGE,
       ...candidates.flatMap((candidate) => candidate.reasoning),
     ],
+    ...(shadowEvaluation ? { shadowEvaluation } : {}),
   };
 }
 
@@ -1209,7 +1212,7 @@ function suggestGlAccount(
     };
   };
 
-  const learned = supplier
+  const learned = supplier && supplierLearningMode() === "apply"
     ? learning.glAccountSelections.find(
         (decision) =>
           decision.supplierAccountId === supplier.id &&
@@ -1377,7 +1380,7 @@ function suggestVatCode(
   };
 
   const key = descriptionKey(lineDescriptionText || humanDescription(data));
-  const learned = supplier
+  const learned = supplier && supplierLearningMode() === "apply"
     ? learning.vatCodeSelections.find(
         (decision) =>
           decision.supplierAccountId === supplier.id &&
@@ -1570,14 +1573,14 @@ function costSelection(
   const historical =
     preferredHistoricalLine ||
     historicalLineFor(historicalSuggestion, lineDescriptionText);
-  const learnedCentre = supplier
+  const learnedCentre = supplier && supplierLearningMode() === "apply"
     ? learning.costCentreSelections.find(
         (decision) =>
           decision.supplierAccountId === supplier.id &&
           decision.glAccount === glAccount
       )
     : undefined;
-  const learnedUnit = supplier
+  const learnedUnit = supplier && supplierLearningMode() === "apply"
     ? learning.costUnitSelections.find(
         (decision) =>
           decision.supplierAccountId === supplier.id &&
@@ -2017,7 +2020,6 @@ export function generatePurchaseJournalBooking(
   const data = invoice.extractedData;
   const supplierResolution = resolveSupplier(
     invoice,
-    allInvoices,
     learning,
     exactMasterData
   );

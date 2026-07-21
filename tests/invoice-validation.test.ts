@@ -15,6 +15,7 @@ import {
   detectInvoiceReference,
   extractInvoiceData,
 } from "../lib/services/invoice-extraction-service";
+import type { DocumentAnalysisProvider } from "../lib/services/document-analysis";
 
 function validInvoice(overrides: Partial<ExtractedInvoiceData> = {}) {
   return {
@@ -624,6 +625,83 @@ test("stores actual document text and evidence for extracted booking values", as
   assert.equal(data.extractionEvidence?.referenceCode?.rawValue, "AH-2026-004821");
   assert.equal(data.extractionEvidence?.invoiceDate?.rawValue, "24-03-2026");
   assert.equal(data.extractionEvidence?.grossAmount?.rawValue, "133,95");
+});
+
+test("uses managed field candidates and polygons when scan text has no labels", async () => {
+  const supplierPolygon = [
+    { x: 0.1, y: 0.1 },
+    { x: 0.6, y: 0.1 },
+    { x: 0.6, y: 0.2 },
+    { x: 0.1, y: 0.2 },
+  ];
+  const totalPolygon = [
+    { x: 0.7, y: 0.7 },
+    { x: 0.9, y: 0.7 },
+    { x: 0.9, y: 0.8 },
+    { x: 0.7, y: 0.8 },
+  ];
+  const provider: DocumentAnalysisProvider = async () => ({
+    pages: [{
+      pageNumber: 1,
+      width: 1,
+      height: 1,
+      unit: "normalized",
+      text: "Scanned invoice",
+      tokens: [{
+        text: "Scanned",
+        polygon: supplierPolygon,
+        confidence: 0.95,
+      }],
+      tables: [],
+    }],
+    fieldCandidates: [
+      {
+        field: "supplierName",
+        label: "VendorName",
+        value: "Structured Supplier BV",
+        page: 1,
+        polygon: supplierPolygon,
+        confidence: 0.98,
+        source: "test-provider",
+      },
+      {
+        field: "grossAmount",
+        label: "InvoiceTotal",
+        value: 121,
+        page: 1,
+        polygon: totalPolygon,
+        confidence: 0.97,
+        source: "test-provider",
+      },
+    ],
+    rawText: "Scanned invoice",
+    confidence: 0.95,
+    provider: { name: "test-provider" },
+    sourceMode: "ocr",
+  });
+
+  const data = await extractInvoiceData(
+    {
+      name: "scan.png",
+      type: "image/png",
+      size: 3,
+      arrayBuffer: async () => Uint8Array.from([1, 2, 3]).buffer,
+    },
+    {
+      env: {
+        AZURE_DOCUMENT_INTELLIGENCE_ENABLED: "true",
+        AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT: "https://example.invalid",
+        AZURE_DOCUMENT_INTELLIGENCE_API_KEY: "secret",
+      },
+      provider,
+    }
+  );
+
+  assert.equal(data.supplierName, "Structured Supplier BV");
+  assert.equal(data.grossAmount, 121);
+  assert.deepEqual(data.extractionEvidence?.supplierName?.polygon, supplierPolygon);
+  assert.deepEqual(data.extractionEvidence?.grossAmount?.polygon, totalPolygon);
+  assert.equal(data.extractionEvidence?.grossAmount?.sourceLabel, "InvoiceTotal");
 });
 
 test("extracts labelled values from embedded PDF text", async () => {

@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
 import {
   emptyExtractedInvoiceData,
@@ -18,6 +18,44 @@ import {
 import { createMockExactMasterData } from "../lib/services/exact-master-data-service";
 
 const exactMasterData = createMockExactMasterData();
+
+const originalSupplierLearningMode = process.env.SUPPLIER_LEARNING_MODE;
+const originalSupplierResolutionV2Enabled =
+  process.env.SUPPLIER_RESOLUTION_V2_ENABLED;
+const originalLearningShadowMode = process.env.LEARNING_SHADOW_MODE;
+
+function setEnvironmentValue(key: string, value: string | undefined) {
+  if (value === undefined) {
+    delete process.env[key];
+    return;
+  }
+  process.env[key] = value;
+}
+
+function withSupplierLearningMode<T>(mode: "off" | "observe" | "apply", action: () => T) {
+  const previous = process.env.SUPPLIER_LEARNING_MODE;
+  process.env.SUPPLIER_LEARNING_MODE = mode;
+  try {
+    return action();
+  } finally {
+    setEnvironmentValue("SUPPLIER_LEARNING_MODE", previous);
+  }
+}
+
+before(() => {
+  process.env.SUPPLIER_LEARNING_MODE = "apply";
+  process.env.SUPPLIER_RESOLUTION_V2_ENABLED = "true";
+  process.env.LEARNING_SHADOW_MODE = "false";
+});
+
+after(() => {
+  setEnvironmentValue("SUPPLIER_LEARNING_MODE", originalSupplierLearningMode);
+  setEnvironmentValue(
+    "SUPPLIER_RESOLUTION_V2_ENABLED",
+    originalSupplierResolutionV2Enabled
+  );
+  setEnvironmentValue("LEARNING_SHADOW_MODE", originalLearningShadowMode);
+});
 
 function data(overrides: Partial<ExtractedInvoiceData> = {}): ExtractedInvoiceData {
   return {
@@ -420,6 +458,83 @@ test("uses learned OCR labels for a future invoice date and amounts", () => {
   assert.ok(result.appliedFields.includes("totalAmount"));
 });
 
+test("normalizes a cased evidence label before applying a learned date", () => {
+  const learning = createInitialLearningStore();
+  const original = invoice({}, {
+    invoiceDate: "2026-06-15",
+    rawText: "Invoice date: 16-06-2026",
+    extractionEvidence: {
+      invoiceDate: {
+        sourceLabel: "Invoice date",
+        rawValue: "16-06-2026",
+        confidence: 0.75,
+      },
+    },
+  });
+  captureUserCorrections({
+    invoice: original,
+    nextExtractedData: {
+      ...original.extractedData,
+      invoiceDate: "2026-06-16",
+    },
+    nextBookingLines: [],
+    learning,
+    user: { id: "shared_user", name: "Shared INTO User" },
+  });
+  promoteInvoiceCorrections(learning, original.id, "learn");
+  const future = invoice(
+    { id: "invoice-future", fileName: "AH-invoice-002.pdf" },
+    {
+      invoiceDate: "2026-07-16",
+      rawText: "Invoice date: 17-07-2026",
+    }
+  );
+
+  const result = applyLearnedExtractedData(
+    future,
+    future.extractedData,
+    learning
+  );
+
+  assert.equal(result.data.invoiceDate, "2026-07-17");
+  assert.ok(result.appliedFields.includes("invoiceDate"));
+});
+
+test("observe mode records corrections but does not apply trusted extraction learning", () => {
+  withSupplierLearningMode("observe", () => {
+    const learning = createInitialLearningStore();
+    const original = invoice({}, {
+      supplierName: "Misspelled Supplier",
+      supplierVatNumber: "",
+    });
+    captureUserCorrections({
+      invoice: original,
+      nextExtractedData: {
+        ...original.extractedData,
+        supplierName: "Correct Supplier",
+      },
+      nextBookingLines: [],
+      learning,
+      user: { id: "shared_user", name: "Shared INTO User" },
+    });
+    assert.equal(learning.corrections.length, 1);
+    promoteInvoiceCorrections(learning, original.id, "learn");
+    const future = invoice(
+      { id: "invoice-future" },
+      { supplierName: "Misspelled Supplier", supplierVatNumber: "" }
+    );
+
+    const result = applyLearnedExtractedData(
+      future,
+      future.extractedData,
+      learning
+    );
+
+    assert.equal(result.data.supplierName, "Misspelled Supplier");
+    assert.deepEqual(result.appliedFields, []);
+  });
+});
+
 test("does not treat a subtotal label as the learned invoice total", () => {
   const learning = createInitialLearningStore();
   const original = invoice({}, {
@@ -626,6 +741,33 @@ test("applies a learned booking-line split before default suggestions", () => {
   assert.ok(
     booking.reasoningLog.includes("Applied from previous user correction.")
   );
+
+  withSupplierLearningMode("observe", () => {
+    const observedFuture = invoice(
+      { id: "invoice-observed", fileName: "AH-invoice-003.pdf" },
+      {
+        invoiceNumber: "INV-003",
+        referenceCode: "INV-003",
+        netAmount: 300,
+        vatAmount: 63,
+        grossAmount: 363,
+      }
+    );
+    const observedBooking = generatePurchaseJournalBooking(
+      observedFuture,
+      [observedFuture],
+      learning,
+      exactMasterData
+    );
+
+    assert.equal(observedBooking.lines.length, 1);
+    assert.equal(
+      observedBooking.reasoningLog.includes(
+        "Applied from previous user correction."
+      ),
+      false
+    );
+  });
 });
 
 test("applies learned line allocation and accrual behavior to current invoice totals", () => {

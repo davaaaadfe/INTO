@@ -7,6 +7,10 @@ import {
   extractDocumentText,
   type DocumentTextPage,
 } from "./invoice-document-text";
+import type {
+  DocumentAnalysisOptions,
+  FieldCandidate,
+} from "./document-analysis";
 import { amountToMinorUnits } from "./invoice-validation";
 import {
   normalizeSupplierChamberOfCommerce,
@@ -535,14 +539,14 @@ const amountEvidenceLabels: Record<
 };
 
 function pageContainingContext(
-  pages: DocumentTextPage[],
+  pages: readonly DocumentTextPage[],
   context: string
 ) {
   return pages.find((page) => page.text.includes(context))?.pageNumber;
 }
 
 function amountEvidence(
-  pages: DocumentTextPage[],
+  pages: readonly DocumentTextPage[],
   field: "netAmount" | "vatAmount" | "grossAmount",
   value: number | null
 ): ExtractionFieldEvidence | undefined {
@@ -645,27 +649,165 @@ function documentCurrency(input: string) {
   )?.[1]?.toUpperCase() ?? (input.includes("€") ? "EUR" : "");
 }
 
+function bestFieldCandidate(
+  candidates: readonly FieldCandidate[],
+  field: string
+) {
+  return candidates.reduce<FieldCandidate | undefined>((best, candidate) => {
+    if (
+      candidate.field !== field ||
+      candidate.value === null ||
+      candidate.confidence < 0.5
+    ) {
+      return best;
+    }
+    return !best || candidate.confidence > best.confidence ? candidate : best;
+  }, undefined);
+}
+
+function candidateText(candidate: FieldCandidate | undefined) {
+  return typeof candidate?.value === "string" ? candidate.value.trim() : "";
+}
+
+function candidateAmount(candidate: FieldCandidate | undefined) {
+  if (typeof candidate?.value === "number" && Number.isFinite(candidate.value)) {
+    return candidate.value;
+  }
+  return typeof candidate?.value === "string"
+    ? parsedAmount(candidate.value)
+    : null;
+}
+
+function candidateDate(candidate: FieldCandidate | undefined) {
+  const value = candidateText(candidate);
+  return value
+    ? normalizedDateValue(value, true) || normalizedDateValue(value, false)
+    : "";
+}
+
+function candidateEvidence(
+  candidate: FieldCandidate | undefined
+): ExtractionFieldEvidence | undefined {
+  if (!candidate || candidate.value === null) {
+    return undefined;
+  }
+  return {
+    sourceLabel: candidate.label ?? candidate.field,
+    rawValue: String(candidate.value),
+    confidence: candidate.confidence,
+    page: candidate.page,
+    polygon: candidate.polygon,
+  };
+}
+
 export async function extractInvoiceData(
-  file: ExtractionFileInput
+  file: ExtractionFileInput,
+  options: DocumentAnalysisOptions = {}
 ): Promise<ExtractedInvoiceData> {
-  const document = await extractDocumentText(file);
+  const document = await extractDocumentText(file, options);
   const documentText = document.text;
   const supplier = documentSupplierIdentity(documentText);
+  const supplierNameCandidate = bestFieldCandidate(
+    document.fieldCandidates,
+    "supplierName"
+  );
+  const supplierVatCandidate = bestFieldCandidate(
+    document.fieldCandidates,
+    "supplierVatNumber"
+  );
+  const supplierAddressCandidate = bestFieldCandidate(
+    document.fieldCandidates,
+    "supplierAddress"
+  );
+  const invoiceNumberCandidate = bestFieldCandidate(
+    document.fieldCandidates,
+    "invoiceNumber"
+  );
+  const invoiceDateCandidate = bestFieldCandidate(
+    document.fieldCandidates,
+    "invoiceDate"
+  );
+  const dueDateCandidate = bestFieldCandidate(document.fieldCandidates, "dueDate");
+  const paymentTermsCandidate = bestFieldCandidate(
+    document.fieldCandidates,
+    "paymentTerms"
+  );
+  const currencyCandidate = bestFieldCandidate(document.fieldCandidates, "currency");
+  const companyVatCandidate = bestFieldCandidate(
+    document.fieldCandidates,
+    "companyVatNumber"
+  );
+  const netAmountCandidate = bestFieldCandidate(
+    document.fieldCandidates,
+    "netAmount"
+  );
+  const vatAmountCandidate = bestFieldCandidate(
+    document.fieldCandidates,
+    "vatAmount"
+  );
+  const grossAmountCandidate = bestFieldCandidate(
+    document.fieldCandidates,
+    "grossAmount"
+  );
+  const supplierName = supplier.supplierName || candidateText(supplierNameCandidate);
+  const supplierVatNumber =
+    supplier.supplierVatNumber ||
+    normalizeSupplierVat(candidateText(supplierVatCandidate));
+  const supplierAddress = supplier.address || candidateText(supplierAddressCandidate);
   const reverseCharge = /\b(?:reverse\s+charge|intra[- ]community)\b/i.test(
     documentText
   );
   const detectedDate = detectInvoiceDate(documentText);
-  const invoiceDate = detectedDate?.value ?? "";
-  const { netAmount, vatAmount, grossAmount } = extractInvoiceAmounts(documentText);
+  const invoiceDate = detectedDate?.value || candidateDate(invoiceDateCandidate);
+  const extractedAmounts = extractInvoiceAmounts(documentText);
+  const netAmount =
+    extractedAmounts.netAmount ?? candidateAmount(netAmountCandidate);
+  const vatAmount =
+    extractedAmounts.vatAmount ?? candidateAmount(vatAmountCandidate);
+  const grossAmount =
+    extractedAmounts.grossAmount ?? candidateAmount(grossAmountCandidate);
   const vatRate = netAmount ? Math.round(((vatAmount ?? 0) / netAmount) * 10_000) / 10_000 : 0;
   const detectedReference = detectInvoiceReference(documentText);
   const confidentReference =
     detectedReference && detectedReference.confidence >= 0.8
       ? detectedReference
       : null;
-  const invoiceNumber = confidentReference?.value ?? "";
+  const invoiceNumber =
+    confidentReference?.value || candidateText(invoiceNumberCandidate);
   const referenceCode = invoiceNumber;
+  const extractedDueDate = labelledDate(documentText, [
+    "due\\s+date",
+    "vervaldatum",
+    "betaaldatum",
+  ]);
+  const dueDate = extractedDueDate || candidateDate(dueDateCandidate);
+  const extractedPaymentTerms = labelledText(documentText, [
+    "payment\\s+terms?",
+    "betalingsvoorwaarden?",
+    "payment\\s+condition",
+  ]);
+  const paymentTerms =
+    extractedPaymentTerms || candidateText(paymentTermsCandidate);
+  const extractedCurrency = documentCurrency(documentText);
+  const currency = extractedCurrency || candidateText(currencyCandidate).toUpperCase();
+  const extractedCompanyVat = normalizeSupplierVat(
+    labelledText(documentText, [
+      "customer\\s+(?:vat|btw)(?:\\s+(?:number|no\\.?|nr\\.?))?",
+      "company\\s+(?:vat|btw)(?:\\s+(?:number|no\\.?|nr\\.?))?",
+    ])
+  );
+  const companyVatNumber =
+    extractedCompanyVat || normalizeSupplierVat(candidateText(companyVatCandidate));
   const extractionEvidence: ExtractedInvoiceData["extractionEvidence"] = {
+    supplierName: !supplier.supplierName && supplierName
+      ? candidateEvidence(supplierNameCandidate)
+      : undefined,
+    supplierVatNumber: !supplier.supplierVatNumber && supplierVatNumber
+      ? candidateEvidence(supplierVatCandidate)
+      : undefined,
+    supplierAddress: !supplier.address && supplierAddress
+      ? candidateEvidence(supplierAddressCandidate)
+      : undefined,
     referenceCode: confidentReference
       ? {
           sourceLabel: confidentReference.sourceLabel,
@@ -674,7 +816,9 @@ export async function extractInvoiceData(
           page: pageContainingContext(document.pages, confidentReference.context),
           context: confidentReference.context,
         }
-      : undefined,
+      : invoiceNumber
+        ? candidateEvidence(invoiceNumberCandidate)
+        : undefined,
     invoiceDate: detectedDate
       ? {
           sourceLabel: detectedDate.sourceLabel,
@@ -683,10 +827,36 @@ export async function extractInvoiceData(
           page: pageContainingContext(document.pages, detectedDate.context),
           context: detectedDate.context,
         }
+      : invoiceDate
+        ? candidateEvidence(invoiceDateCandidate)
+        : undefined,
+    dueDate: !extractedDueDate && dueDate
+      ? candidateEvidence(dueDateCandidate)
       : undefined,
-    netAmount: amountEvidence(document.pages, "netAmount", netAmount),
-    vatAmount: amountEvidence(document.pages, "vatAmount", vatAmount),
-    grossAmount: amountEvidence(document.pages, "grossAmount", grossAmount),
+    paymentTerms: !extractedPaymentTerms && paymentTerms
+      ? candidateEvidence(paymentTermsCandidate)
+      : undefined,
+    currency: !extractedCurrency && currency
+      ? candidateEvidence(currencyCandidate)
+      : undefined,
+    companyVatNumber: !extractedCompanyVat && companyVatNumber
+      ? candidateEvidence(companyVatCandidate)
+      : undefined,
+    netAmount:
+      amountEvidence(document.pages, "netAmount", extractedAmounts.netAmount) ??
+      (extractedAmounts.netAmount === null && netAmount !== null
+        ? candidateEvidence(netAmountCandidate)
+        : undefined),
+    vatAmount:
+      amountEvidence(document.pages, "vatAmount", extractedAmounts.vatAmount) ??
+      (extractedAmounts.vatAmount === null && vatAmount !== null
+        ? candidateEvidence(vatAmountCandidate)
+        : undefined),
+    grossAmount:
+      amountEvidence(document.pages, "grossAmount", extractedAmounts.grossAmount) ??
+      (extractedAmounts.grossAmount === null && grossAmount !== null
+        ? candidateEvidence(grossAmountCandidate)
+        : undefined),
   };
   const expenseDescription = labelledText(documentText, [
     "expense\\s+description",
@@ -696,22 +866,19 @@ export async function extractInvoiceData(
   ]);
 
   return {
-    supplierName: supplier.supplierName,
-    supplierVatNumber: supplier.supplierVatNumber,
+    supplierName,
+    supplierVatNumber,
     supplierChamberOfCommerceNumber: supplier.chamberOfCommerceNumber,
-    supplierAddress: supplier.address,
+    supplierAddress,
     supplierCountry: supplier.country,
     invoiceNumber,
     referenceCode,
-    referenceCodeConfidence: confidentReference?.confidence ?? 0,
+    referenceCodeConfidence:
+      confidentReference?.confidence ?? invoiceNumberCandidate?.confidence ?? 0,
     invoiceDate,
-    dueDate: labelledDate(documentText, ["due\\s+date", "vervaldatum", "betaaldatum"]),
-    paymentTerms: labelledText(documentText, [
-      "payment\\s+terms?",
-      "betalingsvoorwaarden?",
-      "payment\\s+condition",
-    ]),
-    currency: documentCurrency(documentText),
+    dueDate,
+    paymentTerms,
+    currency,
     netAmount,
     vatAmount,
     grossAmount,
@@ -720,12 +887,7 @@ export async function extractInvoiceData(
     beneficiary: labelledText(documentText, ["beneficiary", "begunstigde", "traveller"]),
     serviceStartDate: labelledDate(documentText, ["service\\s+(?:start|from)", "period\\s+from"]),
     serviceEndDate: labelledDate(documentText, ["service\\s+(?:end|to)", "period\\s+to"]),
-    companyVatNumber: normalizeSupplierVat(
-      labelledText(documentText, [
-        "customer\\s+(?:vat|btw)(?:\\s+(?:number|no\\.?|nr\\.?))?",
-        "company\\s+(?:vat|btw)(?:\\s+(?:number|no\\.?|nr\\.?))?",
-      ])
-    ),
+    companyVatNumber,
     reverseChargeMentioned: reverseCharge,
     intraCommunityMentioned: reverseCharge,
     confidence:
@@ -734,8 +896,8 @@ export async function extractInvoiceData(
         : Math.min(
             0.98,
             0.62 +
-              (confidentReference ? 0.09 : 0) +
-              (detectedDate ? 0.09 : 0) +
+              (invoiceNumber ? 0.09 : 0) +
+              (invoiceDate ? 0.09 : 0) +
               (netAmount !== null ? 0.06 : 0) +
               (vatAmount !== null ? 0.06 : 0) +
               (grossAmount !== null ? 0.06 : 0)

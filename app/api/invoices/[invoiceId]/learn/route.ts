@@ -9,6 +9,10 @@ import {
   requirePermission,
 } from "../../../../../lib/repository/invoice-store";
 import { withPersistentStore } from "../../../../../lib/repository/persistent-request";
+import {
+  learningFeatureFlags,
+  supplierLearningMode,
+} from "../../../../../lib/services/learning-feature-flags";
 
 type RouteContext = {
   params: { invoiceId: string } | Promise<{ invoiceId: string }>;
@@ -16,6 +20,15 @@ type RouteContext = {
 
 export async function POST(request: Request, context: RouteContext) {
   return withPersistentStore(async () => {
+    if (
+      !learningFeatureFlags().learningV2Enabled ||
+      supplierLearningMode() === "off"
+    ) {
+      return Response.json(
+        { error: "Supplier learning is not enabled." },
+        { status: 404 }
+      );
+    }
     try {
       requirePermission("train");
     } catch (error) {
@@ -72,5 +85,5 @@ export async function POST(request: Request, context: RouteContext) {
       }
       return Response.json({ error: message, invoice: getInvoice(invoiceId) }, { status: 409 });
     }
-  });
+  }, request);
 }

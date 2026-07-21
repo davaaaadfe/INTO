@@ -117,8 +117,8 @@ export async function saveSqliteStoreSnapshot(
         "INTO data changed in another request. Reload and try again."
       );
     }
-    db.prepare(
-      `INSERT INTO into_runtime_store (id, payload, revision, updated_at)
+    const result = db.prepare(
+      `INSERT OR IGNORE INTO into_runtime_store (id, payload, revision, updated_at)
        VALUES (?, ?, ?, ?)`
     ).run(
       snapshotId,
@@ -126,6 +126,11 @@ export async function saveSqliteStoreSnapshot(
       nextRevision,
       new Date().toISOString()
     );
+    if (result.changes !== 1) {
+      throw new SnapshotRevisionConflictError(
+        "INTO data changed in another request. Reload and try again."
+      );
+    }
   } else {
     const result = db
       .prepare(
@@ -160,6 +165,10 @@ export async function verifySqliteStoreWorks() {
 }
 
 export function closeSqliteStore() {
+  const runtime = globalThis as typeof globalThis & {
+    __INTO_CLOSE_LEARNING_REPOSITORY?: () => void;
+  };
+  runtime.__INTO_CLOSE_LEARNING_REPOSITORY?.();
   database?.close();
   database = null;
   openDatabasePath = "";

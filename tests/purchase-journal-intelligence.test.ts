@@ -12,6 +12,7 @@ import {
   generatePurchaseJournalBooking,
   purchaseJournalValidationErrors,
   statusFromPurchaseJournal,
+  SUPPLIER_RESOLUTION_V2_POLICY,
 } from "../lib/services/purchase-journal-intelligence";
 import { createMockExactMasterData } from "../lib/services/exact-master-data-service";
 import {
@@ -680,6 +681,51 @@ test("an unmatched hard supplier identifier blocks a contradictory soft match", 
   assert.equal(booking.supplierResolution.reasonCode, "supplier_ambiguous");
 });
 
+test("low supplier reliability requests field review without overriding a unique identity", () => {
+  const invoice = uploadedInvoice();
+  const learning = createInitialLearningStore();
+  learning.supplierProfiles.push({
+    supplierAccountId: "supplier_noordzee",
+    generation: 1,
+    exampleCount: 1,
+    formatDrift: "none",
+  });
+  learning.supplierExamples.push({
+    id: "low-reliability-example",
+    supplierAccountId: "supplier_noordzee",
+    generation: 1,
+    invoiceId: "previous-invoice",
+    contentHash: "low-reliability-hash",
+    formatFingerprint: "format-a",
+    learnedAt: "2026-07-20T00:00:00.000Z",
+    originalExtractedData: structuredClone(invoice.extractedData),
+    finalExtractedData: structuredClone(invoice.extractedData),
+    source: "review",
+    trustState: "trusted",
+    trigger: "review",
+    validationResult: { valid: true },
+    active: true,
+  });
+
+  const booking = generatePurchaseJournalBooking(
+    invoice,
+    [invoice],
+    learning,
+    exactMasterData
+  );
+
+  assert.equal(
+    booking.supplierResolution.selectedAccountId,
+    "supplier_noordzee",
+    "a unique hard supplier match remains selected"
+  );
+  assert.ok(
+    booking.reviewReasons.includes(
+      "Supplier reliability is below 65%. Review the extracted fields."
+    )
+  );
+});
+
 test("uses raw confidence rather than rounded display confidence for auto-selection", () => {
   const masterData = {
     ...exactMasterData,
@@ -775,6 +821,30 @@ test("keeps V2 supplier auto-selection off when its rollout flag is disabled", (
     assert.equal(booking.supplierResolution.selectedAccountId, undefined);
     assert.equal(booking.supplierResolution.reviewRequired, true);
     assert.equal(booking.supplierResolution.shadowEvaluation, undefined);
+  });
+});
+
+test("the versioned supplier resolver policy exposes the rollout thresholds", () => {
+  assert.deepEqual(SUPPLIER_RESOLUTION_V2_POLICY, {
+    version: "supplier-resolution-v2.1",
+    minimumConfidence: 0.9,
+    minimumMargin: 0.12,
+    minimumSoftSignalFamilies: 2,
+    minimumCandidateConfidence: 0.3,
+    maximumCandidates: 5,
+  });
+});
+
+test("shadow scoring runs while V2 application remains disabled", () => {
+  withSupplierResolutionFlags(false, true, () => {
+    const booking = buildBooking(uploadedInvoice());
+
+    assert.equal(booking.supplierResolution.selectedAccountId, undefined);
+    assert.deepEqual(booking.supplierResolution.shadowEvaluation, {
+      selectedAccountId: "supplier_noordzee",
+      matchConfidence: 0.99,
+      reviewRequired: false,
+    });
   });
 });
 

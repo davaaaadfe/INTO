@@ -4,6 +4,7 @@ import {
   LearningGenerationConflictError,
   LEARNING_REPOSITORY_SCHEMA_VERSION,
   type LearningAliasInput,
+  type LearningArtifactAnalysis,
   type LearningArtifactInput,
   type LearningArtifactRecord,
   type LearningEventRecord,
@@ -297,18 +298,28 @@ export class PostgresLearningRepository {
   }
 
   async ensureProfile(
-    input: LearningScope & { fallbackSupplierCode: string; createdAt: string }
+    input: LearningScope & {
+      fallbackSupplierCode: string;
+      generation?: number;
+      createdAt: string;
+    }
   ) {
     const rows = await this.query(
       `INSERT INTO supplier_learning_profiles (
         company_id, division_code, supplier_account_id,
-        fallback_supplier_code, created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $5)
+        fallback_supplier_code, generation, created_at, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $6)
       ON CONFLICT(company_id, division_code, supplier_account_id)
       DO UPDATE SET fallback_supplier_code = CASE
         WHEN supplier_learning_profiles.fallback_supplier_code = ''
           THEN EXCLUDED.fallback_supplier_code
         ELSE supplier_learning_profiles.fallback_supplier_code
+      END,
+      generation = CASE
+        WHEN supplier_learning_profiles.learned_count = 0
+          AND supplier_learning_profiles.generation < EXCLUDED.generation
+          THEN EXCLUDED.generation
+        ELSE supplier_learning_profiles.generation
       END
       RETURNING *`,
       [
@@ -316,6 +327,7 @@ export class PostgresLearningRepository {
         input.divisionCode,
         input.supplierAccountId,
         input.fallbackSupplierCode,
+        input.generation ?? 0,
         input.createdAt,
       ]
     );
@@ -339,6 +351,38 @@ export class PostgresLearningRepository {
       [companyId, divisionCode]
     );
     return rows.map(profileFromRow);
+  }
+
+  async updateProfileConfidence(
+    input: LearningScope & {
+      generation: number;
+      score: number;
+      driftState: LearningProfileRecord["driftState"];
+      updatedAt: string;
+    }
+  ) {
+    const rows = await this.query(
+      `UPDATE supplier_learning_profiles
+       SET confidence_score = $1, confidence_breakdown_version = 1,
+           drift_state = $2, updated_at = $3, version = version + 1
+       WHERE company_id = $4 AND division_code = $5
+         AND supplier_account_id = $6 AND generation = $7
+       RETURNING supplier_account_id`,
+      [
+        input.score,
+        input.driftState,
+        input.updatedAt,
+        input.companyId,
+        input.divisionCode,
+        input.supplierAccountId,
+        input.generation,
+      ]
+    );
+    if (!rows[0]) {
+      throw new LearningGenerationConflictError(
+        "Supplier learning generation changed. Refresh and try again."
+      );
+    }
   }
 
   async saveArtifact(input: LearningArtifactInput) {
@@ -433,24 +477,52 @@ export class PostgresLearningRepository {
           artifact.analysisCiphertext,
           artifact.contentHash
         )
-      ) as unknown,
+      ) as LearningArtifactAnalysis,
     };
+  }
+
+  async pruneExpiredArtifacts(currentTime: string) {
+    const rows = await this.query(
+      `WITH expired AS (
+         SELECT id FROM document_analysis_artifacts
+         WHERE retention_until IS NOT NULL AND retention_until <= $1
+         FOR UPDATE
+       ), unlinked AS (
+         UPDATE supplier_learning_examples SET artifact_id = NULL
+         WHERE artifact_id IN (SELECT id FROM expired)
+       ), deleted AS (
+         DELETE FROM document_analysis_artifacts
+         WHERE id IN (SELECT id FROM expired)
+         RETURNING id
+       )
+       SELECT COUNT(*)::integer AS count FROM deleted`,
+      [currentTime]
+    );
+    return Number(rows[0]?.count ?? 0);
   }
 
   async saveAlias(input: LearningAliasInput) {
     const rows = await this.query(
-      `INSERT INTO supplier_identity_aliases (
+      `WITH profile_lock AS (
+        SELECT 1 FROM supplier_learning_profiles
+        WHERE company_id=$2 AND division_code=$3 AND supplier_account_id=$4
+          AND generation=$5
+        FOR UPDATE
+      )
+      INSERT INTO supplier_identity_aliases (
         id, company_id, division_code, supplier_account_id, generation,
         kind, normalized_value, source, active, first_seen_at, last_seen_at
       )
       SELECT $1,$2,$3,$4,$5,$6,$7,$8,true,$9,$9
-      FROM supplier_learning_profiles
-      WHERE company_id=$2 AND division_code=$3 AND supplier_account_id=$4
-        AND generation=$5
+      FROM profile_lock
       ON CONFLICT(id) DO UPDATE SET
         last_seen_at = EXCLUDED.last_seen_at,
         active = true
       WHERE supplier_identity_aliases.generation = EXCLUDED.generation
+         OR (
+           supplier_identity_aliases.source = 'exact'
+           AND EXCLUDED.source = 'exact'
+         )
       RETURNING id`,
       [
         input.id,
@@ -494,7 +566,13 @@ export class PostgresLearningRepository {
 
   async savePattern(input: LearningPatternInput) {
     const rows = await this.query(
-      `INSERT INTO supplier_learning_patterns (
+      `WITH profile_lock AS (
+        SELECT 1 FROM supplier_learning_profiles
+        WHERE company_id=$2 AND division_code=$3 AND supplier_account_id=$4
+          AND generation=$5
+        FOR UPDATE
+      )
+      INSERT INTO supplier_learning_patterns (
         id, company_id, division_code, supplier_account_id, generation,
         format_cluster, field, pattern_key, label, anchor_json,
         normalized_region_json, data_type, booking_mapping_json,
@@ -504,9 +582,7 @@ export class PostgresLearningRepository {
       SELECT
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12,$13::jsonb,
         $14,$15,$16,$17,$18,$19,true,$20,$20
-      FROM supplier_learning_profiles
-      WHERE company_id=$2 AND division_code=$3 AND supplier_account_id=$4
-        AND generation=$5
+      FROM profile_lock
       ON CONFLICT(
         company_id, division_code, supplier_account_id, generation,
         format_cluster, field, pattern_key
@@ -521,6 +597,11 @@ export class PostgresLearningRepository {
         ),
         drift_state = EXCLUDED.drift_state,
         model_version = EXCLUDED.model_version,
+        label = EXCLUDED.label,
+        anchor_json = EXCLUDED.anchor_json,
+        normalized_region_json = EXCLUDED.normalized_region_json,
+        data_type = EXCLUDED.data_type,
+        booking_mapping_json = EXCLUDED.booking_mapping_json,
         active = true,
         updated_at = EXCLUDED.updated_at
       RETURNING id`,
@@ -584,6 +665,7 @@ export class PostgresLearningRepository {
         SELECT 1 FROM supplier_learning_profiles
         WHERE company_id=$2 AND division_code=$3 AND supplier_account_id=$4
           AND generation=$5
+        FOR UPDATE
       ), inserted AS (
         INSERT INTO supplier_learning_examples (
           id, company_id, division_code, supplier_account_id, generation,

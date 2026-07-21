@@ -117,7 +117,7 @@ test("document text keeps managed field candidates and token geometry", async ()
     },
     {
       env: {
-        AZURE_DOCUMENT_INTELLIGENCE_ENABLED: "true",
+        AZURE_DOCUMENT_INTELLIGENCE_ENABLED: "yes",
         AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT: "https://example.invalid",
         AZURE_DOCUMENT_INTELLIGENCE_API_KEY: "secret",
       },

@@ -23,6 +23,7 @@ import {
   updateInvoiceExtraction,
 } from "../lib/repository/invoice-store";
 import { createMockExactMasterData } from "../lib/services/exact-master-data-service";
+import { supplierReliabilityEvidenceFromLearningStore } from "../lib/services/supplier-reliability-evidence";
 
 test("the active review save path persists booking-line corrections", () => {
   const invoice = createUploadedInvoice({
@@ -126,6 +127,7 @@ function learningInvoice() {
     expenseDescription: "Office Supplies",
     companyVatNumber: "NL857017263B01",
     rawText: "Invoice number INV-LEARN-001\nDescription Office Supplies",
+    documentTextMode: "plain_text" as const,
   };
   const initialRevision = invoice.revision!;
   updateInvoiceExtraction(invoice.id, extractedData, { applyLearning: false });
@@ -181,6 +183,16 @@ test("Learn stores the live corrected draft once and never books it", () => {
     "Corrected software subscriptions"
   );
   assert.equal(example.bookingLines![0].finalSelectedAccount, "4420");
+  const reliabilityEvidence = supplierReliabilityEvidenceFromLearningStore(
+    getStore().learning,
+    getStore().learning.supplierProfiles[0]!
+  );
+  assert.ok(
+    reliabilityEvidence.outcomes.some(
+      (outcome) => outcome.metric === "accounting" && !outcome.success
+    ),
+    "the corrected draft is a failed original prediction, not a false success"
+  );
   assert.equal(learned?.learningMetadata?.exampleId, example.id);
   assert.equal(learned?.bookingAttempts.length, 0);
   assert.equal(
@@ -199,6 +211,42 @@ test("Learn stores the live corrected draft once and never books it", () => {
           correction.trustReason === "learn"
       ),
     true
+  );
+});
+
+test("Learn requires completed source analysis and at least one trainable field", () => {
+  const withoutEvidence = learningInvoice();
+  withoutEvidence.invoice.checksum = undefined;
+  withoutEvidence.invoice.extractedData.rawText = "";
+  withoutEvidence.invoice.extractedData.extractionEvidence = undefined;
+  assert.throws(
+    () =>
+      learnInvoice(
+        withoutEvidence.invoice.id,
+        withoutEvidence.invoice.extractedData,
+        withoutEvidence.invoice.purchaseJournal!.lines,
+        withoutEvidence.invoice.revision!
+      ),
+    /complete document analysis/i
+  );
+
+  const withoutFields = learningInvoice();
+  const supplierOnly = {
+    ...emptyExtractedInvoiceData(),
+    supplierName: withoutFields.extractedData.supplierName,
+    supplierVatNumber: withoutFields.extractedData.supplierVatNumber,
+    rawText: withoutFields.extractedData.rawText,
+    documentTextMode: withoutFields.extractedData.documentTextMode,
+  };
+  assert.throws(
+    () =>
+      learnInvoice(
+        withoutFields.invoice.id,
+        supplierOnly,
+        [],
+        withoutFields.invoice.revision!
+      ),
+    /at least one trainable invoice field/i
   );
 });
 

@@ -48,7 +48,7 @@ export function learningFeatureFlags(
     learningShadowMode: booleanSetting(
       environment,
       "LEARNING_SHADOW_MODE",
-      true
+      production
     ),
   };
 }

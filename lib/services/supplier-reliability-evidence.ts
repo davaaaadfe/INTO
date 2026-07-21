@@ -1,5 +1,9 @@
 import type { LearningExampleRecord } from "../repository/learning-repository";
 import type {
+  BookingLearningStore,
+  SupplierLearningProfile,
+} from "../domain/invoice";
+import type {
   SupplierReliabilityExample,
   SupplierReliabilityOutcome,
 } from "./supplier-reliability";
@@ -264,4 +268,64 @@ export function supplierReliabilityEvidenceFromExamples(
   }
 
   return { examples, outcomes };
+}
+
+export function supplierReliabilityEvidenceFromLearningStore(
+  learning: BookingLearningStore,
+  profile: SupplierLearningProfile
+) {
+  const records: LearningExampleRecord[] = learning.supplierExamples
+    .filter(
+      (example) =>
+        example.supplierAccountId === profile.supplierAccountId &&
+        example.generation === profile.generation
+    )
+    .map((example) => {
+      const trustState =
+        example.trustState ?? (example.source ? "trusted" : "legacy");
+      const source =
+        example.source ?? (trustState === "legacy" ? "legacy" : "explicit_learn");
+      const trigger =
+        example.trigger ?? (trustState === "legacy" ? "migration" : "learn");
+      return {
+        id: example.id ?? `runtime:${example.invoiceId}:${example.contentHash}`,
+        companyId: "runtime",
+        divisionCode: "runtime",
+        supplierAccountId: example.supplierAccountId,
+        generation: example.generation,
+        invoiceId: example.invoiceId,
+        contentHash: example.contentHash,
+        originalFilename: "runtime",
+        originalPrediction: {
+          extractedData: example.originalExtractedData ?? {},
+          bookingLines: example.originalBookingLines ?? [],
+          supplierResolution: example.originalSupplierAccountId
+            ? { selectedAccountId: example.originalSupplierAccountId }
+            : undefined,
+        },
+        finalFields: {
+          extractedData: example.finalExtractedData ?? {},
+          supplierAccountId: example.supplierAccountId,
+          corrections: learning.corrections.filter(
+            (correction) =>
+              correction.invoiceId === example.invoiceId &&
+              correction.trustState !== "pending"
+          ),
+        },
+        bookingLines: example.bookingLines ?? [],
+        fingerprint: example.formatFingerprint,
+        fingerprintVersion: "layout-v1",
+        validationResult: example.validationResult ?? {},
+        processingPurpose: example.processingPurpose ?? "learning_only",
+        source,
+        trustState,
+        trigger,
+        actorId: example.learnedByUserId ?? "shared_user",
+        sessionCorrelationId: "runtime",
+        requestId: example.id ?? example.contentHash,
+        createdAt: example.learnedAt,
+        active: example.active ?? true,
+      };
+    });
+  return supplierReliabilityEvidenceFromExamples(records);
 }

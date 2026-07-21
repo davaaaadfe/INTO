@@ -45,9 +45,7 @@ export function supplierConfidence(
             (pattern.attempts + 2),
         0
       ) / totalWeight
-    : exampleCount
-      ? (exampleCount + 1) / (exampleCount + 2)
-      : 0;
+    : 0;
   const driftPenalty =
     profile?.formatDrift === "confirmed"
       ? 20

@@ -108,19 +108,14 @@ function evidenceWeight(evidence: "trusted" | "legacy" | undefined) {
     : 1;
 }
 
-function bandCopy(
-  band: SupplierReliabilityResult["band"],
-  distinctExampleCount: number
-) {
+function bandCopy(band: SupplierReliabilityResult["band"]) {
   if (band === "High") {
-    return "Strong supplier evidence across trusted outcomes.";
+    return "INTO usually reads this supplier correctly.";
   }
   if (band === "Medium") {
-    return "Useful supplier evidence; keep review safeguards active.";
+    return "Review recommended.";
   }
-  return distinctExampleCount
-    ? "Limited supplier evidence; review every suggested decision."
-    : "No trusted supplier evidence yet.";
+  return "More training invoices needed.";
 }
 
 export function supplierReliability({
@@ -194,7 +189,7 @@ export function supplierReliability({
   return {
     score,
     band,
-    copy: bandCopy(band, distinctExamples.size),
+    copy: bandCopy(band),
     baseline: 35,
     distinctExampleCount: distinctExamples.size,
     effectiveExampleCount,

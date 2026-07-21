@@ -46,7 +46,7 @@ export function migrateStoreSnapshot(snapshot: IntoStore): IntoStore {
 
   for (const invoice of migrated.invoices) {
     const mutableInvoice = invoice as unknown as MutableRecord;
-    if (invoice.status === "Supplier Review Required") {
+    if (String(mutableInvoice.status) === "Supplier Review Required") {
       mutableInvoice.status = "Booking Intelligence Review Required";
       const purchaseJournal = mutableInvoice.purchaseJournal as
         | MutableRecord
@@ -70,6 +70,8 @@ export function migrateStoreSnapshot(snapshot: IntoStore): IntoStore {
       mutableInvoice.processingPurpose = "learning_only";
       mutableInvoice.learningState = "saved";
       mutableInvoice.exactBookingStatus = "not_booked";
+    } else if (String(mutableInvoice.learningState ?? "") === "none") {
+      mutableInvoice.learningState = "not_saved";
     }
     mutableInvoice.revision ??= 1;
   }

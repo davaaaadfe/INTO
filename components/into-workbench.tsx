@@ -271,7 +271,6 @@ const statusTone: Record<string, string> = {
   Reading: "border-sky-200 bg-sky-50 text-sky-800",
   "Validation Failed": "border-amber-300 bg-amber-50 text-amber-900",
   "Attachment Missing": "border-rose-300 bg-rose-50 text-rose-800",
-  "Supplier Review Required": "border-orange-300 bg-orange-50 text-orange-900",
   "Payment Condition Review Required":
     "border-yellow-300 bg-yellow-50 text-yellow-900",
   "Booking Intelligence Review Required":
@@ -287,7 +286,6 @@ const statusTone: Record<string, string> = {
 const reviewStatuses = new Set<UploadedInvoice["status"]>([
   "Validation Failed",
   "Attachment Missing",
-  "Supplier Review Required",
   "Payment Condition Review Required",
   "Booking Intelligence Review Required",
   "Possible Duplicate",
@@ -1210,6 +1208,8 @@ function PreviewDocument({
 
   if (isImage) {
     return (
+      // Authenticated invoice originals cannot use the public Next image optimizer.
+      // eslint-disable-next-line @next/next/no-img-element
       <img
         src={sourceUrl}
         alt={invoice.fileName}
@@ -1297,6 +1297,7 @@ export function IntoWorkbench() {
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [learningResetTarget, setLearningResetTarget] =
     useState<SupplierLearningSummary | null>(null);
+  const [learningDetailAccountId, setLearningDetailAccountId] = useState("");
   const availableViews: ActiveView[] = state.supplierLearningEnabled
     ? ["queue", "archive", "supplier-learning"]
     : ["queue", "archive"];
@@ -1373,6 +1374,9 @@ export function IntoWorkbench() {
   const supplierLearningByAccount = new Map(
     supplierLearningRows.map((summary) => [summary.supplierAccountId, summary])
   );
+  const learningDetail = learningDetailAccountId
+    ? supplierLearningByAccount.get(learningDetailAccountId)
+    : undefined;
   const selectedSupplierLearning = selectedPurchaseJournal?.supplierResolution
     .selectedAccountId
     ? supplierLearningByAccount.get(
@@ -2160,6 +2164,8 @@ export function IntoWorkbench() {
     }, 0);
 
     return () => window.clearTimeout(timeoutId);
+    // Run once on mount; refreshAll updates the state this effect would otherwise depend on.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -2186,6 +2192,8 @@ export function IntoWorkbench() {
     );
 
     return () => window.clearTimeout(timeoutId);
+    // Consume the OAuth callback query once; refreshAll would recreate on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -2204,6 +2212,8 @@ export function IntoWorkbench() {
     }, 60_000);
 
     return () => window.clearInterval(intervalId);
+    // syncExactData is intentionally captured to avoid restarting this timer per render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busy, state.exactConnection, state.exactMasterData, state.exactMasterDataStale]);
 
   useEffect(() => {
@@ -2675,6 +2685,14 @@ export function IntoWorkbench() {
         error?: string;
       };
       if (!response.ok || !data.invoice) {
+        if (response.status === 409 && data.invoice) {
+          setState((current) => ({
+            ...current,
+            invoices: current.invoices.map((invoice) =>
+              invoice.id === data.invoice!.id ? data.invoice! : invoice
+            ),
+          }));
+        }
         throw new Error(data.error ?? "Learning could not be saved.");
       }
 
@@ -2727,6 +2745,10 @@ export function IntoWorkbench() {
         error?: string;
       };
       if (!response.ok || !data.profile) {
+        if (response.status === 409) {
+          await refreshSupplierLearning();
+          setLearningResetTarget(null);
+        }
         throw new Error(data.error ?? "Supplier learning reset failed.");
       }
       applyResetProfile(learningResetTarget, data.profile);
@@ -2773,16 +2795,41 @@ export function IntoWorkbench() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action, accountId }),
+          body: JSON.stringify({
+            action,
+            accountId,
+            ...(action === "selectSupplier" && hasUnsavedChanges && draft
+              ? {
+                  expectedRevision: selectedInvoice.revision,
+                  extractedData: draft,
+                  bookingLines: bookingLinePayloads,
+                }
+              : {}),
+          }),
         }
       );
-      const data = await response.json();
+      const data = (await response.json()) as {
+        invoice?: UploadedInvoice;
+        invoices?: UploadedInvoice[];
+        error?: string;
+      };
 
       if (!response.ok) {
+        if (response.status === 409 && data.invoice) {
+          setState((current) => ({
+            ...current,
+            invoices: current.invoices.map((invoice) =>
+              invoice.id === data.invoice!.id ? data.invoice! : invoice
+            ),
+          }));
+        }
         throw new Error(data.error ?? "Could not save purchase journal decision.");
       }
 
-      setState((current) => ({ ...current, invoices: data.invoices }));
+      setState((current) => ({
+        ...current,
+        invoices: data.invoices ?? current.invoices,
+      }));
       setMessage(
         action === "selectSupplier"
           ? "Supplier decision saved and future matches will use it."
@@ -4354,26 +4401,42 @@ export function IntoWorkbench() {
                             : "Not trained"}
                         </td>
                         <td className="px-3 py-3">
-                          <ActionButton
-                            variant="danger"
-                            onClick={() => setLearningResetTarget(summary)}
-                            loading={busy === actionKey}
-                            feedback={buttonFeedbackFor(actionKey, actionKey)}
-                            disabled={
-                              !hasPermission("manage_learning") ||
-                              summary.exampleCount === 0 ||
-                              Boolean(busy)
-                            }
-                            disabledReason={
-                              !hasPermission("manage_learning")
-                                ? "Your INTO account cannot reset supplier learning."
-                                : summary.exampleCount === 0
-                                  ? "This supplier has no active learning to reset."
-                                  : "Another action is already running."
-                            }
-                          >
-                            Reset learning
-                          </ActionButton>
+                          <div className="flex flex-wrap gap-2">
+                            <ActionButton
+                              variant="secondary"
+                              onClick={() =>
+                                setLearningDetailAccountId((current) =>
+                                  current === summary.supplierAccountId
+                                    ? ""
+                                    : summary.supplierAccountId
+                                )
+                              }
+                            >
+                              {learningDetailAccountId === summary.supplierAccountId
+                                ? "Hide details"
+                                : "View details"}
+                            </ActionButton>
+                            <ActionButton
+                              variant="danger"
+                              onClick={() => setLearningResetTarget(summary)}
+                              loading={busy === actionKey}
+                              feedback={buttonFeedbackFor(actionKey, actionKey)}
+                              disabled={
+                                !hasPermission("manage_learning") ||
+                                summary.exampleCount === 0 ||
+                                Boolean(busy)
+                              }
+                              disabledReason={
+                                !hasPermission("manage_learning")
+                                  ? "Your INTO account cannot reset supplier learning."
+                                  : summary.exampleCount === 0
+                                    ? "This supplier has no active learning to reset."
+                                    : "Another action is already running."
+                              }
+                            >
+                              Reset learning
+                            </ActionButton>
+                          </div>
                         </td>
                       </tr>
                     );
@@ -4388,6 +4451,72 @@ export function IntoWorkbench() {
                 </p>
               ) : null}
             </div>
+            {learningDetail ? (
+              <section
+                className="mt-4 rounded-lg border border-stone-200 bg-stone-50 p-4"
+                aria-labelledby="supplier-learning-detail-title"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h3
+                      id="supplier-learning-detail-title"
+                      className="font-semibold text-stone-950"
+                    >
+                      {learningDetail.supplierName} reliability details
+                    </h3>
+                    <p className="text-xs text-stone-600">
+                      Generation {learningDetail.generation} ·{" "}
+                      {learningDetail.confidence.copy ??
+                        supplierReliabilityCopy(learningDetail.confidence.band)}
+                    </p>
+                  </div>
+                  <div className="text-right text-sm">
+                    <div className="font-semibold text-stone-950">
+                      {learningDetail.confidence.score}% {learningDetail.confidence.band}
+                    </div>
+                    <div className="text-xs text-stone-500">
+                      Drift penalty {learningDetail.confidence.driftPenalty} points
+                    </div>
+                  </div>
+                </div>
+                {learningDetail.confidence.metrics?.length ? (
+                  <div className="mt-3 overflow-x-auto">
+                    <table className="w-full min-w-[640px] text-left text-xs">
+                      <thead className="text-stone-600">
+                        <tr>
+                          <th className="py-2 pr-3">Metric</th>
+                          <th className="py-2 pr-3">Outcomes</th>
+                          <th className="py-2 pr-3">Quality</th>
+                          <th className="py-2">Weighted contribution</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {learningDetail.confidence.metrics.map((metric) => (
+                          <tr key={metric.metric} className="border-t border-stone-200">
+                            <td className="py-2 pr-3 font-medium text-stone-900">
+                              {metric.label}
+                            </td>
+                            <td className="py-2 pr-3">
+                              {metric.successes}/{metric.attempts}
+                            </td>
+                            <td className="py-2 pr-3">
+                              {Math.round(metric.quality * 100)}%
+                            </td>
+                            <td className="py-2">
+                              {Math.round(metric.contribution * 100)}%
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <p className="mt-3 text-sm text-stone-600">
+                    No trusted metric outcomes have been recorded yet.
+                  </p>
+                )}
+              </section>
+            ) : null}
           </section>
         ) : null}
 

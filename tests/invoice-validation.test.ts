@@ -702,6 +702,10 @@ test("uses managed field candidates and polygons when scan text has no labels", 
   assert.deepEqual(data.extractionEvidence?.supplierName?.polygon, supplierPolygon);
   assert.deepEqual(data.extractionEvidence?.grossAmount?.polygon, totalPolygon);
   assert.equal(data.extractionEvidence?.grossAmount?.sourceLabel, "InvoiceTotal");
+  assert.equal(data.documentAnalysis?.sourceMode, "ocr");
+  assert.equal(data.documentAnalysis?.provider.name, "test-provider");
+  assert.deepEqual(data.documentAnalysis?.pages[0]?.tokens[0]?.polygon, supplierPolygon);
+  assert.deepEqual(data.documentAnalysis?.fieldCandidates[1]?.polygon, totalPolygon);
 });
 
 test("extracts labelled values from embedded PDF text", async () => {

@@ -73,6 +73,9 @@ test("adds a Supplier learning view with separate reliability copy", () => {
   assert.match(activeReviewSource, /Review recommended\./);
   assert.match(activeReviewSource, /More training invoices needed\./);
   assert.match(activeReviewSource, /score:\s*35/);
+  assert.match(activeReviewSource, /"View details"/);
+  assert.match(activeReviewSource, /reliability details/);
+  assert.match(activeReviewSource, /confidence\.metrics\.map/);
   assert.match(
     activeReviewSource,
     /activeSupplierGeneration > invoice\.learningMetadata\.generation/
@@ -114,6 +117,16 @@ test("does not turn committed mutations or failed summary reads into false train
   assert.match(activeReviewSource, /Supplier learning was saved, but its summary could not be refreshed\./);
   assert.match(activeReviewSource, /Supplier learning was reset, but its summary could not be refreshed\./);
   assert.match(activeReviewSource, /busy === `reset-learning-\$\{learningResetTarget\.supplierAccountId\}`/);
+});
+
+test("supplier selection preserves live edits and refreshes revision conflicts", () => {
+  assert.match(
+    activeReviewSource,
+    /action === "selectSupplier" && hasUnsavedChanges && draft/
+  );
+  assert.match(activeReviewSource, /expectedRevision:\s*selectedInvoice\.revision/);
+  assert.match(activeReviewSource, /response\.status === 409 && data\.invoice/);
+  assert.match(activeReviewSource, /response\.status === 409[\s\S]*refreshSupplierLearning/);
 });
 
 test("hides every supplier-learning surface behind the public enabled state", () => {

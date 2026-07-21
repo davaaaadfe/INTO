@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { LearningExampleRecord } from "../lib/repository/learning-repository";
+import type { BookingLearningStore } from "../lib/domain/invoice";
 import * as supplierLearning from "../lib/services/supplier-learning";
 
 const occurredAt = "2026-07-21T09:00:00.000Z";
@@ -322,5 +323,76 @@ test("uses immutable line deltas for corrections when correction metadata is abs
       accounting: false,
       inverse_correction: false,
     }
+  );
+});
+
+test("derives the same evidence from the active runtime supplier generation", () => {
+  const learning: BookingLearningStore = {
+    revision: 1,
+    supplierProfiles: [
+      {
+        supplierAccountId: "supplier-a",
+        generation: 2,
+        exampleCount: 1,
+        formatDrift: "none",
+      },
+    ],
+    supplierExamples: [
+      {
+        id: "runtime-example",
+        supplierAccountId: "supplier-a",
+        generation: 2,
+        invoiceId: "runtime-invoice",
+        contentHash: "runtime-hash",
+        formatFingerprint: "format-a",
+        learnedAt: occurredAt,
+        originalExtractedData: { referenceCode: "WRONG" } as never,
+        finalExtractedData: { referenceCode: "FINAL" } as never,
+        source: "explicit_learn",
+        trustState: "trusted",
+        trigger: "learn",
+        validationResult: { valid: true },
+        active: true,
+      },
+    ],
+    supplierPatterns: [],
+    supplierSelections: [],
+    glAccountSelections: [],
+    vatCodeSelections: [],
+    costCentreSelections: [],
+    costUnitSelections: [],
+    corrections: [
+      {
+        id: "runtime-correction",
+        invoiceId: "runtime-invoice",
+        field: "yourRefPattern",
+        supplierIdentity: "name:supplier-a",
+        supplierName: "Supplier A",
+        supplierAccountId: "supplier-a",
+        matchKey: "reference",
+        originalValue: "WRONG",
+        correctedValue: "FINAL",
+        confidence: 0.8,
+        confidenceBefore: 0.5,
+        confidenceAfter: 0.8,
+        correctedAt: occurredAt,
+        correctedByUserId: "shared_user",
+        correctedByUserName: "Shared user",
+        trustState: "trusted",
+      },
+    ],
+  };
+
+  const evidence = supplierLearning.supplierReliabilityEvidenceFromLearningStore(
+    learning,
+    learning.supplierProfiles[0]!
+  );
+  assert.deepEqual(
+    evidence.outcomes.map(({ metric, success }) => ({ metric, success })),
+    [
+      { metric: "your_ref", success: false },
+      { metric: "validation", success: true },
+      { metric: "inverse_correction", success: false },
+    ]
   );
 });

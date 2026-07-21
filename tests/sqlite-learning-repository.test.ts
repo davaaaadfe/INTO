@@ -6,7 +6,57 @@ import { DatabaseSync } from "node:sqlite";
 import {
   LearningGenerationConflictError,
   SqliteLearningRepository,
+  type LearningArtifactAnalysis,
 } from "../lib/repository/learning-repository";
+
+function artifactAnalysis(text: string): LearningArtifactAnalysis {
+  const polygon = [
+    { x: 0.1, y: 0.1 },
+    { x: 0.4, y: 0.1 },
+    { x: 0.4, y: 0.2 },
+    { x: 0.1, y: 0.2 },
+  ];
+  return {
+    documentTextMode: "plain_text",
+    documentAnalysis: {
+      pages: [{
+        pageNumber: 1,
+        width: 1,
+        height: 1,
+        unit: "normalized",
+        text,
+        tokens: [{ text, polygon, confidence: 0.99 }],
+        language: "en",
+        tables: [{
+          rowCount: 1,
+          columnCount: 1,
+          cells: [{
+            rowIndex: 0,
+            columnIndex: 0,
+            rowSpan: 1,
+            columnSpan: 1,
+            text,
+            polygon,
+            confidence: 0.98,
+          }],
+        }],
+      }],
+      fieldCandidates: [{
+        field: "supplierName",
+        label: "VendorName",
+        value: text,
+        page: 1,
+        polygon,
+        confidence: 0.98,
+        source: "test-provider",
+      }],
+      confidence: 0.99,
+      language: "en",
+      provider: { name: "test-provider", model: "fixture-v1" },
+      sourceMode: "ocr",
+    },
+  };
+}
 
 function testDatabasePath() {
   return resolve(
@@ -101,7 +151,7 @@ test("artifacts are encrypted, content-hash deduplicated, and bound to their has
       companyId: scope.companyId,
       contentHash: "sha256:invoice-a",
       rawText: "Sensitive invoice body",
-      analysis: { pages: [{ pageNumber: 1, tokens: ["Sensitive"] }] },
+      analysis: artifactAnalysis("Sensitive"),
       detectedLanguage: "en",
       provider: "local",
       modelVersion: "embedded-pdf-v1",
@@ -111,7 +161,7 @@ test("artifacts are encrypted, content-hash deduplicated, and bound to their has
       companyId: scope.companyId,
       contentHash: "sha256:invoice-a",
       rawText: "Sensitive invoice body",
-      analysis: { pages: [] },
+      analysis: { documentTextMode: "plain_text" },
       provider: "local",
       modelVersion: "embedded-pdf-v1",
       createdAt: "2026-07-21T10:01:00.000Z",
@@ -124,7 +174,7 @@ test("artifacts are encrypted, content-hash deduplicated, and bound to their has
     assert.match(stored!.rawTextCiphertext, /^v1\./);
     assert.deepEqual(await repository.readArtifact(artifact.id), {
       rawText: "Sensitive invoice body",
-      analysis: { pages: [{ pageNumber: 1, tokens: ["Sensitive"] }] },
+      analysis: artifactAnalysis("Sensitive"),
     });
   });
 });
@@ -135,7 +185,7 @@ test("concurrent artifact saves converge on one encrypted record", async () => {
       companyId: scope.companyId,
       contentHash: "sha256:concurrent-invoice",
       rawText: "Concurrent sensitive invoice body",
-      analysis: { pages: [{ pageNumber: 1 }] },
+      analysis: artifactAnalysis("Concurrent"),
       provider: "local",
       modelVersion: "embedded-pdf-v1",
       createdAt: "2026-07-21T10:00:00.000Z",
@@ -151,6 +201,27 @@ test("concurrent artifact saves converge on one encrypted record", async () => {
       rawText: input.rawText,
       analysis: input.analysis,
     });
+  });
+});
+
+test("artifact retention removes expired encrypted analysis", async () => {
+  await withRepository(async (repository) => {
+    const artifact = await repository.saveArtifact({
+      companyId: scope.companyId,
+      contentHash: "sha256:expired-invoice",
+      rawText: "Expired sensitive invoice body",
+      analysis: artifactAnalysis("Expired"),
+      provider: "test-provider",
+      modelVersion: "fixture-v1",
+      retentionUntil: "2026-07-20T00:00:00.000Z",
+      createdAt: "2026-07-19T00:00:00.000Z",
+    });
+
+    assert.equal(
+      await repository.pruneExpiredArtifacts("2026-07-21T00:00:00.000Z"),
+      1
+    );
+    assert.equal(await repository.readArtifact(artifact.id), null);
   });
 });
 

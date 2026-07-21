@@ -6,6 +6,11 @@ import {
   decryptLearningArtifact,
   encryptLearningArtifact,
 } from "../services/learning-artifact-crypto";
+import type {
+  DocumentAnalysisArtifact,
+  DocumentTextMode,
+  ExtractedInvoiceData,
+} from "../domain/invoice";
 
 export const LEARNING_REPOSITORY_SCHEMA_VERSION = 1;
 
@@ -32,11 +37,17 @@ export type LearningProfileRecord = LearningScope & {
   updatedAt: string;
 };
 
+export type LearningArtifactAnalysis = {
+  documentTextMode?: DocumentTextMode;
+  extractionEvidence?: ExtractedInvoiceData["extractionEvidence"];
+  documentAnalysis?: DocumentAnalysisArtifact;
+};
+
 export type LearningArtifactInput = {
   companyId: string;
   contentHash: string;
   rawText: string;
-  analysis: unknown;
+  analysis: LearningArtifactAnalysis;
   detectedLanguage?: string;
   provider: string;
   modelVersion: string;
@@ -434,19 +445,36 @@ export class SqliteLearningRepository {
   }
 
   async ensureProfile(
-    input: LearningScope & { fallbackSupplierCode: string; createdAt: string }
+    input: LearningScope & {
+      fallbackSupplierCode: string;
+      generation?: number;
+      createdAt: string;
+    }
   ) {
     this.database
       .prepare(
-        `INSERT OR IGNORE INTO supplier_learning_profiles (
-          company_id, division_code, supplier_account_id,
+        `INSERT INTO supplier_learning_profiles (
+          company_id, division_code, supplier_account_id, generation,
           fallback_supplier_code, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?)`
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(company_id, division_code, supplier_account_id) DO UPDATE SET
+          fallback_supplier_code = CASE
+            WHEN supplier_learning_profiles.fallback_supplier_code = ''
+              THEN excluded.fallback_supplier_code
+            ELSE supplier_learning_profiles.fallback_supplier_code
+          END,
+          generation = CASE
+            WHEN supplier_learning_profiles.learned_count = 0
+              AND supplier_learning_profiles.generation < excluded.generation
+              THEN excluded.generation
+            ELSE supplier_learning_profiles.generation
+          END`
       )
       .run(
         input.companyId,
         input.divisionCode,
         input.supplierAccountId,
+        input.generation ?? 0,
         input.fallbackSupplierCode,
         input.createdAt,
         input.createdAt
@@ -481,6 +509,41 @@ export class SqliteLearningRepository {
       )
       .all(companyId, divisionCode) as ProfileRow[];
     return rows.map(profileFromRow);
+  }
+
+  async updateProfileConfidence(
+    input: LearningScope & {
+      generation: number;
+      score: number;
+      driftState: LearningProfileRecord["driftState"];
+      updatedAt: string;
+    }
+  ) {
+    this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      this.requireCurrentGeneration(input);
+      this.database
+        .prepare(
+          `UPDATE supplier_learning_profiles
+           SET confidence_score = ?, confidence_breakdown_version = 1,
+               drift_state = ?, updated_at = ?, version = version + 1
+           WHERE company_id = ? AND division_code = ?
+             AND supplier_account_id = ? AND generation = ?`
+        )
+        .run(
+          input.score,
+          input.driftState,
+          input.updatedAt,
+          input.companyId,
+          input.divisionCode,
+          input.supplierAccountId,
+          input.generation
+        );
+      this.database.exec("COMMIT;");
+    } catch (error) {
+      this.database.exec("ROLLBACK;");
+      throw error;
+    }
   }
 
   private requireCurrentGeneration(input: LearningScope & { generation: number }) {
@@ -646,8 +709,34 @@ export class SqliteLearningRepository {
           row.analysis_ciphertext,
           row.content_hash
         )
-      ) as unknown,
+      ) as LearningArtifactAnalysis,
     };
+  }
+
+  async pruneExpiredArtifacts(currentTime: string) {
+    this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      this.database
+        .prepare(
+          `UPDATE supplier_learning_examples SET artifact_id = NULL
+           WHERE artifact_id IN (
+             SELECT id FROM document_analysis_artifacts
+             WHERE retention_until IS NOT NULL AND retention_until <= ?
+           )`
+        )
+        .run(currentTime);
+      const result = this.database
+        .prepare(
+          `DELETE FROM document_analysis_artifacts
+           WHERE retention_until IS NOT NULL AND retention_until <= ?`
+        )
+        .run(currentTime);
+      this.database.exec("COMMIT;");
+      return Number(result.changes);
+    } catch (error) {
+      this.database.exec("ROLLBACK;");
+      throw error;
+    }
   }
 
   async saveExample(input: LearningExampleInput) {
@@ -855,6 +944,11 @@ export class SqliteLearningRepository {
           ),
           drift_state = excluded.drift_state,
           model_version = excluded.model_version,
+          label = excluded.label,
+          anchor_json = excluded.anchor_json,
+          normalized_region_json = excluded.normalized_region_json,
+          data_type = excluded.data_type,
+          booking_mapping_json = excluded.booking_mapping_json,
           active = 1,
           updated_at = excluded.updated_at`
         )

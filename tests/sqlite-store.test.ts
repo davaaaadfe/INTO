@@ -119,6 +119,7 @@ test("the request store survives a local process restart", async () => {
   const databasePath = testDatabasePath();
   const previousMode = process.env.DATABASE_MODE;
   const previousPath = process.env.LOCAL_DATABASE_PATH;
+  const previousLearningEnabled = process.env.LEARNING_V2_ENABLED;
   const runtime = globalThis as typeof globalThis & {
     __INTO_STORE?: IntoStore;
     __INTO_STORE_HYDRATED_FOR?: string;
@@ -128,6 +129,7 @@ test("the request store survives a local process restart", async () => {
 
   process.env.DATABASE_MODE = "sqlite";
   process.env.LOCAL_DATABASE_PATH = databasePath;
+  process.env.LEARNING_V2_ENABLED = "false";
 
   try {
     await hydrateStoreFromPersistence();
@@ -162,6 +164,8 @@ test("the request store survives a local process restart", async () => {
     else process.env.DATABASE_MODE = previousMode;
     if (previousPath === undefined) delete process.env.LOCAL_DATABASE_PATH;
     else process.env.LOCAL_DATABASE_PATH = previousPath;
+    if (previousLearningEnabled === undefined) delete process.env.LEARNING_V2_ENABLED;
+    else process.env.LEARNING_V2_ENABLED = previousLearningEnabled;
     await rm(databasePath, { force: true });
     await rm(`${databasePath}-shm`, { force: true });
     await rm(`${databasePath}-wal`, { force: true });

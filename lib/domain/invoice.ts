@@ -3,7 +3,6 @@ export const INVOICE_STATUSES = [
   "Reading",
   "Validation Failed",
   "Attachment Missing",
-  "Supplier Review Required",
   "Payment Condition Review Required",
   "Booking Intelligence Review Required",
   "Possible Duplicate",
@@ -149,6 +148,57 @@ export type ExtractionFieldEvidence = {
   polygon?: readonly ExtractionEvidencePoint[];
 };
 
+export type DocumentAnalysisArtifact = {
+  readonly pages: readonly {
+    readonly pageNumber: number;
+    readonly width: number;
+    readonly height: number;
+    readonly unit: "pixel" | "inch" | "normalized";
+    readonly text: string;
+    readonly tokens: readonly {
+      readonly text: string;
+      readonly polygon: readonly ExtractionEvidencePoint[];
+      readonly confidence: number;
+    }[];
+    readonly language?: string;
+    readonly tables: readonly {
+      readonly rowCount: number;
+      readonly columnCount: number;
+      readonly cells: readonly {
+        readonly rowIndex: number;
+        readonly columnIndex: number;
+        readonly rowSpan: number;
+        readonly columnSpan: number;
+        readonly text: string;
+        readonly polygon: readonly ExtractionEvidencePoint[];
+        readonly confidence: number;
+      }[];
+    }[];
+  }[];
+  readonly fieldCandidates: readonly {
+    readonly value: string | number | boolean | null;
+    readonly field: string;
+    readonly label?: string;
+    readonly page?: number;
+    readonly polygon: readonly ExtractionEvidencePoint[];
+    readonly confidence: number;
+    readonly source: string;
+  }[];
+  readonly confidence: number;
+  readonly language?: string;
+  readonly provider: {
+    readonly name: string;
+    readonly model?: string;
+    readonly modelVersion?: string;
+  };
+  readonly sourceMode:
+    | "embedded_pdf_text"
+    | "xml_text"
+    | "plain_text"
+    | "ocr"
+    | "unavailable";
+};
+
 export type ExtractedInvoiceData = {
   supplierName: string;
   supplierVatNumber: string;
@@ -179,6 +229,7 @@ export type ExtractedInvoiceData = {
   extractionEvidence?: Partial<
     Record<ExtractionEvidenceField, ExtractionFieldEvidence>
   >;
+  documentAnalysis?: DocumentAnalysisArtifact;
   confidence?: number;
 };
 
@@ -550,11 +601,12 @@ export type UploadedInvoice = {
   fileType: string;
   fileSize: number;
   checksum?: string;
+  analysisArtifactId?: string;
   storageKey: string;
   localFileStatus: LocalInvoiceFileStatus;
   status: InvoiceStatus;
   processingPurpose?: "booking" | "learning_only";
-  learningState?: "none" | "saved";
+  learningState?: "not_saved" | "saving" | "saved" | "failed";
   revision?: number;
   learningMetadata?: {
     exampleId: string;
@@ -737,7 +789,15 @@ export type SupplierLearningExample = {
   learnedByUserId?: string;
   originalExtractedData?: ExtractedInvoiceData;
   finalExtractedData?: ExtractedInvoiceData;
+  originalSupplierAccountId?: string;
+  originalBookingLines?: PurchaseJournalLine[];
   bookingLines?: PurchaseJournalLine[];
+  source?: "explicit_learn" | "review" | "booking" | "legacy";
+  trustState?: "pending" | "trusted" | "legacy";
+  trigger?: "learn" | "review" | "booking" | "migration";
+  processingPurpose?: "booking" | "learning_only";
+  validationResult?: unknown;
+  active?: boolean;
 };
 
 export type SupplierLearningPattern = {
@@ -751,16 +811,42 @@ export type SupplierLearningPattern = {
   successes: number;
   attempts: number;
   weight: number;
+  formatCluster?: string;
+  field?: string;
+  anchor?: unknown;
+  normalizedRegion?: unknown;
+  bookingMapping?: unknown;
+  supportCount?: number;
+  successCount?: number;
+  correctionCount?: number;
+  confidence?: number;
+  driftState?: SupplierLearningFormatDrift;
+  modelVersion?: string;
+  active?: boolean;
 };
 
 export type SupplierConfidenceBreakdown = {
   score: number;
   band: "Low" | "Medium" | "High";
+  copy?: string;
   baseline: 35;
   exampleCount: number;
+  distinctExampleCount?: number;
+  effectiveExampleCount?: number;
   volume: number;
   quality: number;
   driftPenalty: 0 | 10 | 20;
+  metrics?: Array<{
+    metric: string;
+    label: string;
+    weight: number;
+    normalizedWeight: number;
+    outcomeCount: number;
+    attempts: number;
+    successes: number;
+    quality: number;
+    contribution: number;
+  }>;
 };
 
 export type SupplierLearningSummary = SupplierLearningProfile & {

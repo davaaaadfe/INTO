@@ -1,0 +1,132 @@
+{
+  "schemaVersion": 2,
+  "sanitized": true,
+  "workflowScenarios": [
+    "supplier_no_training",
+    "one_training_invoice",
+    "multiple_consistent_invoices",
+    "supplier_format_changed",
+    "duplicate_supplier_candidates",
+    "manually_corrected_fields",
+    "learn_only_invoice",
+    "reset_learning",
+    "future_invoice_after_training"
+  ],
+  "cases": [
+    {
+      "id": "supplier-no-training",
+      "scenario": "supplier_no_training",
+      "sourceText": "Supplier: Noordzee Office Supplies\nSupplier VAT number: NL812345678B01\nIBAN: NL91ABNA0417164300\nSupplier address: Keizersgracht 100, Amsterdam\nSupplier country: NL\nInvoice number: GOLD-1001\nInvoice date: 2026-07-01\nDue date: 2026-07-08\nPayment terms: 7 days\nCurrency: EUR\nDescription: Office Supplies\nNet amount: 100.00\nVAT amount: 21.00\nInvoice total: 121.00",
+      "expected": {
+        "supplierAccountId": "supplier_noordzee",
+        "fields": { "referenceCode": "GOLD-1001", "invoiceDate": "2026-07-01", "grossAmount": 121 },
+        "validationPassed": true,
+        "bookingLines": [{ "glAccount": "4400", "vatCode": "4", "percentage": 21, "amount": 100 }]
+      }
+    },
+    {
+      "id": "one-training-invoice",
+      "scenario": "one_training_invoice",
+      "sourceText": "Supplier: Delta IT Services\nSupplier VAT number: NL855512340B01\nIBAN: NL39RABO0300065264\nSupplier address: Europalaan 21, Utrecht\nSupplier country: NL\nInvoice number: GOLD-1002\nInvoice date: 2026-07-02\nDue date: 2026-08-01\nPayment terms: 30 days\nCurrency: EUR\nDescription: Software subscriptions\nNet amount: 50.00\nVAT amount: 10.50\nInvoice total: 60.50",
+      "learning": { "supplierAccountId": "supplier_delta_it", "trustedExamples": 1 },
+      "expected": {
+        "supplierAccountId": "supplier_delta_it",
+        "fields": { "referenceCode": "GOLD-1002", "invoiceDate": "2026-07-02", "grossAmount": 60.5 },
+        "validationPassed": false,
+        "bookingLines": [{ "glAccount": "4420", "vatCode": "4", "percentage": 21, "amount": 50 }]
+      }
+    },
+    {
+      "id": "multiple-consistent-invoices",
+      "scenario": "multiple_consistent_invoices",
+      "sourceText": "Supplier: Noordzee Office Supplies\nSupplier VAT number: NL812345678B01\nIBAN: NL91ABNA0417164300\nSupplier address: Keizersgracht 100, Amsterdam\nSupplier country: NL\nInvoice number: GOLD-1003\nInvoice date: 2026-07-03\nDue date: 2026-07-10\nPayment terms: 7 days\nCurrency: EUR\nDescription: Office Supplies\nNet amount: 200.00\nVAT amount: 42.00\nInvoice total: 242.00",
+      "learning": { "supplierAccountId": "supplier_noordzee", "trustedExamples": 5 },
+      "expected": {
+        "supplierAccountId": "supplier_noordzee",
+        "fields": { "referenceCode": "GOLD-1003", "invoiceDate": "2026-07-03", "grossAmount": 242 },
+        "validationPassed": true,
+        "bookingLines": [{ "glAccount": "4400", "vatCode": "4", "percentage": 21, "amount": 200 }]
+      }
+    },
+    {
+      "id": "supplier-format-changed",
+      "scenario": "supplier_format_changed",
+      "sourceText": "Supplier: Delta IT Services\nSupplier VAT number: NL855512340B01\nIBAN: NL39RABO0300065264\nSupplier address: Europalaan 21, Utrecht\nSupplier country: NL\nInvoice number: GOLD-1004\nInvoice date: 2026-07-04\nDue date: 2026-08-03\nPayment terms: 30 days\nCurrency: EUR\nDescription: Software subscriptions\nNet amount: 80.00\nVAT amount: 16.80\nInvoice total: 96.80",
+      "learning": {
+        "supplierAccountId": "supplier_delta_it",
+        "trustedExamples": 3,
+        "formatFingerprints": ["layout-a", "layout-b", "layout-b"]
+      },
+      "expected": {
+        "supplierAccountId": "supplier_delta_it",
+        "fields": { "referenceCode": "GOLD-1004", "invoiceDate": "2026-07-04", "grossAmount": 96.8 },
+        "validationPassed": false,
+        "bookingLines": [{ "glAccount": "4420", "vatCode": "4", "percentage": 21, "amount": 80 }]
+      }
+    },
+    {
+      "id": "duplicate-supplier-candidates",
+      "scenario": "duplicate_supplier_candidates",
+      "sourceText": "Supplier: Acme Supplies BV\nSupplier VAT number: NL123456789B01\nSupplier country: NL\nInvoice number: GOLD-1005\nInvoice date: 2026-07-05\nDue date: 2026-08-04\nPayment terms: 30 days\nCurrency: EUR\nDescription: Office Supplies\nNet amount: 100.00\nVAT amount: 21.00\nInvoice total: 121.00",
+      "expected": {
+        "supplierAccountId": null,
+        "fields": { "referenceCode": "GOLD-1005", "invoiceDate": "2026-07-05", "grossAmount": 121 },
+        "validationPassed": false,
+        "bookingLines": [{ "glAccount": "4400", "vatCode": "4", "percentage": 21, "amount": 100 }]
+      }
+    },
+    {
+      "id": "manually-corrected-fields",
+      "scenario": "manually_corrected_fields",
+      "sourceText": "Supplier: Noordzee Office Supplies\nSupplier VAT number: NL812345678B01\nIBAN: NL91ABNA0417164300\nSupplier address: Keizersgracht 100, Amsterdam\nSupplier country: NL\nInvoice number: RAW-1006\nInvoice date: 2026-07-06\nDue date: 2026-07-13\nPayment terms: 7 days\nCurrency: EUR\nDescription: Office Supplies\nNet amount: 100.00\nVAT amount: 21.00\nInvoice total: 121.00",
+      "correctedFields": { "referenceCode": "CORRECTED-1006", "invoiceNumber": "CORRECTED-1006" },
+      "expected": {
+        "supplierAccountId": "supplier_noordzee",
+        "fields": { "referenceCode": "CORRECTED-1006", "invoiceDate": "2026-07-06", "grossAmount": 121 },
+        "validationPassed": true,
+        "bookingLines": [{ "glAccount": "4400", "vatCode": "4", "percentage": 21, "amount": 100 }]
+      }
+    },
+    {
+      "id": "learn-only-invoice",
+      "scenario": "learn_only_invoice",
+      "processingPurpose": "learning_only",
+      "sourceText": "Supplier: Delta IT Services\nSupplier VAT number: NL855512340B01\nIBAN: NL39RABO0300065264\nSupplier address: Europalaan 21, Utrecht\nSupplier country: NL\nInvoice number: GOLD-1007\nInvoice date: 2026-07-07\nDue date: 2026-08-06\nPayment terms: 30 days\nCurrency: EUR\nDescription: Software subscriptions\nNet amount: 100.00\nVAT amount: 21.00\nInvoice total: 121.00",
+      "expected": {
+        "supplierAccountId": "supplier_delta_it",
+        "fields": { "referenceCode": "GOLD-1007", "invoiceDate": "2026-07-07", "grossAmount": 121 },
+        "validationPassed": false,
+        "bookingLines": [{ "glAccount": "4420", "vatCode": "4", "percentage": 21, "amount": 100 }]
+      }
+    },
+    {
+      "id": "reset-learning",
+      "scenario": "reset_learning",
+      "sourceText": "Supplier: Noordzee Office Supplies\nSupplier VAT number: NL812345678B01\nIBAN: NL91ABNA0417164300\nSupplier address: Keizersgracht 100, Amsterdam\nSupplier country: NL\nInvoice number: GOLD-1008\nInvoice date: 2026-07-08\nDue date: 2026-07-15\nPayment terms: 7 days\nCurrency: EUR\nDescription: Office Supplies\nNet amount: 40.00\nVAT amount: 8.40\nInvoice total: 48.40",
+      "learning": { "supplierAccountId": "supplier_noordzee", "trustedExamples": 2, "reset": true },
+      "expected": {
+        "supplierAccountId": "supplier_noordzee",
+        "fields": { "referenceCode": "GOLD-1008", "invoiceDate": "2026-07-08", "grossAmount": 48.4 },
+        "validationPassed": true,
+        "bookingLines": [{ "glAccount": "4400", "vatCode": "4", "percentage": 21, "amount": 40 }]
+      }
+    },
+    {
+      "id": "future-invoice-after-training",
+      "scenario": "future_invoice_after_training",
+      "sourceText": "Supplier: Noordzee Office Supplies\nSupplier VAT number: NL812345678B01\nIBAN: NL91ABNA0417164300\nSupplier address: Keizersgracht 100, Amsterdam\nSupplier country: NL\nInvoice number: GOLD-1009\nInvoice date: 2026-07-09\nDue date: 2026-07-16\nPayment terms: 7 days\nCurrency: EUR\nDescription: Cloud subscriptions\nNet amount: 75.00\nVAT amount: 15.75\nInvoice total: 90.75",
+      "learning": {
+        "supplierAccountId": "supplier_noordzee",
+        "trustedExamples": 5,
+        "learnedGlAccount": "4420",
+        "descriptionKey": "cloud-subscriptions"
+      },
+      "expected": {
+        "supplierAccountId": "supplier_noordzee",
+        "fields": { "referenceCode": "GOLD-1009", "invoiceDate": "2026-07-09", "grossAmount": 90.75 },
+        "validationPassed": false,
+        "bookingLines": [{ "glAccount": "4420", "vatCode": "4", "percentage": 21, "amount": 75 }]
+      }
+    }
+  ]
+}

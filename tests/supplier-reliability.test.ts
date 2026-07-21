@@ -37,7 +37,7 @@ test("starts at the 35% baseline with explainable low-reliability copy", () => {
   assert.deepEqual(supplierReliability({ now }), {
     score: 35,
     band: "Low",
-    copy: "No trusted supplier evidence yet.",
+    copy: "More training invoices needed.",
     baseline: 35,
     distinctExampleCount: 0,
     effectiveExampleCount: 0,
@@ -182,7 +182,7 @@ test("applies drift penalties after scoring and returns stable band copy", () =>
 
   assert.deepEqual(
     [high.score, high.band, high.copy],
-    [98, "High", "Strong supplier evidence across trusted outcomes."]
+    [98, "High", "INTO usually reads this supplier correctly."]
   );
   assert.deepEqual(
     [possible.score, possible.band, possible.driftPenalty],
@@ -190,6 +190,6 @@ test("applies drift penalties after scoring and returns stable band copy", () =>
   );
   assert.deepEqual(
     [confirmed.score, confirmed.band, confirmed.copy, confirmed.driftPenalty],
-    [78, "Medium", "Useful supplier evidence; keep review safeguards active.", 20]
+    [78, "Medium", "Review recommended.", 20]
   );
 });

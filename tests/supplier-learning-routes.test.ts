@@ -3,6 +3,7 @@ import test from "node:test";
 import { POST as learnInvoiceRoute } from "../app/api/invoices/[invoiceId]/learn/route";
 import { POST as bookInvoiceRoute } from "../app/api/invoices/[invoiceId]/book/route";
 import { POST as bookReadyRoute } from "../app/api/invoices/book-ready/route";
+import { POST as intelligenceRoute } from "../app/api/invoices/[invoiceId]/intelligence/route";
 import { GET as listSupplierLearningRoute } from "../app/api/suppliers/learning/route";
 import { POST as resetSupplierLearningRoute } from "../app/api/suppliers/[accountId]/learning/reset/route";
 import {
@@ -53,10 +54,46 @@ function routeLearningInvoice() {
     expenseDescription: "Office Supplies",
     companyVatNumber: "NL857017263B01",
     rawText: "Invoice number ROUTE-LEARN-1\nOffice Supplies",
+    documentTextMode: "plain_text" as const,
   };
   updateInvoiceExtraction(invoice.id, extractedData, { applyLearning: false });
   return recomputeInvoiceState(invoice.id)!;
 }
+
+test("supplier selection atomically saves the live corrected draft", async () => {
+  const invoice = routeLearningInvoice();
+  const correctedData = {
+    ...invoice.extractedData,
+    expenseDescription: "Corrected before supplier selection",
+  };
+  const response = await intelligenceRoute(
+    new Request(`http://localhost/api/invoices/${invoice.id}/intelligence`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "selectSupplier",
+        accountId: "supplier_delta_it",
+        expectedRevision: invoice.revision,
+        extractedData: correctedData,
+        bookingLines: invoice.purchaseJournal?.lines ?? [],
+      }),
+    }),
+    { params: { invoiceId: invoice.id } }
+  );
+  const payload = (await response.json()) as {
+    invoice?: ReturnType<typeof routeLearningInvoice>;
+  };
+
+  assert.equal(response.status, 200);
+  assert.equal(
+    payload.invoice?.extractedData.expenseDescription,
+    "Corrected before supplier selection"
+  );
+  assert.equal(
+    payload.invoice?.purchaseJournal?.supplierResolution.selectedAccountId,
+    "supplier_delta_it"
+  );
+});
 
 test("supplier learning routes return stable not-found and list responses", async () => {
   const learnResponse = await learnInvoiceRoute(
@@ -135,6 +172,46 @@ test("supplier learning read state stays off until both rollout flags are enable
         process.env[key] = value;
       }
     }
+  }
+});
+
+test("supplier learning write routes stay unavailable behind the main kill switch", async () => {
+  const previousEnabled = process.env.LEARNING_V2_ENABLED;
+  const previousMode = process.env.SUPPLIER_LEARNING_MODE;
+  process.env.LEARNING_V2_ENABLED = "false";
+  process.env.SUPPLIER_LEARNING_MODE = "apply";
+  try {
+    const invoice = routeLearningInvoice();
+    const before = structuredClone(invoice);
+    const learnResponse = await learnInvoiceRoute(
+      new Request(`http://localhost/api/invoices/${invoice.id}/learn`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          expectedRevision: invoice.revision,
+          extractedData: invoice.extractedData,
+          bookingLines: invoice.purchaseJournal?.lines ?? [],
+        }),
+      }),
+      { params: { invoiceId: invoice.id } }
+    );
+    assert.equal(learnResponse.status, 404);
+    assert.deepEqual(invoice, before);
+
+    const resetResponse = await resetSupplierLearningRoute(
+      new Request("http://localhost/api/suppliers/disabled/learning/reset", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ expectedGeneration: 1 }),
+      }),
+      { params: { accountId: "disabled" } }
+    );
+    assert.equal(resetResponse.status, 404);
+  } finally {
+    if (previousEnabled === undefined) delete process.env.LEARNING_V2_ENABLED;
+    else process.env.LEARNING_V2_ENABLED = previousEnabled;
+    if (previousMode === undefined) delete process.env.SUPPLIER_LEARNING_MODE;
+    else process.env.SUPPLIER_LEARNING_MODE = previousMode;
   }
 });
 
@@ -322,7 +399,7 @@ test("single booking rejects learning-only invoices before attempts or connectio
   assert.equal(getStore().auditEvents.length, auditCount);
 });
 
-test("bulk booking rejects learning-only ready invoices before attempts or connection work", async () => {
+test("bulk booking excludes learning-only ready invoices before attempts or connection work", async () => {
   const invoice = createUploadedInvoice({
     fileName: "bulk-learning-only.pdf",
     fileType: "application/pdf",
@@ -334,10 +411,10 @@ test("bulk booking rejects learning-only ready invoices before attempts or conne
   const auditCount = getStore().auditEvents.length;
 
   const response = await bookReadyRoute();
-  const payload = (await response.json()) as { error?: string };
+  const payload = (await response.json()) as { results?: unknown[] };
 
-  assert.equal(response.status, 409);
-  assert.equal(payload.error, LEARNING_ONLY_BOOKING_MESSAGE);
+  assert.equal(response.status, 200);
+  assert.deepEqual(payload.results, []);
   assert.deepEqual(invoice.bookingAttempts, []);
   assert.equal(invoice.status, "Ready to Book");
   assert.equal(getStore().auditEvents.length, auditCount);

@@ -23,11 +23,11 @@ CREATE TYPE invoice_status AS ENUM (
   'Reading',
   'Validation Failed',
   'Attachment Missing',
-  'Supplier Review Required',
   'Payment Condition Review Required',
   'Booking Intelligence Review Required',
   'Possible Duplicate',
   'Ready to Book',
+  'Learned',
   'Booked',
   'Booking Failed'
 );

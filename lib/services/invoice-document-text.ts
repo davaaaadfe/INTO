@@ -3,6 +3,7 @@ import {
   analyzeDocument,
   type DocumentAnalysisOptions,
   type DocumentAnalysisInput,
+  type DocumentAnalysis,
   type DocumentToken,
   type FieldCandidate,
 } from "./document-analysis";
@@ -18,6 +19,7 @@ export type DocumentTextResult = {
   readonly pages: readonly DocumentTextPage[];
   readonly text: string;
   readonly fieldCandidates: readonly FieldCandidate[];
+  readonly analysis: DocumentAnalysis;
 };
 
 export type DocumentTextInput = DocumentAnalysisInput;
@@ -38,5 +40,6 @@ export async function extractDocumentText(
     })),
     text: analysis.rawText,
     fieldCandidates: analysis.fieldCandidates,
+    analysis,
   };
 }

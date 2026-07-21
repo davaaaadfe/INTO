@@ -1,10 +1,16 @@
 import {
   approveInvoiceIntelligence,
   getInvoice,
+  InvoiceRevisionConflictError,
   listInvoices,
   requirePermission,
+  saveInvoiceReview,
   selectInvoiceSupplier,
 } from "../../../../../lib/repository/invoice-store";
+import type {
+  ExtractedInvoiceData,
+  PurchaseJournalLine,
+} from "../../../../../lib/domain/invoice";
 import { withPersistentStore } from "../../../../../lib/repository/persistent-request";
 import { logger } from "../../../../../lib/utils/logger";
 
@@ -31,7 +37,29 @@ export async function POST(request: Request, context: RouteContext) {
       const payload = (await request.json()) as {
         action?: "approve" | "selectSupplier";
         accountId?: string;
+        expectedRevision?: number;
+        extractedData?: ExtractedInvoiceData;
+        bookingLines?: PurchaseJournalLine[];
       };
+
+      if (
+        payload.action === "selectSupplier" &&
+        payload.extractedData
+      ) {
+        if (
+          typeof payload.expectedRevision !== "number" ||
+          payload.expectedRevision !== invoice.revision
+        ) {
+          throw new InvoiceRevisionConflictError(
+            "Invoice revision changed. Refresh and try again."
+          );
+        }
+        saveInvoiceReview(
+          invoiceId,
+          payload.extractedData,
+          payload.bookingLines ?? []
+        );
+      }
 
       const updatedInvoice =
         payload.action === "selectSupplier"
@@ -55,6 +83,13 @@ export async function POST(request: Request, context: RouteContext) {
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Unexpected intelligence action error";
+      if (error instanceof InvoiceRevisionConflictError) {
+        const invoiceId = await invoiceIdFromContext(context);
+        return Response.json(
+          { error: message, invoice: getInvoice(invoiceId) },
+          { status: 409 }
+        );
+      }
       logger.error("invoice.intelligence_action_failed", { message });
       return Response.json(
         { error: message },

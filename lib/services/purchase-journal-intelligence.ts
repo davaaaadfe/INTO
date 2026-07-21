@@ -46,7 +46,11 @@ import {
   supplierIdentityKeys as canonicalSupplierIdentityKeys,
   supplierNameSimilarity,
 } from "./supplier-identity";
-import { formatFingerprint } from "./supplier-learning";
+import {
+  formatFingerprint,
+  supplierReliability,
+  supplierReliabilityEvidenceFromLearningStore,
+} from "./supplier-learning";
 import {
   learningFeatureFlags,
   supplierLearningMode,
@@ -89,6 +93,15 @@ const companyConfig = {
   currentMockOpenYear: 2026,
   firstMockOpenPeriod: 6,
 };
+
+export const SUPPLIER_RESOLUTION_V2_POLICY = Object.freeze({
+  version: "supplier-resolution-v2.1",
+  minimumConfidence: 0.9,
+  minimumMargin: 0.12,
+  minimumSoftSignalFamilies: 2,
+  minimumCandidateConfidence: 0.3,
+  maximumCandidates: 5,
+});
 
 export const SUPPLIER_NOT_MATCHED_MESSAGE =
   "Supplier could not be confidently matched. Please select the correct supplier.";
@@ -541,7 +554,7 @@ function resolveSupplier(
       selectedAccountCode: manuallySelectedAccount.code,
       selectedAccountName: manuallySelectedAccount.name,
       matchConfidence: 1,
-      threshold: 0.9,
+      threshold: SUPPLIER_RESOLUTION_V2_POLICY.minimumConfidence,
       method: "Learned decision",
       reviewRequired: false,
       candidates: [],
@@ -789,10 +802,15 @@ function resolveSupplier(
         right.confidence - left.confidence ||
         left.item.account.id.localeCompare(right.item.account.id)
     );
-  const meaningful = ranked.filter(({ confidence }) => confidence >= 0.3);
+  const meaningful = ranked.filter(
+    ({ confidence }) =>
+      confidence >= SUPPLIER_RESOLUTION_V2_POLICY.minimumCandidateConfidence
+  );
   const candidates: SupplierMatchCandidate[] =
     meaningful.length >= 2
-      ? meaningful.slice(0, 5).map(({ item, confidence }) => ({
+      ? meaningful
+          .slice(0, SUPPLIER_RESOLUTION_V2_POLICY.maximumCandidates)
+          .map(({ item, confidence }) => ({
           account: item.account,
           confidence: roundMoney(confidence),
           method: item.preferredMethod,
@@ -811,17 +829,25 @@ function resolveSupplier(
   const autoSelect = Boolean(
     best &&
       !hardConflict &&
-      best.confidence >= 0.9 &&
-      margin >= 0.12 &&
-      (bestHasUniqueHard || bestSoftFamilies >= 2)
+      best.confidence >= SUPPLIER_RESOLUTION_V2_POLICY.minimumConfidence &&
+      margin >= SUPPLIER_RESOLUTION_V2_POLICY.minimumMargin &&
+      (bestHasUniqueHard ||
+        bestSoftFamilies >=
+          SUPPLIER_RESOLUTION_V2_POLICY.minimumSoftSignalFamilies)
   );
-  const ambiguous = hardConflict || Boolean(best && runnerUp && margin < 0.12);
+  const ambiguous =
+    hardConflict ||
+    Boolean(
+      best &&
+        runnerUp &&
+        margin < SUPPLIER_RESOLUTION_V2_POLICY.minimumMargin
+    );
   const reasonCode = ambiguous
     ? ("supplier_ambiguous" as const)
     : ("supplier_low_confidence" as const);
   const flags = learningFeatureFlags();
   const shadowEvaluation =
-    flags.supplierResolutionV2Enabled && flags.learningShadowMode
+    flags.learningShadowMode
       ? {
           ...(best && autoSelect
             ? { selectedAccountId: best.item.account.id }
@@ -841,7 +867,7 @@ function resolveSupplier(
       selectedAccountCode: best.item.account.code,
       selectedAccountName: best.item.account.name,
       matchConfidence: roundMoney(best.confidence),
-      threshold: 0.9,
+      threshold: SUPPLIER_RESOLUTION_V2_POLICY.minimumConfidence,
       method: bestHasUniqueHard ? best.item.preferredMethod : "Evidence fusion",
       reviewRequired: false,
       candidates,
@@ -854,7 +880,7 @@ function resolveSupplier(
     selectedAccountCode: undefined,
     selectedAccountName: undefined,
     matchConfidence: roundMoney(best?.confidence ?? 0),
-    threshold: 0.9,
+    threshold: SUPPLIER_RESOLUTION_V2_POLICY.minimumConfidence,
     method: ambiguous ? "Multiple matches" : "No match",
     reviewRequired: true,
     reasonCode,
@@ -2024,6 +2050,30 @@ export function generatePurchaseJournalBooking(
     exactMasterData
   );
   const supplier = selectedSupplierAccount(supplierResolution, exactMasterData);
+  const supplierLearningProfile = supplier
+    ? learning.supplierProfiles.find(
+        (profile) => profile.supplierAccountId === supplier.id
+      )
+    : undefined;
+  const supplierHasTrustedExamples = supplierLearningProfile
+    ? learning.supplierExamples.some(
+        (example) =>
+          example.supplierAccountId === supplierLearningProfile.supplierAccountId &&
+          example.generation === supplierLearningProfile.generation &&
+          example.trustState !== "pending" &&
+          example.active !== false
+      )
+    : false;
+  const supplierReliabilityScore =
+    supplierLearningProfile && supplierHasTrustedExamples
+      ? supplierReliability({
+          ...supplierReliabilityEvidenceFromLearningStore(
+            learning,
+            supplierLearningProfile
+          ),
+          drift: supplierLearningProfile.formatDrift,
+        }).score
+      : undefined;
   const historicalSuggestion = exactHistoricalSuggestion(
     invoice,
     exactMasterData,
@@ -2080,6 +2130,9 @@ export function generatePurchaseJournalBooking(
     totals.difference !== 0 ? BOOKING_TOTAL_MISMATCH_MESSAGE : "",
   ].filter(Boolean);
   const reviewableReasons = [
+    supplierReliabilityScore !== undefined && supplierReliabilityScore < 65
+      ? "Supplier reliability is below 65%. Review the extracted fields."
+      : "",
     payment.mismatch
       ? "Invoice payment terms do not match the Exact supplier default payment condition."
       : "",

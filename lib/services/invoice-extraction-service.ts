@@ -905,6 +905,14 @@ export async function extractInvoiceData(
     rawText: documentText,
     documentTextMode: document.mode,
     extractionEvidence,
+    documentAnalysis: {
+      pages: document.analysis.pages,
+      fieldCandidates: document.analysis.fieldCandidates,
+      confidence: document.analysis.confidence,
+      language: document.analysis.language,
+      provider: document.analysis.provider,
+      sourceMode: document.analysis.sourceMode,
+    },
     lineItems:
       netAmount !== null && vatAmount !== null && grossAmount !== null
         ? [

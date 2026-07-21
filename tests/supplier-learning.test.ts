@@ -42,7 +42,7 @@ test("new supplier confidence starts at the 35% baseline", () => {
   });
 });
 
-test("trusted examples raise supplier confidence gradually", () => {
+test("upload count alone never raises supplier confidence", () => {
   let learning = createInitialLearningStore();
   const scores: number[] = [];
 
@@ -54,10 +54,10 @@ test("trusted examples raise supplier confidence gradually", () => {
     scores.push(supplierConfidence(profile).score);
   }
 
-  assert.deepEqual(scores, [49, 59, 66]);
+  assert.deepEqual(scores, [35, 35, 35]);
   assert.equal(supplierConfidence(
     learning.supplierProfiles.find((item) => item.supplierAccountId === "supplier-a")
-  ).band, "Medium");
+  ).band, "Low");
 });
 
 test("supplier confidence uses only weighted metrics for the active supplier generation", () => {

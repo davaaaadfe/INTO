@@ -106,3 +106,100 @@ test("PostgreSQL repository exposes authoritative read paths", async () => {
     assert.match(call.query, /generation/);
   }
 });
+
+test("PostgreSQL generation writes lock the active profile row", async () => {
+  const calls: string[] = [];
+  const repository = PostgresLearningRepository.fromQuery(async (query) => {
+    calls.push(query);
+    if (query.includes("RETURNING id") && !query.includes("supplier_learning_examples")) {
+      return [{ id: "saved" }];
+    }
+    return [];
+  });
+  const scope = {
+    companyId: "into-company",
+    divisionCode: "123456",
+    supplierAccountId: "supplier-a",
+    generation: 2,
+  };
+
+  await repository.saveAlias({
+    ...scope,
+    id: "alias-a",
+    kind: "vat",
+    normalizedValue: "NL123456789B01",
+    source: "learned",
+    createdAt: "2026-07-21T10:00:00.000Z",
+  });
+  await repository.savePattern({
+    ...scope,
+    id: "pattern-a",
+    formatCluster: "layout-a",
+    field: "referenceCode",
+    patternKey: "invoice-number:right",
+    supportCount: 1,
+    successCount: 1,
+    correctionCount: 0,
+    driftState: "none",
+    modelVersion: "locator-v1",
+    createdAt: "2026-07-21T10:00:00.000Z",
+  });
+  await assert.rejects(
+    repository.saveExample({
+      ...scope,
+      id: "example-a",
+      invoiceId: "invoice-a",
+      contentHash: "sha256:a",
+      originalFilename: "invoice.pdf",
+      originalPrediction: {},
+      finalFields: {},
+      bookingLines: [],
+      fingerprint: "layout-a",
+      fingerprintVersion: "layout-v1",
+      validationResult: { valid: true },
+      processingPurpose: "learning_only",
+      source: "explicit_learn",
+      trustState: "trusted",
+      trigger: "learn",
+      actorId: "shared_user",
+      sessionCorrelationId: "session-a",
+      requestId: "request-a",
+      createdAt: "2026-07-21T10:00:00.000Z",
+    }),
+    /generation changed/i
+  );
+
+  const generationWrites = calls.filter(
+    (query) =>
+      query.includes("INSERT INTO supplier_identity_aliases") ||
+      query.includes("INSERT INTO supplier_learning_patterns") ||
+      query.includes("INSERT INTO supplier_learning_examples")
+  );
+  assert.equal(generationWrites.length, 3);
+  for (const query of generationWrites) {
+    assert.match(query, /SELECT 1 FROM supplier_learning_profiles/i);
+    assert.match(query, /WHERE company_id=[\s\S]*generation=/i);
+    assert.match(query, /FOR UPDATE/i);
+  }
+  assert.match(
+    generationWrites.find((query) =>
+      query.includes("INSERT INTO supplier_identity_aliases")
+    ) ?? "",
+    /source\s*=\s*'exact'[\s\S]*EXCLUDED\.source\s*=\s*'exact'/i
+  );
+});
+
+test("PostgreSQL retention unlinks examples before deleting expired artifacts", async () => {
+  let retentionQuery = "";
+  const repository = PostgresLearningRepository.fromQuery(async (query) => {
+    retentionQuery = query;
+    return [{ count: 2 }];
+  });
+
+  assert.equal(
+    await repository.pruneExpiredArtifacts("2026-07-21T00:00:00.000Z"),
+    2
+  );
+  assert.match(retentionQuery, /UPDATE supplier_learning_examples SET artifact_id = NULL/i);
+  assert.match(retentionQuery, /DELETE FROM document_analysis_artifacts/i);
+});

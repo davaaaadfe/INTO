@@ -63,7 +63,8 @@ import {
   formatFingerprint,
   learnSupplierInvoice,
   resetSupplierLearning,
-  supplierConfidence,
+  supplierReliability,
+  supplierReliabilityEvidenceFromLearningStore,
 } from "../services/supplier-learning";
 import { createId } from "../utils/id";
 import {
@@ -75,8 +76,18 @@ import {
   databaseMode,
   loadSqliteStoreSnapshot,
   saveSqliteStoreSnapshot,
+  SnapshotRevisionConflictError,
   sqliteDatabasePath,
 } from "./sqlite-store";
+import { CURRENT_STORE_SCHEMA_VERSION } from "./store-migrations";
+import {
+  hydrateLearningState,
+  persistAnalysisArtifacts,
+  persistLearningState,
+  snapshotWithoutActiveLearning,
+  snapshotWithoutDocumentEvidence,
+  type LearningPersistenceContext,
+} from "./learning-persistence";
 
 const sharedUserPermissions: PermissionAction[] = [
   ...SHARED_ACCESS_PERMISSIONS,
@@ -91,6 +102,8 @@ export function getCompanyConnectionUserId() {
 }
 
 export type IntoStore = {
+  schemaVersion: number;
+  revision: number;
   users: IntoUser[];
   currentUserId: string;
   invoices: UploadedInvoice[];
@@ -103,6 +116,8 @@ export type IntoStore = {
   duplicateLogs: DuplicateDecisionLog[];
   auditEvents: AuditEvent[];
   learning: BookingLearningStore;
+  learningRepositoryMigratedAt?: string;
+  legacyLearningRollback?: BookingLearningStore;
 };
 
 function now() {
@@ -176,7 +191,7 @@ function createSeedInvoice(overrides: Partial<UploadedInvoice>): UploadedInvoice
     localFileStatus: "available",
     status: "Ready to Book",
     processingPurpose: "booking",
-    learningState: "none",
+    learningState: "not_saved",
     revision: 1,
     exactBookingStatus: "not_booked",
     extractedData: {
@@ -288,6 +303,8 @@ function createInitialStore(): IntoStore {
       })
     : null;
   const store: IntoStore = {
+    schemaVersion: CURRENT_STORE_SCHEMA_VERSION,
+    revision: 0,
     users: [sharedUser],
     currentUserId: SHARED_USER_ID,
     invoices: [checkInvoice, readyInvoice].filter(
@@ -334,6 +351,10 @@ const globalStore = globalThis as typeof globalThis & {
   __INTO_STORE_HYDRATING?: Promise<void>;
   __INTO_STORE_PERSISTING?: Promise<void>;
   __INTO_STORE_PERSISTENCE_ERROR?: unknown;
+  __INTO_STORE_DIRTY?: boolean;
+  __INTO_STORE_DIRTY_REVISION?: number;
+  __INTO_STORE_PERSISTED_DIRTY_REVISION?: number;
+  __INTO_LEARNING_PERSISTENCE_CONTEXT?: LearningPersistenceContext;
 };
 
 export function getStore() {
@@ -358,7 +379,11 @@ export function getStore() {
     }
     invoice.processingPurpose ??=
       invoice.status === "Learned" ? "learning_only" : "booking";
-    invoice.learningState ??= invoice.status === "Learned" ? "saved" : "none";
+    if (String(invoice.learningState ?? "") === "none") {
+      invoice.learningState = "not_saved";
+    }
+    invoice.learningState ??=
+      invoice.status === "Learned" ? "saved" : "not_saved";
     invoice.revision ??= 1;
     if (invoice.status === "Learned") {
       invoice.processingPurpose = "learning_only";
@@ -410,22 +435,62 @@ async function loadConfiguredStoreSnapshot() {
   return null;
 }
 
-async function saveConfiguredStoreSnapshot(store: IntoStore) {
-  if (databaseMode() === "sqlite") {
-    await saveSqliteStoreSnapshot(store);
-    return;
-  }
+async function saveConfiguredStoreSnapshot(
+  store: IntoStore,
+  context = globalStore.__INTO_LEARNING_PERSISTENCE_CONTEXT
+) {
+  const saveSnapshot = async (snapshot: IntoStore) => {
+    if (databaseMode() === "sqlite") {
+      await saveSqliteStoreSnapshot(snapshot);
+      return;
+    }
+    if (isPostgresPersistenceEnabled()) {
+      await saveStoreSnapshot(snapshot);
+    }
+  };
 
-  if (isPostgresPersistenceEnabled()) {
-    await saveStoreSnapshot(store);
+  // Store OCR/layout evidence only in encrypted artifacts. Preparing those
+  // artifacts before the CAS can at worst leave an unreferenced encrypted row;
+  // it cannot publish a losing Learn or reset mutation.
+  const artifactsPrepared = await persistAnalysisArtifacts(store);
+  const commitSnapshot = artifactsPrepared
+    ? snapshotWithoutDocumentEvidence(store)
+    : store;
+
+  // The revision-protected, already-sanitized snapshot is the mutation commit
+  // point. Project learning only after this request wins the CAS, so a losing
+  // serverless instance cannot leave behind a ghost Learn or reset operation.
+  await saveSnapshot(commitSnapshot);
+  if (commitSnapshot !== store) {
+    store.schemaVersion = commitSnapshot.schemaVersion;
+    store.revision = commitSnapshot.revision;
+  }
+  const normalized = await persistLearningState(store, context);
+  if (normalized) {
+    const compactSnapshot = snapshotWithoutActiveLearning(store);
+    compactSnapshot.revision = store.revision;
+    try {
+      await saveSnapshot(compactSnapshot);
+      store.schemaVersion = compactSnapshot.schemaVersion;
+      store.revision = compactSnapshot.revision;
+    } catch (error) {
+      if (!(error instanceof SnapshotRevisionConflictError)) throw error;
+      // A newer authoritative snapshot won after our commit. Its request will
+      // perform the same idempotent projection and compaction.
+    }
   }
 }
 
-export async function hydrateStoreFromPersistence() {
+export async function hydrateStoreFromPersistence(force = false) {
   const identity = persistenceIdentity();
-  if (databaseMode() === "memory" || globalStore.__INTO_STORE_HYDRATED_FOR === identity) {
+  if (
+    databaseMode() === "memory" ||
+    (!force && globalStore.__INTO_STORE_HYDRATED_FOR === identity)
+  ) {
     return;
   }
+
+  await globalStore.__INTO_STORE_PERSISTING;
 
   if (!globalStore.__INTO_STORE_HYDRATING) {
     globalStore.__INTO_STORE_HYDRATING = loadConfiguredStoreSnapshot()
@@ -438,7 +503,19 @@ export async function hydrateStoreFromPersistence() {
             globalStore.__INTO_STORE
           );
         }
-        globalStore.__INTO_STORE_HYDRATED_FOR = identity;
+        return hydrateLearningState(globalStore.__INTO_STORE).then(
+          (learningEnabled) => {
+            if (
+              learningEnabled &&
+              !snapshot?.learningRepositoryMigratedAt
+            ) {
+              globalStore.__INTO_STORE_DIRTY = true;
+              globalStore.__INTO_STORE_DIRTY_REVISION =
+                (globalStore.__INTO_STORE_DIRTY_REVISION ?? 0) + 1;
+            }
+            globalStore.__INTO_STORE_HYDRATED_FOR = identity;
+          }
+        );
       })
       .finally(() => {
         globalStore.__INTO_STORE_HYDRATING = undefined;
@@ -448,26 +525,60 @@ export async function hydrateStoreFromPersistence() {
   await globalStore.__INTO_STORE_HYDRATING;
 }
 
-export function persistStoreSoon() {
-  if (databaseMode() === "memory") {
-    return;
-  }
-
+function queueStorePersistence() {
   const previous = globalStore.__INTO_STORE_PERSISTING ?? Promise.resolve();
   globalStore.__INTO_STORE_PERSISTING = previous
-    .then(() => saveConfiguredStoreSnapshot(getStore()))
+    .then(async () => {
+      const dirtyRevision = globalStore.__INTO_STORE_DIRTY_REVISION ?? 0;
+      const persistedRevision =
+        globalStore.__INTO_STORE_PERSISTED_DIRTY_REVISION ?? 0;
+      if (dirtyRevision <= persistedRevision) return;
+      await saveConfiguredStoreSnapshot(getStore());
+      globalStore.__INTO_STORE_PERSISTED_DIRTY_REVISION = Math.max(
+        globalStore.__INTO_STORE_PERSISTED_DIRTY_REVISION ?? 0,
+        dirtyRevision
+      );
+      globalStore.__INTO_STORE_DIRTY =
+        (globalStore.__INTO_STORE_DIRTY_REVISION ?? 0) >
+        (globalStore.__INTO_STORE_PERSISTED_DIRTY_REVISION ?? 0);
+    })
     .catch((error: unknown) => {
       globalStore.__INTO_STORE_PERSISTENCE_ERROR ??= error;
     });
 }
 
-export async function flushStoreToPersistence() {
+export function persistStoreSoon() {
+  if (databaseMode() === "memory") {
+    return;
+  }
+
+  globalStore.__INTO_STORE_DIRTY = true;
+  globalStore.__INTO_STORE_DIRTY_REVISION =
+    (globalStore.__INTO_STORE_DIRTY_REVISION ?? 0) + 1;
+  queueStorePersistence();
+}
+
+export async function flushStoreToPersistence(
+  context?: LearningPersistenceContext
+) {
+  if (context) {
+    globalStore.__INTO_LEARNING_PERSISTENCE_CONTEXT = context;
+  }
+  if (databaseMode() !== "memory" && globalStore.__INTO_STORE_DIRTY) {
+    queueStorePersistence();
+  }
   await globalStore.__INTO_STORE_PERSISTING;
   if (globalStore.__INTO_STORE_PERSISTENCE_ERROR) {
     const error = globalStore.__INTO_STORE_PERSISTENCE_ERROR;
     globalStore.__INTO_STORE_PERSISTENCE_ERROR = undefined;
     throw error;
   }
+}
+
+export function setLearningPersistenceContext(
+  context: LearningPersistenceContext | undefined
+) {
+  globalStore.__INTO_LEARNING_PERSISTENCE_CONTEXT = context;
 }
 
 export function listUsers() {
@@ -984,7 +1095,7 @@ export function createUploadedInvoice(input: {
     localFileStatus: input.storageKey ? "available" : "missing",
     status: "Uploaded",
     processingPurpose: "booking",
-    learningState: "none",
+    learningState: "not_saved",
     revision: 1,
     exactBookingStatus: "not_booked",
     extractedData: emptyExtractedInvoiceData(),
@@ -1046,6 +1157,16 @@ export function updateInvoiceExtraction(
   }
   if (invoice.processingPurpose === "learning_only" || invoice.status === "Learned") {
     throw new Error("Learned invoices cannot be reprocessed.");
+  }
+
+  if (!invoice.extractionHistory.some((version) => version.reason === "initial")) {
+    invoice.extractionHistory.push({
+      id: createId("extraction_version"),
+      version: 1,
+      reason: "initial",
+      extractedData: structuredClone(extractedData),
+      createdAt: now(),
+    });
   }
 
   const learned = options.applyLearning === false
@@ -1140,6 +1261,39 @@ function trustedContentHash(invoice: UploadedInvoice) {
   );
 }
 
+function assertInvoiceCanBeLearned(
+  invoice: UploadedInvoice,
+  correctedData: ExtractedInvoiceData,
+  bookingLines: PurchaseJournalLine[]
+) {
+  const hasAnalysis =
+    Boolean(
+      correctedData.documentTextMode &&
+      correctedData.documentTextMode !== "unavailable" &&
+      (correctedData.rawText?.trim() ||
+        Object.keys(correctedData.extractionEvidence ?? {}).length ||
+        correctedData.documentAnalysis?.pages.length ||
+        correctedData.documentAnalysis?.fieldCandidates.length)
+    );
+  if (!hasAnalysis) {
+    throw new Error("Complete document analysis before saving learning.");
+  }
+  const hasTrainableField = Boolean(
+    correctedData.invoiceNumber ||
+      correctedData.referenceCode ||
+      correctedData.invoiceDate ||
+      correctedData.dueDate ||
+      correctedData.netAmount !== null ||
+      correctedData.vatAmount !== null ||
+      correctedData.grossAmount !== null ||
+      correctedData.lineItems.length ||
+      bookingLines.length
+  );
+  if (!hasTrainableField) {
+    throw new Error("Add at least one trainable invoice field before saving learning.");
+  }
+}
+
 export function learnInvoice(
   invoiceId: string,
   correctedData: ExtractedInvoiceData,
@@ -1193,10 +1347,36 @@ export function learnInvoice(
     return invoice;
   }
 
+  assertInvoiceCanBeLearned(invoice, correctedData, bookingLines);
+
   const isGenerationRelearn = invoice.status === "Learned";
-  const originalExtractedData = structuredClone(
-    previousExample?.originalExtractedData ?? invoice.extractedData
+  const initialExtractedData =
+    invoice.extractionHistory.find((version) => version.reason === "initial")
+      ?.extractedData ?? invoice.extractedData;
+  const originalDraft: UploadedInvoice = {
+    ...structuredClone(invoice),
+    extractedData: structuredClone(initialExtractedData),
+    bookingLineOverrides: undefined,
+    purchaseJournal: null,
+    intelligenceApprovedAt: undefined,
+  };
+  const originalBooking = generatePurchaseJournalBooking(
+    originalDraft,
+    store.invoices.map((item) =>
+      item.id === invoiceId ? originalDraft : item
+    ),
+    createInitialLearningStore(),
+    exactMasterDataForUser(store, COMPANY_CONNECTION_USER_ID)
   );
+  const originalExtractedData = structuredClone(
+    previousExample?.originalExtractedData ?? initialExtractedData
+  );
+  const originalBookingLines = structuredClone(
+    previousExample?.originalBookingLines ?? originalBooking.lines
+  );
+  const originalSupplierAccountId =
+    previousExample?.originalSupplierAccountId ??
+    originalBooking.supplierResolution.selectedAccountId;
   const finalExtractedData = structuredClone(
     isGenerationRelearn && previousExample?.finalExtractedData
       ? previousExample.finalExtractedData
@@ -1249,7 +1429,21 @@ export function learnInvoice(
     learnedByUserId: getCurrentUser().id,
     originalExtractedData,
     finalExtractedData,
+    originalSupplierAccountId,
+    originalBookingLines,
     bookingLines: finalBookingLines,
+    source: "explicit_learn",
+    trustState: "trusted",
+    trigger: "learn",
+    processingPurpose: "learning_only",
+    validationResult: {
+      valid: !saved.validationErrors.some((error) => error.severity === "error"),
+      issues: saved.validationErrors.map((error) => ({
+        field: error.field,
+        severity: error.severity,
+      })),
+    },
+    active: true,
   });
   Object.assign(store.learning, nextLearning);
   rememberDecisionsFromInvoice(saved, store.learning);
@@ -1307,16 +1501,54 @@ export class InvoiceRevisionConflictError extends Error {}
 export class SupplierLearningNotFoundError extends Error {}
 export class SupplierLearningGenerationConflictError extends Error {}
 
+function supplierReliabilityForProfile(
+  store: IntoStore,
+  profile: BookingLearningStore["supplierProfiles"][number]
+) {
+  const evidence = supplierReliabilityEvidenceFromLearningStore(
+    store.learning,
+    profile
+  );
+  const confidence = supplierReliability({
+    ...evidence,
+    drift: profile.formatDrift,
+  });
+  return {
+    ...confidence,
+    exampleCount: confidence.distinctExampleCount,
+  };
+}
+
 export function listSupplierLearningSummaries(): SupplierLearningSummary[] {
   const store = getStore();
   const suppliers = exactMasterDataForUser(store, COMPANY_CONNECTION_USER_ID)?.suppliers ?? [];
-  return store.learning.supplierProfiles.map((profile) => {
-    const supplier = suppliers.find((item) => item.id === profile.supplierAccountId);
+  const profiles = new Map(
+    store.learning.supplierProfiles.map((profile) => [
+      profile.supplierAccountId,
+      profile,
+    ])
+  );
+  const supplierAccountIds = [
+    ...suppliers
+      .filter((supplier) => supplier.isSupplier !== false)
+      .map((supplier) => supplier.id),
+    ...store.learning.supplierProfiles
+      .map((profile) => profile.supplierAccountId)
+      .filter((accountId) => !suppliers.some((supplier) => supplier.id === accountId)),
+  ];
+  return supplierAccountIds.map((supplierAccountId) => {
+    const supplier = suppliers.find((item) => item.id === supplierAccountId);
+    const profile = profiles.get(supplierAccountId) ?? {
+      supplierAccountId,
+      generation: 1,
+      exampleCount: 0,
+      formatDrift: "none" as const,
+    };
     return {
       ...profile,
-      confidence: supplierConfidence(profile, store.learning.supplierPatterns),
+      confidence: supplierReliabilityForProfile(store, profile),
       supplierCode: supplier?.code ?? "",
-      supplierName: supplier?.name ?? profile.supplierAccountId,
+      supplierName: supplier?.name ?? supplierAccountId,
     };
   });
 }
@@ -1823,6 +2055,10 @@ export function selectInvoiceSupplier(invoiceId: string, accountId: string) {
     throw new Error("Learned invoices cannot change supplier.");
   }
 
+  const shadowEvaluation = structuredClone(
+    invoice.purchaseJournal?.supplierResolution.shadowEvaluation
+  );
+
   const supplierIdentity = supplierIdentityForInvoice(invoice);
   const user = getCurrentUser();
   const decidedAt = now();
@@ -1860,6 +2096,7 @@ export function selectInvoiceSupplier(invoiceId: string, accountId: string) {
     metadata: {
       accountCode: account.code,
       accountName: account.name,
+      ...(shadowEvaluation ? { shadowEvaluation } : {}),
     },
   });
 

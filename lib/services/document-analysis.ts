@@ -100,6 +100,10 @@ function clamp(value: number) {
   return Math.max(0, Math.min(1, value));
 }
 
+function enabledSetting(value: string | undefined) {
+  return /^(1|true|yes|on)$/i.test(value?.trim() ?? "");
+}
+
 function rectangle(left: number, top: number, right: number, bottom: number) {
   return [
     { x: clamp(left), y: clamp(top) },
@@ -547,7 +551,7 @@ export async function analyzeDocument(
       env.DOCUMENT_INTELLIGENCE_TIMEOUT_MS
   );
   if (
-    enabled !== "true" ||
+    !enabledSetting(enabled) ||
     !endpoint ||
     !key ||
     !shouldUseManagedAnalysis(input, local)

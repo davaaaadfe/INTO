@@ -29,8 +29,13 @@ export async function POST() {
     }
 
     const readyInvoices = listInvoices().filter(
-      (invoice) => invoice.status === "Ready to Book"
+      (invoice) =>
+        invoice.status === "Ready to Book" &&
+        invoice.processingPurpose !== "learning_only"
     );
+    if (!readyInvoices.length) {
+      return Response.json({ invoices: listInvoices(), results });
+    }
     try {
       for (const invoice of readyInvoices) {
         assertInvoiceBookingAllowed(invoice);

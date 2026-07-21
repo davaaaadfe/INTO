@@ -168,6 +168,7 @@ const stableLabel = new RegExp(
     "net amount|vat amount|tax amount|invoice|reference|date|issued|" +
     "description|total|net|vat|tax|supplier|customer|iban|bic|currency)\\b"
 );
+const numericCell = /^(?:(?:[$€£¥]|eur|usd|gbp|chf|cad|aud|jpy|cny|sek|nok|dkk|pln)\s*)?[+-]?\d[\d\s.,'/-]*(?:\s*(?:%|x|pcs?|pieces?|units?|hours?|days?|[$€£¥]|eur|usd|gbp|chf|cad|aud|jpy|cny|sek|nok|dkk|pln))?$/i;
 
 function fingerprintLine(rawLine: string) {
   const line = rawLine.normalize("NFKC").trim().toLowerCase();
@@ -178,8 +179,10 @@ function fingerprintLine(rawLine: string) {
 
   if (/[|\t]/.test(line)) {
     const columns = line.split(/[|\t]/).map((column) => column.trim());
-    return columns.some((column) => /\d/.test(column))
-      ? columns.map((column) => (/\d/.test(column) ? "<number>" : "<text>")).join("|")
+    return columns.some((column) => numericCell.test(column))
+      ? `<row>${columns
+          .map((column) => (numericCell.test(column) ? "<number>" : "<text>"))
+          .join("|")}`
       : columns.join("|");
   }
 
@@ -191,10 +194,15 @@ function fingerprintLine(rawLine: string) {
 }
 
 export function formatFingerprint(documentText: string) {
-  const normalized = documentText
+  const lines = documentText
     .split(/\r?\n/)
     .map(fingerprintLine)
-    .filter(Boolean)
+    .filter(Boolean);
+  const normalized = lines
+    .filter(
+      (line, index) =>
+        !line.startsWith("<row>") || line !== lines[index - 1]
+    )
     .join("\n");
   return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
 }

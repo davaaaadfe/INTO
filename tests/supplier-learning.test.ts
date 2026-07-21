@@ -202,7 +202,7 @@ test("format fingerprints ignore alphabetic field values and line-item descripti
     "Invoice number: BILL-2026-999",
     "Description: Annual cloud subscriptions",
     "Description | Quantity | Price",
-    "Enterprise software license | 12 | EUR 500.00",
+    "Office 365 subscription | 12 | EUR 500.00",
     "Total: EUR 6000.00",
   ].join("\n");
   const reorderedTemplate = [
@@ -218,6 +218,31 @@ test("format fingerprints ignore alphabetic field values and line-item descripti
     formatFingerprint(firstDocument),
     formatFingerprint(reorderedTemplate)
   );
+});
+
+test("format fingerprints ignore the number of line items", () => {
+  const twoItems = [
+    "Invoice number: INV-2026-001",
+    "Description | Quantity | Price",
+    "Cloud subscription | 2 | EUR 100.00",
+    "Support package | 1 | EUR 50.00",
+    "Total: EUR 250.00",
+  ].join("\n");
+  const oneItem = [
+    "Invoice number: INV-2026-002",
+    "Description | Quantity | Price",
+    "Software license | 3 | EUR 200.00",
+    "Total: EUR 600.00",
+  ].join("\n");
+  const reorderedHeader = [
+    "Invoice number: INV-2026-002",
+    "Quantity | Description | Price",
+    "3 | Software license | EUR 200.00",
+    "Total: EUR 600.00",
+  ].join("\n");
+
+  assert.equal(formatFingerprint(twoItems), formatFingerprint(oneItem));
+  assert.notEqual(formatFingerprint(twoItems), formatFingerprint(reorderedHeader));
 });
 
 test("shared learning types expose the approved status, permissions, and revision", () => {

@@ -53,6 +53,7 @@ import {
   type PreviewPan,
   zoomFromWheel,
 } from "../lib/services/preview-pan";
+import { readApiJson } from "../lib/utils/api-response";
 
 type ApiState = {
   permissions: PermissionAction[];
@@ -1992,10 +1993,10 @@ export function IntoWorkbench() {
       fetch("/api/exact/status"),
       fetch("/api/suppliers/learning"),
     ]);
-    const invoiceData = (await invoiceResponse.json()) as {
+    const invoiceData = (await readApiJson(invoiceResponse)) as {
       invoices: UploadedInvoice[];
     };
-    const exactData = (await exactResponse.json()) as {
+    const exactData = (await readApiJson(exactResponse)) as {
       connection: PublicExactConnection | null;
       masterData: ExactMasterDataCache | null;
       masterDataStale: boolean;
@@ -2003,7 +2004,7 @@ export function IntoWorkbench() {
       supplierOverviewImport: SupplierOverviewImportStatus | null;
       configuration: NonNullable<ApiState["exactConfiguration"]>;
     };
-    const learningData = (await learningResponse.json()) as {
+    const learningData = (await readApiJson(learningResponse)) as {
       enabled?: boolean;
       suppliers?: SupplierLearningSummary[];
       error?: string;
@@ -2049,7 +2050,7 @@ export function IntoWorkbench() {
 
   async function refreshSupplierLearning() {
     const response = await fetch("/api/suppliers/learning");
-    const data = (await response.json()) as {
+    const data = (await readApiJson(response)) as {
       enabled?: boolean;
       suppliers?: SupplierLearningSummary[];
       error?: string;
@@ -2118,7 +2119,7 @@ export function IntoWorkbench() {
 
     try {
       const response = await fetch(`/api/invoices/archive?${params.toString()}`);
-      const data = (await response.json()) as {
+      const data = (await readApiJson(response)) as {
         archive?: InvoiceArchiveResult;
         error?: string;
       };
@@ -2136,7 +2137,7 @@ export function IntoWorkbench() {
 
   async function loadAudit(invoiceId: string) {
     const response = await fetch(`/api/invoices/${invoiceId}/audit`);
-    const data = (await response.json()) as { events?: AuditEvent[] };
+    const data = (await readApiJson(response)) as { events?: AuditEvent[] };
     setAuditEvents(response.ok ? data.events ?? [] : []);
   }
 
@@ -2516,7 +2517,7 @@ export function IntoWorkbench() {
     setBusy("exact");
     try {
       const response = await fetch("/api/exact/connect", { method: "POST" });
-      const data = await response.json();
+      const data = await readApiJson(response);
 
       if (!response.ok) {
         throw new Error(data.error ?? "Exact Online connection failed.");
@@ -2559,7 +2560,7 @@ export function IntoWorkbench() {
 
     try {
       const response = await fetch("/api/exact/sync", { method: "POST" });
-      const data = await response.json();
+      const data = await readApiJson(response);
 
       if (!response.ok) {
         throw new Error(data.error ?? "Exact master-data sync failed.");
@@ -2596,7 +2597,7 @@ export function IntoWorkbench() {
     setBusy("exact-disconnect");
     try {
       const response = await fetch("/api/exact/disconnect", { method: "POST" });
-      const data = await response.json();
+      const data = await readApiJson(response);
 
       if (!response.ok) {
         throw new Error(data.error ?? "Exact disconnect failed.");
@@ -2639,7 +2640,7 @@ export function IntoWorkbench() {
           bookingLines: bookingLinePayloads,
         }),
       });
-      const data = await response.json();
+      const data = await readApiJson(response);
 
       if (!response.ok) {
         throw new Error(data.error ?? "Save failed.");
@@ -2679,7 +2680,7 @@ export function IntoWorkbench() {
           bookingLines: bookingLinePayloads,
         }),
       });
-      const data = (await response.json()) as {
+      const data = (await readApiJson(response)) as {
         invoice?: UploadedInvoice;
         message?: string;
         error?: string;
@@ -2740,7 +2741,7 @@ export function IntoWorkbench() {
           }),
         }
       );
-      const data = (await response.json()) as {
+      const data = (await readApiJson(response)) as {
         profile?: SupplierLearningProfile;
         error?: string;
       };
@@ -2808,7 +2809,7 @@ export function IntoWorkbench() {
           }),
         }
       );
-      const data = (await response.json()) as {
+      const data = (await readApiJson(response)) as {
         invoice?: UploadedInvoice;
         invoices?: UploadedInvoice[];
         error?: string;
@@ -2881,7 +2882,7 @@ export function IntoWorkbench() {
           }),
         }
       );
-      const data = await response.json();
+      const data = await readApiJson(response);
 
       if (!response.ok) {
         throw new Error(data.error ?? "Duplicate decision failed.");
@@ -2939,7 +2940,7 @@ export function IntoWorkbench() {
           }),
         }
       );
-      const data = await response.json();
+      const data = await readApiJson(response);
 
       if (!response.ok) {
         throw new Error(data.error ?? "Duplicate decision failed.");
@@ -2989,7 +2990,7 @@ export function IntoWorkbench() {
           }),
         }
       );
-      const data = await response.json();
+      const data = await readApiJson(response);
 
       if (!response.ok) {
         throw new Error(data.error ?? "Re-read failed.");
@@ -3029,7 +3030,7 @@ export function IntoWorkbench() {
           }),
         }
       );
-      const data = await response.json();
+      const data = await readApiJson(response);
 
       if (!response.ok) {
         throw new Error(data.error ?? "Could not mark invoice for review.");
@@ -3061,7 +3062,7 @@ export function IntoWorkbench() {
       const response = await fetch(`/api/invoices/${invoiceId}/book`, {
         method: "POST",
       });
-      const data = await response.json();
+      const data = await readApiJson(response);
 
       setState((current) => ({
         ...current,
@@ -3100,7 +3101,7 @@ export function IntoWorkbench() {
     setBusy("book-all");
     try {
       const response = await fetch("/api/invoices/book-ready", { method: "POST" });
-      const data = await response.json();
+      const data = await readApiJson(response);
 
       if (!response.ok) {
         throw new Error(data.error ?? "Bulk booking failed.");
@@ -3189,7 +3190,7 @@ export function IntoWorkbench() {
         method: "POST",
         body: formData,
       });
-      const data = (await response.json()) as {
+      const data = (await readApiJson(response)) as {
         supplierOverviewImport?: SupplierOverviewImportStatus;
         masterData?: ExactMasterDataCache;
         invoices?: UploadedInvoice[];

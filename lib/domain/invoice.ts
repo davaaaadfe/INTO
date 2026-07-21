@@ -8,6 +8,7 @@ export const INVOICE_STATUSES = [
   "Booking Intelligence Review Required",
   "Possible Duplicate",
   "Ready to Book",
+  "Learned",
   "Booked",
   "Booking Failed",
 ] as const;
@@ -32,7 +33,9 @@ export type PermissionAction =
   | "delete"
   | "manage_connections"
   | "manage_users"
-  | "manage_settings";
+  | "manage_settings"
+  | "train"
+  | "manage_learning";
 
 export const SHARED_ACCESS_PERMISSIONS = [
   "view",
@@ -45,6 +48,8 @@ export const SHARED_ACCESS_PERMISSIONS = [
   "manage_connections",
   "manage_users",
   "manage_settings",
+  "train",
+  "manage_learning",
 ] as const satisfies readonly PermissionAction[];
 
 export type IntoUser = {
@@ -523,6 +528,14 @@ export type UploadedInvoice = {
   storageKey: string;
   localFileStatus: LocalInvoiceFileStatus;
   status: InvoiceStatus;
+  processingPurpose?: "booking" | "learning_only";
+  learningMetadata?: {
+    supplierAccountId: string;
+    generation: number;
+    contentHash: string;
+    learnedAt: string;
+    learnedByUserId: string;
+  };
   lastError?: string;
   exactBookingId?: string;
   exactBookingStatus?: "not_booked" | "booked" | "failed" | string;
@@ -664,7 +677,58 @@ export type LearnedCorrection = {
   metadata?: Record<string, unknown>;
 };
 
+export type SupplierLearningFormatDrift =
+  | "none"
+  | "possible"
+  | "confirmed";
+
+export type SupplierLearningProfile = {
+  supplierAccountId: string;
+  generation: number;
+  exampleCount: number;
+  lastLearnedAt?: string;
+  lastResetAt?: string;
+  formatFingerprint?: string;
+  formatDrift: SupplierLearningFormatDrift;
+};
+
+export type SupplierLearningExample = {
+  supplierAccountId: string;
+  generation: number;
+  invoiceId: string;
+  contentHash: string;
+  formatFingerprint: string;
+  learnedAt: string;
+};
+
+export type SupplierLearningPattern = {
+  supplierAccountId: string;
+  generation: number;
+  key: string;
+  label?: string;
+  context?: string;
+  dataType?: string;
+  relativePosition?: number;
+  successes: number;
+  attempts: number;
+  weight: number;
+};
+
+export type SupplierConfidenceBreakdown = {
+  score: number;
+  band: "Low" | "Medium" | "High";
+  baseline: 35;
+  exampleCount: number;
+  volume: number;
+  quality: number;
+  driftPenalty: 0 | 10 | 20;
+};
+
 export type BookingLearningStore = {
+  revision: 1;
+  supplierProfiles: SupplierLearningProfile[];
+  supplierExamples: SupplierLearningExample[];
+  supplierPatterns: SupplierLearningPattern[];
   supplierSelections: SupplierLearningDecision[];
   glAccountSelections: GlAccountLearningDecision[];
   vatCodeSelections: Array<{

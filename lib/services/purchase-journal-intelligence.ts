@@ -2028,6 +2028,10 @@ function exactMasterDataIssues(
 
 export function createInitialLearningStore(): BookingLearningStore {
   return {
+    revision: 1,
+    supplierProfiles: [],
+    supplierExamples: [],
+    supplierPatterns: [],
     supplierSelections: [],
     glAccountSelections: [],
     vatCodeSelections: [],

@@ -2,8 +2,20 @@ import { mkdirSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { IntoStore } from "./invoice-store";
+import {
+  CURRENT_STORE_SCHEMA_VERSION,
+  migrateStoreSnapshot,
+} from "./store-migrations";
 
 const snapshotId = "company";
+export const CURRENT_SNAPSHOT_SCHEMA_VERSION = CURRENT_STORE_SCHEMA_VERSION;
+
+export class SnapshotRevisionConflictError extends Error {}
+
+type VersionedStore = IntoStore & {
+  schemaVersion?: number;
+  revision?: number;
+};
 
 let database: DatabaseSync | null = null;
 let openDatabasePath = "";
@@ -53,33 +65,89 @@ function openDatabase(databasePath = sqliteDatabasePath()) {
     CREATE TABLE IF NOT EXISTS into_runtime_store (
       id TEXT PRIMARY KEY,
       payload TEXT NOT NULL,
+      revision INTEGER NOT NULL DEFAULT 0,
       updated_at TEXT NOT NULL
     );
   `);
+  const columns = database
+    .prepare("PRAGMA table_info(into_runtime_store)")
+    .all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === "revision")) {
+    database.exec(
+      "ALTER TABLE into_runtime_store ADD COLUMN revision INTEGER NOT NULL DEFAULT 0"
+    );
+  }
   return database;
 }
 
 export async function loadSqliteStoreSnapshot(databasePath = sqliteDatabasePath()) {
   const row = openDatabase(databasePath)
-    .prepare("SELECT payload FROM into_runtime_store WHERE id = ? LIMIT 1")
-    .get(snapshotId) as { payload?: string } | undefined;
+    .prepare("SELECT payload, revision FROM into_runtime_store WHERE id = ? LIMIT 1")
+    .get(snapshotId) as { payload?: string; revision?: number } | undefined;
 
-  return row?.payload ? (JSON.parse(row.payload) as IntoStore) : null;
+  if (!row?.payload) {
+    return null;
+  }
+  const store = JSON.parse(row.payload) as VersionedStore;
+  store.schemaVersion ??= 1;
+  store.revision = row.revision ?? store.revision ?? 0;
+  return migrateStoreSnapshot(store);
 }
 
 export async function saveSqliteStoreSnapshot(
   store: IntoStore,
   databasePath = sqliteDatabasePath()
 ) {
-  openDatabase(databasePath)
-    .prepare(`
-      INSERT INTO into_runtime_store (id, payload, updated_at)
-      VALUES (?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        payload = excluded.payload,
-        updated_at = excluded.updated_at
-    `)
-    .run(snapshotId, JSON.stringify(store), new Date().toISOString());
+  Object.assign(store, migrateStoreSnapshot(store));
+  const versioned = store as VersionedStore;
+  const expectedRevision = versioned.revision ?? 0;
+  const nextRevision = expectedRevision + 1;
+  const nextStore = {
+    ...versioned,
+    schemaVersion: CURRENT_SNAPSHOT_SCHEMA_VERSION,
+    revision: nextRevision,
+  };
+  const db = openDatabase(databasePath);
+  const existing = db
+    .prepare("SELECT revision FROM into_runtime_store WHERE id = ?")
+    .get(snapshotId) as { revision: number } | undefined;
+  if (!existing) {
+    if (expectedRevision !== 0) {
+      throw new SnapshotRevisionConflictError(
+        "INTO data changed in another request. Reload and try again."
+      );
+    }
+    db.prepare(
+      `INSERT INTO into_runtime_store (id, payload, revision, updated_at)
+       VALUES (?, ?, ?, ?)`
+    ).run(
+      snapshotId,
+      JSON.stringify(nextStore),
+      nextRevision,
+      new Date().toISOString()
+    );
+  } else {
+    const result = db
+      .prepare(
+        `UPDATE into_runtime_store
+         SET payload = ?, revision = ?, updated_at = ?
+         WHERE id = ? AND revision = ?`
+      )
+      .run(
+        JSON.stringify(nextStore),
+        nextRevision,
+        new Date().toISOString(),
+        snapshotId,
+        expectedRevision
+      );
+    if (result.changes !== 1) {
+      throw new SnapshotRevisionConflictError(
+        "INTO data changed in another request. Reload and try again."
+      );
+    }
+  }
+  versioned.schemaVersion = CURRENT_SNAPSHOT_SCHEMA_VERSION;
+  versioned.revision = nextRevision;
 }
 
 export async function verifySqliteStoreWorks() {

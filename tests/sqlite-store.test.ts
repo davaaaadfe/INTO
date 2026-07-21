@@ -18,6 +18,7 @@ import {
   closeSqliteStore,
   databaseMode,
   loadSqliteStoreSnapshot,
+  SnapshotRevisionConflictError,
   saveSqliteStoreSnapshot,
 } from "../lib/repository/sqlite-store";
 
@@ -54,6 +55,41 @@ test("persists the complete INTO runtime snapshot in SQLite", async () => {
     const restored = await loadSqliteStoreSnapshot(databasePath);
 
     assert.deepEqual(restored, snapshot);
+  } finally {
+    closeSqliteStore();
+    await rm(databasePath, { force: true });
+    await rm(`${databasePath}-shm`, { force: true });
+    await rm(`${databasePath}-wal`, { force: true });
+  }
+});
+
+test("SQLite snapshot writes use compare-and-swap revisions", async () => {
+  const databasePath = testDatabasePath();
+  const base = {
+    users: [],
+    currentUserId: "shared_user",
+    invoices: [],
+    exactConnections: [],
+    exactMasterDataCaches: [],
+    supplierOverviewImport: null,
+    duplicateLogs: [],
+    auditEvents: [],
+    learning: { corrections: [] },
+    schemaVersion: 1,
+    revision: 0,
+  } as unknown as IntoStore;
+  const firstWriter = structuredClone(base);
+  const staleWriter = structuredClone(base);
+
+  try {
+    await saveSqliteStoreSnapshot(firstWriter, databasePath);
+    assert.equal((firstWriter as IntoStore & { revision: number }).revision, 1);
+    await assert.rejects(
+      saveSqliteStoreSnapshot(staleWriter, databasePath),
+      SnapshotRevisionConflictError
+    );
+    const restored = await loadSqliteStoreSnapshot(databasePath);
+    assert.equal((restored as IntoStore & { revision: number }).revision, 1);
   } finally {
     closeSqliteStore();
     await rm(databasePath, { force: true });

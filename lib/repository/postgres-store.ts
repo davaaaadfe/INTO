@@ -1,9 +1,19 @@
 import { neon } from "@neondatabase/serverless";
 import { Buffer } from "node:buffer";
 import type { IntoStore } from "./invoice-store";
-import { databaseMode } from "./sqlite-store";
+import { migrateStoreSnapshot } from "./store-migrations";
+import {
+  CURRENT_SNAPSHOT_SCHEMA_VERSION,
+  databaseMode,
+  SnapshotRevisionConflictError,
+} from "./sqlite-store";
 
 const snapshotId = "company";
+
+type VersionedStore = IntoStore & {
+  schemaVersion?: number;
+  revision?: number;
+};
 
 function databaseUrl() {
   return process.env.DATABASE_URL?.trim() ?? "";
@@ -24,8 +34,13 @@ async function sqlClient() {
     CREATE TABLE IF NOT EXISTS into_runtime_store (
       id text PRIMARY KEY,
       payload jsonb NOT NULL,
+      revision integer NOT NULL DEFAULT 0,
       updated_at timestamptz NOT NULL DEFAULT now()
     )
+  `;
+  await sql`
+    ALTER TABLE into_runtime_store
+    ADD COLUMN IF NOT EXISTS revision integer NOT NULL DEFAULT 0
   `;
   return sql;
 }
@@ -145,13 +160,19 @@ export async function loadStoreSnapshot() {
 
   const sql = await sqlClient();
   const rows = await sql`
-    SELECT payload
+    SELECT payload, revision
     FROM into_runtime_store
     WHERE id = ${snapshotId}
     LIMIT 1
   `;
 
-  return (rows[0]?.payload as IntoStore | undefined) ?? null;
+  if (!rows[0]?.payload) {
+    return null;
+  }
+  const store = rows[0].payload as VersionedStore;
+  store.schemaVersion ??= 1;
+  store.revision = Number(rows[0].revision ?? store.revision ?? 0);
+  return migrateStoreSnapshot(store);
 }
 
 export async function saveStoreSnapshot(store: IntoStore) {
@@ -160,10 +181,45 @@ export async function saveStoreSnapshot(store: IntoStore) {
   }
 
   const sql = await sqlClient();
-  await sql`
-    INSERT INTO into_runtime_store (id, payload, updated_at)
-    VALUES (${snapshotId}, ${JSON.stringify(store)}::jsonb, now())
-    ON CONFLICT (id)
-    DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()
-  `;
+  Object.assign(store, migrateStoreSnapshot(store));
+  const versioned = store as VersionedStore;
+  const expectedRevision = versioned.revision ?? 0;
+  const nextRevision = expectedRevision + 1;
+  const nextStore = {
+    ...versioned,
+    schemaVersion: CURRENT_SNAPSHOT_SCHEMA_VERSION,
+    revision: nextRevision,
+  };
+  const rows =
+    expectedRevision === 0
+      ? await sql`
+          INSERT INTO into_runtime_store (id, payload, revision, updated_at)
+          VALUES (
+            ${snapshotId},
+            ${JSON.stringify(nextStore)}::jsonb,
+            ${nextRevision},
+            now()
+          )
+          ON CONFLICT (id) DO UPDATE SET
+            payload = EXCLUDED.payload,
+            revision = EXCLUDED.revision,
+            updated_at = now()
+          WHERE into_runtime_store.revision = ${expectedRevision}
+          RETURNING revision
+        `
+      : await sql`
+          UPDATE into_runtime_store SET
+            payload = ${JSON.stringify(nextStore)}::jsonb,
+            revision = ${nextRevision},
+            updated_at = now()
+          WHERE id = ${snapshotId} AND revision = ${expectedRevision}
+          RETURNING revision
+        `;
+  if (!rows.length) {
+    throw new SnapshotRevisionConflictError(
+      "INTO data changed in another request. Reload and try again."
+    );
+  }
+  versioned.schemaVersion = CURRENT_SNAPSHOT_SCHEMA_VERSION;
+  versioned.revision = nextRevision;
 }

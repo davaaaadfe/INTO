@@ -151,9 +151,17 @@ https://your-vercel-domain/api/exact/callback
 
 See `docs/VERCEL_DEPLOYMENT.md` and `docs/OAUTH_SETUP.md` for the full setup.
 
-## Sites Deployment
+## Supplier learning rollout
 
-This project keeps `.openai/hosting.json` configured for the older Sites
-packaging flow. A Vercel deployment must use shared durable metadata and file
-storage because its local filesystem is ephemeral; the local-first setup above
-does not have that limitation.
+Supplier learning, its UI, document intelligence, and supplier resolution V2
+have independent server-side feature flags. Production defaults keep new
+behavior off and shadow comparison on. Learning artifacts use a dedicated
+`LEARNING_ARTIFACT_ENCRYPTION_KEY`; do not reuse the OAuth encryption key.
+
+Managed document analysis is optional and disabled by default. Configure its
+endpoint and API key only after privacy, residency, and cost approval. Local
+embedded-PDF, XML, and text extraction remains the fallback.
+
+A Vercel deployment must use shared durable metadata and file storage because
+its local filesystem is ephemeral; the local-first setup above does not have
+that limitation.

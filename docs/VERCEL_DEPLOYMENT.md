@@ -23,12 +23,27 @@ EXACT_ONLINE_REDIRECT_URI=https://your-vercel-domain.vercel.app/api/exact/callba
 
 OAUTH_TOKEN_ENCRYPTION_KEY=
 OAUTH_STATE_SECRET=
+LEARNING_ARTIFACT_ENCRYPTION_KEY=
+
+LEARNING_V2_ENABLED=false
+LEARNING_UI_ENABLED=false
+SUPPLIER_RESOLUTION_V2_ENABLED=false
+LEARNING_SHADOW_MODE=true
+SUPPLIER_LEARNING_MODE=off
+DOCUMENT_INTELLIGENCE_ENABLED=false
 
 DATABASE_MODE=postgres
 DATABASE_URL=your_managed_postgresql_connection_string
 STORAGE_MODE=postgres
 TEMP_INVOICE_RETENTION_DAYS=30
 ```
+
+If managed document analysis is approved, also configure
+`AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT`,
+`AZURE_DOCUMENT_INTELLIGENCE_API_KEY`, and an optional
+`AZURE_DOCUMENT_INTELLIGENCE_MODEL_ID`. Keep the API key server-side. Roll out
+the learning, UI, resolver, and document-analysis flags independently after the
+database migration and held-out evaluation pass.
 
 `EXACT_ONLINE_REDIRECT_URI` can be omitted when Vercel provides
 `VERCEL_PROJECT_PRODUCTION_URL` or `VERCEL_URL`; INTO will derive the callback

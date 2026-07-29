@@ -19,7 +19,10 @@ import { withPersistentStore } from "../lib/repository/persistent-request";
 import {
   closeConfiguredLearningRepository,
 } from "../lib/repository/configured-learning-repository";
-import { persistLearningState } from "../lib/repository/learning-persistence";
+import {
+  persistLearningState,
+  snapshotWithoutDocumentEvidence,
+} from "../lib/repository/learning-persistence";
 import {
   closeSqliteStore,
   loadSqliteStoreSnapshot,
@@ -64,6 +67,104 @@ async function removeDatabase(databasePath: string) {
   await rm(`${databasePath}-shm`, { force: true });
   await rm(`${databasePath}-wal`, { force: true });
 }
+
+test("booking attempt snapshots omit nested document evidence without losing audit data", () => {
+  const store = structuredClone(getStore());
+  const invoice = store.invoices[0]!;
+  invoice.bookingAttempts = [{
+    id: "attempt-privacy-regression",
+    invoiceId: invoice.id,
+    status: "success",
+    exactBookingId: "exact-safe-123",
+    createdAt: "2026-07-29T10:00:00.000Z",
+    requestPayload: {
+      extractedData: {
+        invoiceNumber: "SAFE-INVOICE-123",
+        rawText: "BOOKING_REQUEST_SENSITIVE_RAW_TEXT",
+        extractionEvidence: {
+          invoiceNumber: {
+            rawValue: "BOOKING_REQUEST_SENSITIVE_EVIDENCE",
+          },
+        },
+        nested: [{
+          keep: "safe-request-nested",
+          documentAnalysis: {
+            pages: [{ text: "BOOKING_REQUEST_SENSITIVE_LAYOUT" }],
+          },
+        }],
+      },
+      purchaseJournal: {
+        journal: "60",
+        yourRef: "SAFE-REQUEST-REF",
+      },
+    },
+    responsePayload: {
+      exactBookingId: "exact-safe-123",
+      accepted: true,
+      result: {
+        keep: "safe-response-nested",
+        rawText: "BOOKING_RESPONSE_SENSITIVE_RAW_TEXT",
+        extractionEvidence: {
+          referenceCode: {
+            rawValue: "BOOKING_RESPONSE_SENSITIVE_EVIDENCE",
+          },
+        },
+        documentAnalysis: {
+          pages: [{ text: "BOOKING_RESPONSE_SENSITIVE_LAYOUT" }],
+        },
+      },
+    },
+  }];
+
+  const snapshot = snapshotWithoutDocumentEvidence(store);
+  const attempt = snapshot.invoices[0]!.bookingAttempts[0]!;
+
+  assert.deepEqual(
+    {
+      id: attempt.id,
+      invoiceId: attempt.invoiceId,
+      status: attempt.status,
+      exactBookingId: attempt.exactBookingId,
+      createdAt: attempt.createdAt,
+    },
+    {
+      id: "attempt-privacy-regression",
+      invoiceId: invoice.id,
+      status: "success",
+      exactBookingId: "exact-safe-123",
+      createdAt: "2026-07-29T10:00:00.000Z",
+    }
+  );
+  assert.deepEqual(attempt.requestPayload, {
+    extractedData: {
+      invoiceNumber: "SAFE-INVOICE-123",
+      nested: [{ keep: "safe-request-nested" }],
+    },
+    purchaseJournal: {
+      journal: "60",
+      yourRef: "SAFE-REQUEST-REF",
+    },
+  });
+  assert.deepEqual(attempt.responsePayload, {
+    exactBookingId: "exact-safe-123",
+    accepted: true,
+    result: {
+      keep: "safe-response-nested",
+    },
+  });
+  assert.doesNotMatch(
+    JSON.stringify(snapshot),
+    /BOOKING_(?:REQUEST|RESPONSE)_SENSITIVE/
+  );
+  assert.match(
+    JSON.stringify(store.invoices[0]!.bookingAttempts[0]),
+    /BOOKING_REQUEST_SENSITIVE_RAW_TEXT/
+  );
+  assert.match(
+    JSON.stringify(store.invoices[0]!.bookingAttempts[0]),
+    /BOOKING_RESPONSE_SENSITIVE_LAYOUT/
+  );
+});
 
 test("legacy snapshots normalize learning arrays before repository migration", async () => {
   const databasePath = testDatabasePath();

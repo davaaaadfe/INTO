@@ -1138,6 +1138,18 @@ export async function hydrateLearningState(store: IntoStore) {
 
 export function snapshotWithoutDocumentEvidence(store: IntoStore): IntoStore {
   const snapshot = structuredClone(store);
+  const removeDocumentEvidence = (value: unknown) => {
+    if (!value || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      for (const item of value) removeDocumentEvidence(item);
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    delete record.rawText;
+    delete record.extractionEvidence;
+    delete record.documentAnalysis;
+    for (const nested of Object.values(record)) removeDocumentEvidence(nested);
+  };
   if (snapshot.legacyLearningRollback) {
     snapshot.legacyLearningRollback = rollbackLearningStore(
       snapshot.legacyLearningRollback
@@ -1151,6 +1163,10 @@ export function snapshotWithoutDocumentEvidence(store: IntoStore): IntoStore {
       delete version.extractedData.rawText;
       delete version.extractedData.extractionEvidence;
       delete version.extractedData.documentAnalysis;
+    }
+    for (const attempt of invoice.bookingAttempts) {
+      removeDocumentEvidence(attempt.requestPayload);
+      removeDocumentEvidence(attempt.responsePayload);
     }
   }
   snapshot.learning = rollbackLearningStore(snapshot.learning);

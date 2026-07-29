@@ -19,12 +19,14 @@ import { withPersistentStore } from "../lib/repository/persistent-request";
 import {
   closeConfiguredLearningRepository,
 } from "../lib/repository/configured-learning-repository";
+import { persistLearningState } from "../lib/repository/learning-persistence";
 import {
   closeSqliteStore,
   loadSqliteStoreSnapshot,
   saveSqliteStoreSnapshot,
 } from "../lib/repository/sqlite-store";
 import { createMockExactConnection } from "../lib/services/exact-online-service";
+import { createMockExactMasterData } from "../lib/services/exact-master-data-service";
 
 function testDatabasePath() {
   return resolve(
@@ -92,6 +94,62 @@ test("legacy snapshots normalize learning arrays before repository migration", a
     await hydrateStoreFromPersistence();
 
     assert.deepEqual(getStore().learning.supplierProfiles, []);
+  } finally {
+    if (previous.mode === undefined) delete process.env.DATABASE_MODE;
+    else process.env.DATABASE_MODE = previous.mode;
+    if (previous.path === undefined) delete process.env.LOCAL_DATABASE_PATH;
+    else process.env.LOCAL_DATABASE_PATH = previous.path;
+    if (previous.key === undefined) {
+      delete process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY;
+    } else {
+      process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY = previous.key;
+    }
+    if (previous.enabled === undefined) delete process.env.LEARNING_V2_ENABLED;
+    else process.env.LEARNING_V2_ENABLED = previous.enabled;
+    if (previous.learningMode === undefined) {
+      delete process.env.SUPPLIER_LEARNING_MODE;
+    } else {
+      process.env.SUPPLIER_LEARNING_MODE = previous.learningMode;
+    }
+    await removeDatabase(databasePath);
+  }
+});
+
+test("legacy migration skips Exact suppliers without learning evidence", async () => {
+  const databasePath = testDatabasePath();
+  const previous = {
+    mode: process.env.DATABASE_MODE,
+    path: process.env.LOCAL_DATABASE_PATH,
+    key: process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY,
+    enabled: process.env.LEARNING_V2_ENABLED,
+    learningMode: process.env.SUPPLIER_LEARNING_MODE,
+  };
+  process.env.DATABASE_MODE = "sqlite";
+  process.env.LOCAL_DATABASE_PATH = databasePath;
+  process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY = "evidence-only-migration-key";
+  process.env.LEARNING_V2_ENABLED = "true";
+  process.env.SUPPLIER_LEARNING_MODE = "apply";
+
+  try {
+    clearRuntime();
+    const store = getStore();
+    store.invoices = [];
+    store.exactMasterDataCaches = [{
+      userId: "company_connection",
+      cache: createMockExactMasterData(),
+    }];
+
+    await persistLearningState(store, { requestId: "legacy-migration" });
+
+    const database = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      const row = database
+        .prepare("SELECT COUNT(*) AS count FROM supplier_learning_profiles")
+        .get() as { count: number };
+      assert.equal(row.count, 0);
+    } finally {
+      database.close();
+    }
   } finally {
     if (previous.mode === undefined) delete process.env.DATABASE_MODE;
     else process.env.DATABASE_MODE = previous.mode;

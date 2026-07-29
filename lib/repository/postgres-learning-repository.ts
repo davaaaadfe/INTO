@@ -18,7 +18,6 @@ import {
   decryptLearningArtifact,
   encryptLearningArtifact,
 } from "../services/learning-artifact-crypto";
-import { logger } from "../utils/logger";
 
 export const POSTGRES_LEARNING_MIGRATIONS = [
   `CREATE TABLE IF NOT EXISTS supplier_learning_schema_migrations (
@@ -269,22 +268,14 @@ export class PostgresLearningRepository {
   }
 
   async migrate() {
-    logger.info("learning_repository.schema_table_started");
     await this.query(POSTGRES_LEARNING_MIGRATIONS[0]);
-    logger.info("learning_repository.schema_table_completed");
-    logger.info("learning_repository.schema_version_started");
     const current = await this.schemaVersion();
-    logger.info("learning_repository.schema_version_completed", { current });
     if (current > LEARNING_REPOSITORY_SCHEMA_VERSION) {
       throw new Error(
         `Learning database schema ${current} is newer than supported schema ${LEARNING_REPOSITORY_SCHEMA_VERSION}.`
       );
     }
     if (current < LEARNING_REPOSITORY_SCHEMA_VERSION) {
-      logger.info("learning_repository.schema_migration_started", {
-        from: current,
-        to: LEARNING_REPOSITORY_SCHEMA_VERSION,
-      });
       await this.transaction([
         ...POSTGRES_LEARNING_MIGRATIONS.slice(1).map((query) => ({ query })),
         {
@@ -296,9 +287,6 @@ export class PostgresLearningRepository {
           ],
         },
       ]);
-      logger.info("learning_repository.schema_migration_completed", {
-        to: LEARNING_REPOSITORY_SCHEMA_VERSION,
-      });
     }
   }
 

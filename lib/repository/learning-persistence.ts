@@ -36,7 +36,6 @@ import {
   createInitialLearningStore,
   generatePurchaseJournalBooking,
 } from "../services/purchase-journal-intelligence";
-import { logger } from "../utils/logger";
 
 const COMPANY_CONNECTION_USER_ID = "company_connection";
 const RUNTIME_PATTERN_VERSION = "runtime-pattern-v1";
@@ -164,11 +163,6 @@ function learningAccountIds(store: IntoStore) {
     if (accountId) accountIds.add(canonicalAccount(store, accountId).accountId);
   };
 
-  for (const supplier of exactCache(store)?.suppliers ?? []) {
-    if (!supplier.id.startsWith("supplier-overview:") && supplier.isSupplier !== false) {
-      add(supplier.id);
-    }
-  }
   for (const profile of store.learning.supplierProfiles) add(profile.supplierAccountId);
   for (const example of store.learning.supplierExamples) add(example.supplierAccountId);
   for (const decision of store.learning.supplierSelections) add(decision.accountId);
@@ -178,6 +172,23 @@ function learningAccountIds(store: IntoStore) {
   for (const decision of store.learning.costUnitSelections) add(decision.supplierAccountId);
   for (const correction of store.learning.corrections) {
     add(correctionAccountId(store, correction, identities));
+  }
+  for (const invoice of store.invoices) {
+    const supplierAccountId =
+      invoice.purchaseJournal?.supplierResolution.selectedAccountId;
+    const confirmed =
+      Boolean(invoice.intelligenceApprovedAt) ||
+      (invoice.status === "Booked" && Boolean(invoice.exactBookingId));
+    if (
+      supplierAccountId &&
+      confirmed &&
+      invoice.processingPurpose !== "learning_only" &&
+      hasSourceEvidence(invoice) &&
+      hasTrainableFields(invoice) &&
+      supplierForAccount(store, supplierAccountId)
+    ) {
+      add(supplierAccountId);
+    }
   }
   return { accountIds: [...accountIds], identities };
 }
@@ -706,31 +717,19 @@ export async function persistLearningState(
   const repository = await configuredLearningRepository();
   if (!repository) return false;
   const createdAt = new Date().toISOString();
-  const startedAt = Date.now();
-  logger.info("learning_persistence.artifacts_started", {
-    invoiceCount: store.invoices.length,
-  });
   const artifactsByContentHash = await saveAnalysisArtifacts(
     store,
     repository,
     createdAt
   );
-  logger.info("learning_persistence.artifacts_completed", {
-    elapsedMs: Date.now() - startedAt,
-    artifactCount: artifactsByContentHash.size,
-  });
   const legacyMigration = context.requestId === "legacy-migration";
   const { accountIds, identities } = learningAccountIds(store);
-  logger.info("learning_persistence.accounts_started", {
-    accountCount: accountIds.length,
-    legacyMigration,
-  });
   const profilesByAccount = new Map<
     string,
     Awaited<ReturnType<typeof repository.ensureProfile>>
   >();
 
-  for (const [accountIndex, supplierAccountId] of accountIds.entries()) {
+  for (const supplierAccountId of accountIds) {
     const scope = scopeFor(store, supplierAccountId);
     const runtimeProfile = runtimeProfileForAccount(store, scope.supplierAccountId);
     const existingProfile = await repository.getProfile(scope);
@@ -904,13 +903,6 @@ export async function persistLearningState(
         );
       }
     }
-    if (accountIndex === 0 || (accountIndex + 1) % 100 === 0) {
-      logger.info("learning_persistence.accounts_progress", {
-        completed: accountIndex + 1,
-        total: accountIds.length,
-        elapsedMs: Date.now() - startedAt,
-      });
-    }
   }
 
   for (const example of store.learning.supplierExamples) {
@@ -1000,9 +992,6 @@ function restoredPattern(row: PatternRow) {
 export async function hydrateLearningState(store: IntoStore) {
   const repository = await configuredLearningRepository();
   if (!repository) return false;
-  logger.info("learning_hydration.artifacts_started", {
-    invoiceCount: store.invoices.length,
-  });
   for (const invoice of store.invoices) {
     if (!invoice.analysisArtifactId) continue;
     const artifact = await repository.readArtifact(invoice.analysisArtifactId);
@@ -1020,14 +1009,11 @@ export async function hydrateLearningState(store: IntoStore) {
     invoice.extractedData.documentAnalysis =
       analysis.documentAnalysis ?? invoice.extractedData.documentAnalysis;
   }
-  logger.info("learning_hydration.artifacts_completed");
   const versioned = store as IntoStore & { learningRepositoryMigratedAt?: string };
   if (!versioned.learningRepositoryMigratedAt) {
-    logger.info("learning_hydration.legacy_migration_started");
     versioned.legacyLearningRollback ??= rollbackLearningStore(store.learning);
     await persistLearningState(store, { requestId: "legacy-migration" });
     versioned.learningRepositoryMigratedAt = new Date().toISOString();
-    logger.info("learning_hydration.legacy_migration_completed");
   }
 
   const pendingCorrections = store.learning.corrections.filter(

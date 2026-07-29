@@ -8,7 +8,6 @@ import {
   learningFeatureFlags,
   supplierLearningMode,
 } from "../services/learning-feature-flags";
-import { logger } from "../utils/logger";
 
 export type ConfiguredLearningRepository =
   | SqliteLearningRepository
@@ -76,13 +75,7 @@ export async function configuredLearningRepository(): Promise<
         mode === "sqlite"
           ? new SqliteLearningRepository(sqliteDatabasePath())
           : new PostgresLearningRepository();
-      const migrationStartedAt = Date.now();
-      logger.info("learning_repository.migration_started", { mode });
       await repository.migrate();
-      logger.info("learning_repository.migration_completed", {
-        mode,
-        elapsedMs: Date.now() - migrationStartedAt,
-      });
       runtime.__INTO_LEARNING_REPOSITORY = repository;
       runtime.__INTO_LEARNING_REPOSITORY_IDENTITY = identity;
       return repository;

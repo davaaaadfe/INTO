@@ -374,6 +374,10 @@ export function getStore() {
   globalStore.__INTO_STORE.currentUserId = SHARED_USER_ID;
 
   for (const invoice of globalStore.__INTO_STORE.invoices) {
+    invoice.extractedData.lineItems ??= [];
+    for (const extraction of invoice.extractionHistory ?? []) {
+      extraction.extractedData.lineItems ??= [];
+    }
     if (!invoice.localFileStatus) {
       invoice.localFileStatus = invoice.storageKey ? "available" : "missing";
     }

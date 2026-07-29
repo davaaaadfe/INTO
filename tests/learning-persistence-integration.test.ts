@@ -540,7 +540,7 @@ test("persistent requests serialize reload-mutate-save cycles", async () => {
   }
 });
 
-test("reviewed and booked invoices contribute one immutable trusted example", async () => {
+test("reviewed and booked legacy invoices contribute one immutable trusted example", async () => {
   const databasePath = testDatabasePath();
   const previous = {
     mode: process.env.DATABASE_MODE,
@@ -566,6 +566,7 @@ test("reviewed and booked invoices contribute one immutable trusted example", as
     invoice.checksum = "sha256:reviewed-invoice";
     invoice.extractedData.rawText = "Invoice number PREDICTED-1 total 121.00";
     invoice.extractedData.documentTextMode = "plain_text";
+    invoice.extractedData.lineItems = undefined as never;
     invoice.extractionHistory = [
       {
         id: "review-original",
@@ -591,6 +592,9 @@ test("reviewed and booked invoices contribute one immutable trusted example", as
       candidates: [],
       reasoning: ["Unique Exact supplier."],
     };
+    getStore();
+    assert.deepEqual(invoice.extractedData.lineItems, []);
+    assert.deepEqual(invoice.extractionHistory[0]?.extractedData.lineItems, []);
     persistStoreSoon();
     await flushStoreToPersistence();
 
@@ -624,10 +628,18 @@ test("reviewed and booked invoices contribute one immutable trusted example", as
       assert.equal(
         (
           JSON.parse(example.final_fields_json) as {
-            extractedData: { referenceCode: string };
+            extractedData: { referenceCode: string; lineItems: unknown[] };
           }
         ).extractedData.referenceCode,
         "FINAL-1"
+      );
+      assert.deepEqual(
+        (
+          JSON.parse(example.final_fields_json) as {
+            extractedData: { lineItems: unknown[] };
+          }
+        ).extractedData.lineItems,
+        []
       );
       const artifact = database
         .prepare(

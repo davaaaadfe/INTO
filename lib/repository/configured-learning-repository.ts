@@ -1,9 +1,12 @@
-import { createHash } from "node:crypto";
 import {
   SqliteLearningRepository,
 } from "./learning-repository";
 import { PostgresLearningRepository } from "./postgres-learning-repository";
-import { databaseMode, sqliteDatabasePath } from "./sqlite-store";
+import {
+  databaseMode,
+  databasePersistenceIdentity,
+  sqliteDatabasePath,
+} from "./sqlite-store";
 import {
   learningFeatureFlags,
   supplierLearningMode,
@@ -21,20 +24,6 @@ const runtime = globalThis as typeof globalThis & {
   >;
   __INTO_CLOSE_LEARNING_REPOSITORY?: () => void;
 };
-
-function repositoryIdentity() {
-  const mode = databaseMode();
-  if (mode === "sqlite") {
-    return `sqlite:${sqliteDatabasePath()}`;
-  }
-  if (mode === "postgres") {
-    const databaseUrl = process.env.DATABASE_URL?.trim() ?? "";
-    return databaseUrl
-      ? `postgres:${createHash("sha256").update(databaseUrl).digest("hex")}`
-      : "postgres:unconfigured";
-  }
-  return "memory";
-}
 
 function closeCurrentRepository() {
   const current = runtime.__INTO_LEARNING_REPOSITORY;
@@ -61,7 +50,7 @@ export async function configuredLearningRepository(): Promise<
     return null;
   }
 
-  const identity = repositoryIdentity();
+  const identity = databasePersistenceIdentity();
   if (
     runtime.__INTO_LEARNING_REPOSITORY &&
     runtime.__INTO_LEARNING_REPOSITORY_IDENTITY === identity

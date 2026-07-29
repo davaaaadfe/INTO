@@ -995,7 +995,10 @@ function restoredPattern(row: PatternRow) {
   return mapping.pattern as SupplierLearningPattern;
 }
 
-export async function hydrateLearningState(store: IntoStore) {
+export async function hydrateLearningState(
+  store: IntoStore,
+  hydrateNormalizedLearning = true
+) {
   const repository = await configuredLearningRepository();
   if (!repository) return false;
   for (const invoice of store.invoices) {
@@ -1021,6 +1024,7 @@ export async function hydrateLearningState(store: IntoStore) {
     await persistLearningState(store, { requestId: "legacy-migration" });
     versioned.learningRepositoryMigratedAt = new Date().toISOString();
   }
+  if (!hydrateNormalizedLearning) return true;
 
   const pendingCorrections = store.learning.corrections.filter(
     (correction) => correction.trustState === "pending"

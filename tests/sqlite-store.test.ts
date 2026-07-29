@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { resolve } from "node:path";
+import { databasePersistenceIdentity } from "../lib/repository/sqlite-store";
 import {
   flushStoreToPersistence,
   getExactConnection,
@@ -112,6 +113,30 @@ test("the Node test runner uses memory unless a database mode is explicit", () =
     else environment.NODE_ENV = previousNodeEnv;
     if (previousMode === undefined) delete process.env.DATABASE_MODE;
     else process.env.DATABASE_MODE = previousMode;
+  }
+});
+
+test("PostgreSQL persistence identities isolate database URLs without exposing them", () => {
+  const previousMode = process.env.DATABASE_MODE;
+  const previousUrl = process.env.DATABASE_URL;
+  try {
+    process.env.DATABASE_MODE = "postgres";
+    process.env.DATABASE_URL = "postgresql://first.example/into";
+    const firstIdentity = databasePersistenceIdentity();
+    process.env.DATABASE_URL = "postgresql://second.example/into";
+    const secondIdentity = databasePersistenceIdentity();
+    delete process.env.DATABASE_URL;
+    const unconfiguredIdentity = databasePersistenceIdentity();
+
+    assert.match(firstIdentity, /^postgres:[a-f0-9]{64}$/);
+    assert.notEqual(secondIdentity, firstIdentity);
+    assert.doesNotMatch(firstIdentity, /first\.example/);
+    assert.equal(unconfiguredIdentity, "postgres:unconfigured");
+  } finally {
+    if (previousMode === undefined) delete process.env.DATABASE_MODE;
+    else process.env.DATABASE_MODE = previousMode;
+    if (previousUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previousUrl;
   }
 });
 

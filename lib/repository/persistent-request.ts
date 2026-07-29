@@ -1,6 +1,6 @@
 import {
   flushStoreToPersistence,
-  hydrateStoreFromPersistence,
+  hydrateStoreForPersistentRequest,
   setLearningPersistenceContext,
 } from "./invoice-store";
 import { randomUUID } from "node:crypto";
@@ -30,7 +30,7 @@ export async function withPersistentStore<T>(
   };
   setLearningPersistenceContext(context);
   try {
-    await hydrateStoreFromPersistence(true);
+    await hydrateStoreForPersistentRequest();
     try {
       return await handler();
     } finally {

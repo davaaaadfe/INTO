@@ -73,11 +73,11 @@ import {
   saveStoreSnapshot,
 } from "./postgres-store";
 import {
+  databasePersistenceIdentity,
   databaseMode,
   loadSqliteStoreSnapshot,
   saveSqliteStoreSnapshot,
   SnapshotRevisionConflictError,
-  sqliteDatabasePath,
 } from "./sqlite-store";
 import { CURRENT_STORE_SCHEMA_VERSION } from "./store-migrations";
 import {
@@ -423,11 +423,6 @@ export function getStore() {
   return globalStore.__INTO_STORE;
 }
 
-function persistenceIdentity() {
-  const mode = databaseMode();
-  return mode === "sqlite" ? `${mode}:${sqliteDatabasePath()}` : mode;
-}
-
 async function loadConfiguredStoreSnapshot() {
   if (databaseMode() === "sqlite") {
     return loadSqliteStoreSnapshot();
@@ -486,8 +481,11 @@ async function saveConfiguredStoreSnapshot(
   }
 }
 
-export async function hydrateStoreFromPersistence(force = false) {
-  const identity = persistenceIdentity();
+async function hydrateConfiguredStore(
+  force: boolean,
+  reuseUnchangedNormalizedLearning: boolean
+) {
+  const identity = databasePersistenceIdentity();
   if (
     databaseMode() === "memory" ||
     (!force && globalStore.__INTO_STORE_HYDRATED_FOR === identity)
@@ -500,16 +498,35 @@ export async function hydrateStoreFromPersistence(force = false) {
   if (!globalStore.__INTO_STORE_HYDRATING) {
     globalStore.__INTO_STORE_HYDRATING = loadConfiguredStoreSnapshot()
       .then((snapshot) => {
+        const previousStore = globalStore.__INTO_STORE;
+        const snapshotLearning = snapshot?.learning;
+        const reuseNormalizedLearning = Boolean(
+          reuseUnchangedNormalizedLearning &&
+            snapshot?.learningRepositoryMigratedAt &&
+            globalStore.__INTO_STORE_HYDRATED_FOR === identity &&
+            previousStore?.revision === snapshot.revision
+        );
         if (snapshot) {
           globalStore.__INTO_STORE = snapshot;
+          if (reuseNormalizedLearning && previousStore) {
+            snapshot.learning = previousStore.learning;
+          }
         } else {
           globalStore.__INTO_STORE = createInitialStore();
           globalStore.__INTO_STORE_PERSISTING = saveConfiguredStoreSnapshot(
             globalStore.__INTO_STORE
           );
         }
-        return hydrateLearningState(getStore()).then(
+        return hydrateLearningState(getStore(), !reuseNormalizedLearning).then(
           (learningEnabled) => {
+            if (
+              !learningEnabled &&
+              reuseNormalizedLearning &&
+              snapshot &&
+              snapshotLearning
+            ) {
+              snapshot.learning = snapshotLearning;
+            }
             if (
               learningEnabled &&
               !snapshot?.learningRepositoryMigratedAt
@@ -518,7 +535,11 @@ export async function hydrateStoreFromPersistence(force = false) {
               globalStore.__INTO_STORE_DIRTY_REVISION =
                 (globalStore.__INTO_STORE_DIRTY_REVISION ?? 0) + 1;
             }
-            globalStore.__INTO_STORE_HYDRATED_FOR = identity;
+            if (learningEnabled) {
+              globalStore.__INTO_STORE_HYDRATED_FOR = identity;
+            } else {
+              delete globalStore.__INTO_STORE_HYDRATED_FOR;
+            }
           }
         );
       })
@@ -528,6 +549,14 @@ export async function hydrateStoreFromPersistence(force = false) {
   }
 
   await globalStore.__INTO_STORE_HYDRATING;
+}
+
+export function hydrateStoreFromPersistence(force = false) {
+  return hydrateConfiguredStore(force, false);
+}
+
+export function hydrateStoreForPersistentRequest() {
+  return hydrateConfiguredStore(true, true);
 }
 
 function queueStorePersistence() {

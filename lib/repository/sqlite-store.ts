@@ -1,4 +1,5 @@
 import { mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { IntoStore } from "./invoice-store";
@@ -44,6 +45,18 @@ export function sqliteDatabasePath() {
   return isAbsolute(configured)
     ? configured
     : resolve(/* turbopackIgnore: true */ process.cwd(), configured);
+}
+
+export function databasePersistenceIdentity() {
+  const mode = databaseMode();
+  if (mode === "sqlite") return `${mode}:${sqliteDatabasePath()}`;
+  if (mode === "postgres") {
+    const databaseUrl = process.env.DATABASE_URL?.trim() ?? "";
+    return databaseUrl
+      ? `${mode}:${createHash("sha256").update(databaseUrl).digest("hex")}`
+      : `${mode}:unconfigured`;
+  }
+  return mode;
 }
 
 export function isSqlitePersistenceEnabled() {

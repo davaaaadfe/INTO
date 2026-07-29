@@ -21,6 +21,7 @@ import {
   configuredLearningRepository,
   closeConfiguredLearningRepository,
 } from "../lib/repository/configured-learning-repository";
+import { SqliteLearningRepository } from "../lib/repository/learning-repository";
 import {
   persistAnalysisArtifacts,
   persistLearningState,
@@ -786,6 +787,210 @@ test("persistent requests serialize reload-mutate-save cycles", async () => {
     else process.env.LOCAL_DATABASE_PATH = previousPath;
     if (previousLearningEnabled === undefined) delete process.env.LEARNING_V2_ENABLED;
     else process.env.LEARNING_V2_ENABLED = previousLearningEnabled;
+    await removeDatabase(databasePath);
+  }
+});
+
+test("persistent requests reuse unchanged normalized learning but refresh artifacts and changed snapshots", async () => {
+  const databasePath = testDatabasePath();
+  const previous = {
+    mode: process.env.DATABASE_MODE,
+    path: process.env.LOCAL_DATABASE_PATH,
+    key: process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY,
+    enabled: process.env.LEARNING_V2_ENABLED,
+    learningMode: process.env.SUPPLIER_LEARNING_MODE,
+  };
+  process.env.DATABASE_MODE = "sqlite";
+  process.env.LOCAL_DATABASE_PATH = databasePath;
+  process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY = "request-hydration-key";
+  process.env.LEARNING_V2_ENABLED = "true";
+  process.env.SUPPLIER_LEARNING_MODE = "apply";
+
+  let restoreRepositoryMethods: (() => void) | undefined;
+  try {
+    clearRuntime();
+    const seededStore = getStore();
+    const invoice = seededStore.invoices[0]!;
+    invoice.checksum = "sha256:request-hydration-artifact";
+    invoice.extractedData.rawText = "Request hydration OCR evidence";
+    seededStore.learningRepositoryMigratedAt = "2026-07-29T10:00:00.000Z";
+    assert.equal(await persistAnalysisArtifacts(seededStore), true);
+
+    const repository = await configuredLearningRepository();
+    assert.ok(repository instanceof SqliteLearningRepository);
+    const profile = await repository.ensureProfile({
+      companyId: "into-company",
+      divisionCode: "unassigned",
+      supplierAccountId: "supplier-request-hydration",
+      fallbackSupplierCode: "HYDRATE",
+      createdAt: "2026-07-29T10:00:00.000Z",
+    });
+    await repository.saveExample({
+      id: "example-request-hydration",
+      companyId: profile.companyId,
+      divisionCode: profile.divisionCode,
+      supplierAccountId: profile.supplierAccountId,
+      generation: profile.generation,
+      invoiceId: invoice.id,
+      artifactId: invoice.analysisArtifactId,
+      contentHash: invoice.checksum,
+      originalFilename: invoice.fileName,
+      originalPrediction: {},
+      finalFields: {},
+      bookingLines: [],
+      fingerprint: "request-layout",
+      fingerprintVersion: "layout-v1",
+      validationResult: { valid: true },
+      processingPurpose: "learning_only",
+      source: "explicit_learn",
+      trustState: "trusted",
+      trigger: "learn",
+      actorId: "shared_user",
+      sessionCorrelationId: "request-hydration-session",
+      requestId: "request-hydration-request",
+      createdAt: "2026-07-29T10:00:00.000Z",
+    });
+    await saveSqliteStoreSnapshot(
+      snapshotWithoutDocumentEvidence(seededStore),
+      databasePath
+    );
+    clearRuntime();
+
+    const requestRepository = await configuredLearningRepository();
+    assert.ok(requestRepository instanceof SqliteLearningRepository);
+    let profileReads = 0;
+    let exampleReads = 0;
+    let patternReads = 0;
+    const listProfiles = requestRepository.listProfiles.bind(requestRepository);
+    const listExamples = requestRepository.listExamples.bind(requestRepository);
+    const listPatterns = requestRepository.listPatterns.bind(requestRepository);
+    requestRepository.listProfiles = async (...args) => {
+      profileReads += 1;
+      return listProfiles(...args);
+    };
+    requestRepository.listExamples = async (...args) => {
+      exampleReads += 1;
+      return listExamples(...args);
+    };
+    requestRepository.listPatterns = async (...args) => {
+      patternReads += 1;
+      return listPatterns(...args);
+    };
+    restoreRepositoryMethods = () => {
+      requestRepository.listProfiles = listProfiles;
+      requestRepository.listExamples = listExamples;
+      requestRepository.listPatterns = listPatterns;
+    };
+
+    const first = await withPersistentStore(() => ({
+      rawText: getStore().invoices[0]?.extractedData.rawText,
+      learning: getStore().learning,
+    }));
+    assert.ok(!(first instanceof Response));
+    assert.equal(first.rawText, "Request hydration OCR evidence");
+    assert.equal(first.learning.supplierExamples.length, 1);
+    const readsAfterFirst = {
+      profiles: profileReads,
+      examples: exampleReads,
+      patterns: patternReads,
+    };
+    assert.deepEqual(readsAfterFirst, {
+      profiles: 1,
+      examples: 1,
+      patterns: 1,
+    });
+
+    const externalDatabase = new DatabaseSync(databasePath);
+    try {
+      externalDatabase.exec(`
+        UPDATE supplier_learning_examples SET artifact_id = NULL;
+        DELETE FROM document_analysis_artifacts;
+      `);
+    } finally {
+      externalDatabase.close();
+    }
+
+    const second = await withPersistentStore(() => ({
+      rawText: getStore().invoices[0]?.extractedData.rawText,
+      learning: getStore().learning,
+    }));
+    assert.ok(!(second instanceof Response));
+    assert.equal(second.rawText, undefined);
+    assert.equal(second.learning, first.learning);
+    assert.deepEqual(
+      {
+        profiles: profileReads,
+        examples: exampleReads,
+        patterns: patternReads,
+      },
+      readsAfterFirst
+    );
+
+    process.env.LEARNING_V2_ENABLED = "false";
+    const disabled = await withPersistentStore(() => ({
+      learning: getStore().learning,
+    }));
+    assert.ok(!(disabled instanceof Response));
+    assert.notEqual(disabled.learning, second.learning);
+    assert.deepEqual(disabled.learning.supplierProfiles, []);
+    assert.deepEqual(disabled.learning.supplierExamples, []);
+    assert.deepEqual(disabled.learning.supplierPatterns, []);
+    assert.deepEqual(
+      {
+        profiles: profileReads,
+        examples: exampleReads,
+        patterns: patternReads,
+      },
+      readsAfterFirst
+    );
+    process.env.LEARNING_V2_ENABLED = "true";
+
+    const reenabled = await withPersistentStore(() => ({
+      learning: getStore().learning,
+    }));
+    assert.ok(!(reenabled instanceof Response));
+    assert.notEqual(reenabled.learning, disabled.learning);
+    assert.equal(reenabled.learning.supplierProfiles.length, 1);
+    assert.equal(reenabled.learning.supplierExamples.length, 1);
+    assert.equal(profileReads, readsAfterFirst.profiles + 1);
+    assert.equal(exampleReads, readsAfterFirst.examples + 1);
+    assert.equal(patternReads, readsAfterFirst.patterns + 1);
+
+    const externalSnapshot = await loadSqliteStoreSnapshot(databasePath);
+    assert.ok(externalSnapshot);
+    externalSnapshot.auditEvents.push({ id: "external-hydration-change" } as never);
+    await saveSqliteStoreSnapshot(externalSnapshot, databasePath);
+
+    const third = await withPersistentStore(() => ({
+      hasExternalChange: getStore().auditEvents.some(
+        (event) => event.id === "external-hydration-change"
+      ),
+      learning: getStore().learning,
+    }));
+    assert.ok(!(third instanceof Response));
+    assert.equal(third.hasExternalChange, true);
+    assert.notEqual(third.learning, reenabled.learning);
+    assert.equal(profileReads, readsAfterFirst.profiles + 2);
+    assert.equal(exampleReads, readsAfterFirst.examples + 2);
+    assert.equal(patternReads, readsAfterFirst.patterns + 2);
+  } finally {
+    restoreRepositoryMethods?.();
+    if (previous.mode === undefined) delete process.env.DATABASE_MODE;
+    else process.env.DATABASE_MODE = previous.mode;
+    if (previous.path === undefined) delete process.env.LOCAL_DATABASE_PATH;
+    else process.env.LOCAL_DATABASE_PATH = previous.path;
+    if (previous.key === undefined) {
+      delete process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY;
+    } else {
+      process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY = previous.key;
+    }
+    if (previous.enabled === undefined) delete process.env.LEARNING_V2_ENABLED;
+    else process.env.LEARNING_V2_ENABLED = previous.enabled;
+    if (previous.learningMode === undefined) {
+      delete process.env.SUPPLIER_LEARNING_MODE;
+    } else {
+      process.env.SUPPLIER_LEARNING_MODE = previous.learningMode;
+    }
     await removeDatabase(databasePath);
   }
 });

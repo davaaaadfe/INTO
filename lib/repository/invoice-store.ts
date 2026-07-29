@@ -503,7 +503,7 @@ export async function hydrateStoreFromPersistence(force = false) {
             globalStore.__INTO_STORE
           );
         }
-        return hydrateLearningState(globalStore.__INTO_STORE).then(
+        return hydrateLearningState(getStore()).then(
           (learningEnabled) => {
             if (
               learningEnabled &&

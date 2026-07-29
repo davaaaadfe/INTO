@@ -145,6 +145,75 @@ test("SQLite rejects a future schema before applying current DDL", async () => {
   }
 });
 
+test("lists only profiles with learning evidence or reset history", async () => {
+  await withRepository(async (repository) => {
+    const createdAt = "2026-07-21T10:00:00.000Z";
+    const emptyProfile = await repository.ensureProfile({
+      ...scope,
+      fallbackSupplierCode: "SUP-A",
+      createdAt,
+    });
+    await repository.saveAlias({
+      id: "alias-exact-only",
+      ...scope,
+      generation: emptyProfile.generation,
+      kind: "vat",
+      normalizedValue: "NL123456789B01",
+      source: "exact",
+      createdAt,
+    });
+
+    const patternScope = {
+      ...scope,
+      supplierAccountId: "exact-supplier-b",
+    };
+    const patternProfile = await repository.ensureProfile({
+      ...patternScope,
+      fallbackSupplierCode: "SUP-B",
+      createdAt,
+    });
+    await repository.savePattern({
+      id: "pattern-evidence",
+      ...patternScope,
+      generation: patternProfile.generation,
+      formatCluster: "layout-a",
+      field: "referenceCode",
+      patternKey: "invoice-number:right",
+      supportCount: 1,
+      successCount: 1,
+      correctionCount: 0,
+      driftState: "none",
+      modelVersion: "locator-v1",
+      createdAt,
+    });
+
+    const resetScope = {
+      ...scope,
+      supplierAccountId: "exact-supplier-c",
+    };
+    const resetProfile = await repository.ensureProfile({
+      ...resetScope,
+      fallbackSupplierCode: "SUP-C",
+      createdAt,
+    });
+    await repository.resetSupplier({
+      ...resetScope,
+      expectedGeneration: resetProfile.generation,
+      actorId: "shared_user",
+      sessionCorrelationId: "session-reset",
+      requestId: "request-reset",
+      createdAt: "2026-07-22T10:00:00.000Z",
+    });
+
+    assert.deepEqual(
+      (
+        await repository.listProfiles(scope.companyId, scope.divisionCode)
+      ).map((profile) => profile.supplierAccountId),
+      ["exact-supplier-b", "exact-supplier-c"]
+    );
+  });
+});
+
 test("artifacts are encrypted, content-hash deduplicated, and bound to their hash", async () => {
   await withRepository(async (repository) => {
     const artifact = await repository.saveArtifact({

@@ -503,9 +503,32 @@ export class SqliteLearningRepository {
   async listProfiles(companyId: string, divisionCode: string) {
     const rows = this.database
       .prepare(
-        `SELECT * FROM supplier_learning_profiles
-         WHERE company_id = ? AND division_code = ?
-         ORDER BY supplier_account_id`
+        `SELECT profiles.* FROM supplier_learning_profiles AS profiles
+         WHERE profiles.company_id = ? AND profiles.division_code = ?
+           AND (
+             profiles.learned_count > 0
+             OR profiles.last_reset_at IS NOT NULL
+             OR EXISTS (
+               SELECT 1 FROM supplier_learning_examples AS examples
+               WHERE examples.company_id = profiles.company_id
+                 AND examples.division_code = profiles.division_code
+                 AND examples.supplier_account_id = profiles.supplier_account_id
+             )
+             OR EXISTS (
+               SELECT 1 FROM supplier_learning_patterns AS patterns
+               WHERE patterns.company_id = profiles.company_id
+                 AND patterns.division_code = profiles.division_code
+                 AND patterns.supplier_account_id = profiles.supplier_account_id
+             )
+             OR EXISTS (
+               SELECT 1 FROM supplier_identity_aliases AS aliases
+               WHERE aliases.company_id = profiles.company_id
+                 AND aliases.division_code = profiles.division_code
+                 AND aliases.supplier_account_id = profiles.supplier_account_id
+                 AND aliases.source <> 'exact'
+             )
+           )
+         ORDER BY profiles.supplier_account_id`
       )
       .all(companyId, divisionCode) as ProfileRow[];
     return rows.map(profileFromRow);

@@ -84,6 +84,7 @@ import {
   hydrateLearningState,
   persistAnalysisArtifacts,
   persistLearningState,
+  pruneExpiredLearningArtifacts,
   snapshotWithoutActiveLearning,
   snapshotWithoutDocumentEvidence,
   type LearningPersistenceContext,
@@ -1901,6 +1902,8 @@ export async function cleanupTemporaryInvoiceFiles(referenceDate = new Date()) {
   const retentionMs = temporaryInvoiceRetentionDays() * 24 * 60 * 60 * 1000;
   const cutoff = referenceDate.getTime() - retentionMs;
   const deletedInvoiceIds: string[] = [];
+  const learningArtifactsPruned =
+    await pruneExpiredLearningArtifacts(referenceDate);
 
   for (const invoice of getStore().invoices) {
     if (!invoice.storageKey || invoice.localFileStatus !== "available") {
@@ -1945,6 +1948,7 @@ export async function cleanupTemporaryInvoiceFiles(referenceDate = new Date()) {
     checked: getStore().invoices.length,
     deleted: deletedInvoiceIds.length,
     invoiceIds: deletedInvoiceIds,
+    learningArtifactsPruned,
   };
 }
 

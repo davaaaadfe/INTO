@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { IntoStore } from "../lib/repository/invoice-store";
 import {
+  cleanupTemporaryInvoiceFiles,
   flushStoreToPersistence,
   getExactMasterData,
   getStore,
@@ -17,9 +18,11 @@ import {
 } from "../lib/repository/invoice-store";
 import { withPersistentStore } from "../lib/repository/persistent-request";
 import {
+  configuredLearningRepository,
   closeConfiguredLearningRepository,
 } from "../lib/repository/configured-learning-repository";
 import {
+  persistAnalysisArtifacts,
   persistLearningState,
   snapshotWithoutDocumentEvidence,
 } from "../lib/repository/learning-persistence";
@@ -67,6 +70,152 @@ async function removeDatabase(databasePath: string) {
   await rm(`${databasePath}-shm`, { force: true });
   await rm(`${databasePath}-wal`, { force: true });
 }
+
+test("storage cleanup prunes only expired encrypted learning artifacts", async () => {
+  const databasePath = testDatabasePath();
+  const previous = {
+    mode: process.env.DATABASE_MODE,
+    path: process.env.LOCAL_DATABASE_PATH,
+    key: process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY,
+    enabled: process.env.LEARNING_V2_ENABLED,
+    learningMode: process.env.SUPPLIER_LEARNING_MODE,
+    retentionDays: process.env.LEARNING_ARTIFACT_RETENTION_DAYS,
+  };
+  process.env.DATABASE_MODE = "sqlite";
+  process.env.LOCAL_DATABASE_PATH = databasePath;
+  process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY = "cleanup-artifact-key";
+  process.env.LEARNING_V2_ENABLED = "true";
+  process.env.SUPPLIER_LEARNING_MODE = "apply";
+  process.env.LEARNING_ARTIFACT_RETENTION_DAYS = "30";
+
+  try {
+    clearRuntime();
+    const store = getStore();
+    const expiredInvoice = structuredClone(store.invoices[0]!);
+    expiredInvoice.id = "expired-artifact-invoice";
+    expiredInvoice.checksum = "sha256:expired-cleanup-artifact";
+    expiredInvoice.localFileStatus = "missing";
+    expiredInvoice.createdAt = "2026-05-01T00:00:00.000Z";
+    expiredInvoice.updatedAt = "2026-05-01T00:00:00.000Z";
+    expiredInvoice.extractedData.rawText =
+      "Expired encrypted learning artifact";
+    const futureInvoice = structuredClone(expiredInvoice);
+    futureInvoice.id = "future-artifact-invoice";
+    futureInvoice.checksum = "sha256:future-cleanup-artifact";
+    futureInvoice.createdAt = "2026-07-15T00:00:00.000Z";
+    futureInvoice.updatedAt = "2026-07-15T00:00:00.000Z";
+    futureInvoice.extractedData.rawText = "Future encrypted learning artifact";
+    store.invoices = [expiredInvoice, futureInvoice];
+
+    assert.equal(await persistAnalysisArtifacts(store), true);
+    const repository = await configuredLearningRepository();
+    assert.ok(repository);
+    const profile = await repository.ensureProfile({
+      companyId: "into-company",
+      divisionCode: "unassigned",
+      supplierAccountId: "supplier-cleanup",
+      fallbackSupplierCode: "CLEANUP",
+      createdAt: "2026-05-01T00:00:00.000Z",
+    });
+    await repository.saveExample({
+      id: "example-expired-cleanup",
+      companyId: profile.companyId,
+      divisionCode: profile.divisionCode,
+      supplierAccountId: profile.supplierAccountId,
+      generation: profile.generation,
+      invoiceId: expiredInvoice.id,
+      artifactId: expiredInvoice.analysisArtifactId,
+      contentHash: expiredInvoice.checksum,
+      originalFilename: expiredInvoice.fileName,
+      originalPrediction: {},
+      finalFields: {},
+      bookingLines: [],
+      fingerprint: "cleanup-layout",
+      fingerprintVersion: "layout-v1",
+      validationResult: { valid: true },
+      processingPurpose: "learning_only",
+      source: "explicit_learn",
+      trustState: "trusted",
+      trigger: "learn",
+      actorId: "shared_user",
+      sessionCorrelationId: "cleanup-session",
+      requestId: "cleanup-request",
+      createdAt: "2026-05-01T00:00:00.000Z",
+    });
+
+    let database = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      const artifacts = database
+        .prepare(
+          `SELECT content_hash, raw_text_ciphertext
+           FROM document_analysis_artifacts ORDER BY content_hash`
+        )
+        .all() as Array<{
+        content_hash: string;
+        raw_text_ciphertext: string;
+      }>;
+      assert.equal(artifacts.length, 2);
+      assert.ok(
+        artifacts.every(
+          (artifact) =>
+            /^v1\./.test(artifact.raw_text_ciphertext) &&
+            !artifact.raw_text_ciphertext.includes("learning artifact")
+        )
+      );
+    } finally {
+      database.close();
+    }
+
+    const cleanup = await cleanupTemporaryInvoiceFiles(
+      new Date("2026-07-29T00:00:00.000Z")
+    );
+
+    assert.equal(cleanup.learningArtifactsPruned, 1);
+    database = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      const artifacts = database
+        .prepare(
+          "SELECT content_hash FROM document_analysis_artifacts ORDER BY content_hash"
+        )
+        .all() as Array<{ content_hash: string }>;
+      assert.deepEqual(
+        artifacts.map((artifact) => artifact.content_hash),
+        ["sha256:future-cleanup-artifact"]
+      );
+      const example = database
+        .prepare(
+          "SELECT artifact_id FROM supplier_learning_examples WHERE id = ?"
+        )
+        .get("example-expired-cleanup") as { artifact_id: string | null };
+      assert.equal(example.artifact_id, null);
+    } finally {
+      database.close();
+    }
+  } finally {
+    if (previous.mode === undefined) delete process.env.DATABASE_MODE;
+    else process.env.DATABASE_MODE = previous.mode;
+    if (previous.path === undefined) delete process.env.LOCAL_DATABASE_PATH;
+    else process.env.LOCAL_DATABASE_PATH = previous.path;
+    if (previous.key === undefined) {
+      delete process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY;
+    } else {
+      process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY = previous.key;
+    }
+    if (previous.enabled === undefined) delete process.env.LEARNING_V2_ENABLED;
+    else process.env.LEARNING_V2_ENABLED = previous.enabled;
+    if (previous.learningMode === undefined) {
+      delete process.env.SUPPLIER_LEARNING_MODE;
+    } else {
+      process.env.SUPPLIER_LEARNING_MODE = previous.learningMode;
+    }
+    if (previous.retentionDays === undefined) {
+      delete process.env.LEARNING_ARTIFACT_RETENTION_DAYS;
+    } else {
+      process.env.LEARNING_ARTIFACT_RETENTION_DAYS = previous.retentionDays;
+    }
+    await removeDatabase(databasePath);
+  }
+});
 
 test("booking attempt snapshots omit nested document evidence without losing audit data", () => {
   const store = structuredClone(getStore());

@@ -710,6 +710,12 @@ export async function persistAnalysisArtifacts(store: IntoStore) {
   return true;
 }
 
+export async function pruneExpiredLearningArtifacts(referenceDate = new Date()) {
+  const repository = await configuredLearningRepository();
+  if (!repository) return 0;
+  return repository.pruneExpiredArtifacts(referenceDate.toISOString());
+}
+
 export async function persistLearningState(
   store: IntoStore,
   context: LearningPersistenceContext = {}

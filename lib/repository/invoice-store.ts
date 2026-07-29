@@ -88,6 +88,7 @@ import {
   snapshotWithoutDocumentEvidence,
   type LearningPersistenceContext,
 } from "./learning-persistence";
+import { logger } from "../utils/logger";
 
 const sharedUserPermissions: PermissionAction[] = [
   ...SHARED_ACCESS_PERMISSIONS,
@@ -493,8 +494,15 @@ export async function hydrateStoreFromPersistence(force = false) {
   await globalStore.__INTO_STORE_PERSISTING;
 
   if (!globalStore.__INTO_STORE_HYDRATING) {
+    const hydrationStartedAt = Date.now();
+    logger.info("persistent_store.snapshot_load_started", { identity });
     globalStore.__INTO_STORE_HYDRATING = loadConfiguredStoreSnapshot()
       .then((snapshot) => {
+        logger.info("persistent_store.snapshot_load_completed", {
+          identity,
+          elapsedMs: Date.now() - hydrationStartedAt,
+          found: Boolean(snapshot),
+        });
         if (snapshot) {
           globalStore.__INTO_STORE = snapshot;
         } else {
@@ -503,8 +511,14 @@ export async function hydrateStoreFromPersistence(force = false) {
             globalStore.__INTO_STORE
           );
         }
+        logger.info("persistent_store.learning_hydration_started", { identity });
         return hydrateLearningState(getStore()).then(
           (learningEnabled) => {
+            logger.info("persistent_store.learning_hydration_completed", {
+              identity,
+              elapsedMs: Date.now() - hydrationStartedAt,
+              learningEnabled,
+            });
             if (
               learningEnabled &&
               !snapshot?.learningRepositoryMigratedAt

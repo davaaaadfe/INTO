@@ -995,16 +995,39 @@ function restoredPattern(row: PatternRow) {
   return mapping.pattern as SupplierLearningPattern;
 }
 
+function clearDocumentEvidence(invoice: UploadedInvoice) {
+  delete invoice.extractedData.rawText;
+  delete invoice.extractedData.extractionEvidence;
+  delete invoice.extractedData.documentAnalysis;
+}
+
 export async function hydrateLearningState(
   store: IntoStore,
-  hydrateNormalizedLearning = true
+  hydrateNormalizedLearning = true,
+  reuseHydratedArtifacts = false
 ) {
   const repository = await configuredLearningRepository();
   if (!repository) return false;
+  const existingArtifactIds = reuseHydratedArtifacts
+    ? await repository.existingArtifactIds(
+        store.invoices.flatMap((invoice) =>
+          invoice.analysisArtifactId ? [invoice.analysisArtifactId] : []
+        )
+      )
+    : null;
   for (const invoice of store.invoices) {
     if (!invoice.analysisArtifactId) continue;
+    if (existingArtifactIds) {
+      if (!existingArtifactIds.has(invoice.analysisArtifactId)) {
+        clearDocumentEvidence(invoice);
+      }
+      continue;
+    }
     const artifact = await repository.readArtifact(invoice.analysisArtifactId);
-    if (!artifact) continue;
+    if (!artifact) {
+      clearDocumentEvidence(invoice);
+      continue;
+    }
     const analysis = artifact.analysis as {
       documentTextMode?: ExtractedInvoiceData["documentTextMode"];
       extractionEvidence?: ExtractedInvoiceData["extractionEvidence"];

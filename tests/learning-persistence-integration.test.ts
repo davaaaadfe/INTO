@@ -813,6 +813,20 @@ test("persistent requests reuse unchanged normalized learning but refresh artifa
     const invoice = seededStore.invoices[0]!;
     invoice.checksum = "sha256:request-hydration-artifact";
     invoice.extractedData.rawText = "Request hydration OCR evidence";
+    invoice.extractedData.extractionEvidence = {
+      referenceCode: {
+        sourceLabel: "Reference",
+        rawValue: "Request hydration reference",
+        confidence: 0.99,
+      },
+    };
+    invoice.extractedData.documentAnalysis = {
+      pages: [],
+      fieldCandidates: [],
+      confidence: 0.99,
+      provider: { name: "integration-provider", model: "fixture-v1" },
+      sourceMode: "plain_text",
+    };
     seededStore.learningRepositoryMigratedAt = "2026-07-29T10:00:00.000Z";
     assert.equal(await persistAnalysisArtifacts(seededStore), true);
 
@@ -861,9 +875,20 @@ test("persistent requests reuse unchanged normalized learning but refresh artifa
     let profileReads = 0;
     let exampleReads = 0;
     let patternReads = 0;
+    let artifactReads = 0;
+    let artifactExistenceReads = 0;
     const listProfiles = requestRepository.listProfiles.bind(requestRepository);
     const listExamples = requestRepository.listExamples.bind(requestRepository);
     const listPatterns = requestRepository.listPatterns.bind(requestRepository);
+    const readArtifact = requestRepository.readArtifact.bind(requestRepository);
+    const countedReadArtifact: typeof requestRepository.readArtifact =
+      async (...args) => {
+        artifactReads += 1;
+        return readArtifact(...args);
+      };
+    const existingArtifactIds =
+      requestRepository.existingArtifactIds.bind(requestRepository);
+    const saveArtifact = requestRepository.saveArtifact.bind(requestRepository);
     requestRepository.listProfiles = async (...args) => {
       profileReads += 1;
       return listProfiles(...args);
@@ -876,13 +901,22 @@ test("persistent requests reuse unchanged normalized learning but refresh artifa
       patternReads += 1;
       return listPatterns(...args);
     };
+    requestRepository.readArtifact = countedReadArtifact;
+    requestRepository.existingArtifactIds = async (...args) => {
+      artifactExistenceReads += 1;
+      return existingArtifactIds(...args);
+    };
     restoreRepositoryMethods = () => {
       requestRepository.listProfiles = listProfiles;
       requestRepository.listExamples = listExamples;
       requestRepository.listPatterns = listPatterns;
+      requestRepository.readArtifact = readArtifact;
+      requestRepository.existingArtifactIds = existingArtifactIds;
+      requestRepository.saveArtifact = saveArtifact;
     };
 
     const first = await withPersistentStore(() => ({
+      store: getStore(),
       rawText: getStore().invoices[0]?.extractedData.rawText,
       learning: getStore().learning,
     }));
@@ -899,11 +933,155 @@ test("persistent requests reuse unchanged normalized learning but refresh artifa
       examples: 1,
       patterns: 1,
     });
+    const artifactReadsAfterFirst = artifactReads;
+    assert.equal(artifactReadsAfterFirst > 0, true);
+
+    const warm = await withPersistentStore(() => ({
+      store: getStore(),
+      rawText: getStore().invoices[0]?.extractedData.rawText,
+      extractionEvidence:
+        getStore().invoices[0]?.extractedData.extractionEvidence,
+      documentAnalysis:
+        getStore().invoices[0]?.extractedData.documentAnalysis,
+      learning: getStore().learning,
+    }));
+    assert.ok(!(warm instanceof Response));
+    assert.equal(warm.store, first.store);
+    assert.equal(warm.rawText, "Request hydration OCR evidence");
+    assert.deepEqual(warm.extractionEvidence, {
+      referenceCode: {
+        sourceLabel: "Reference",
+        rawValue: "Request hydration reference",
+        confidence: 0.99,
+      },
+    });
+    assert.equal(warm.documentAnalysis?.provider.name, "integration-provider");
+    assert.equal(warm.learning, first.learning);
+    assert.equal(artifactReads, artifactReadsAfterFirst);
+    assert.equal(artifactExistenceReads, 1);
+
+    const advancedSnapshot = await loadSqliteStoreSnapshot(databasePath);
+    assert.ok(advancedSnapshot);
+    const advancedAuditEventId = "advanced-before-hydration-failure";
+    advancedSnapshot.auditEvents.push({ id: advancedAuditEventId } as never);
+    await saveSqliteStoreSnapshot(advancedSnapshot, databasePath);
+
+    requestRepository.readArtifact = async () => {
+      artifactReads += 1;
+      throw new Error("Forced full artifact hydration failure");
+    };
+    const failedHydration = await withPersistentStore(() => {
+      assert.fail("handler must not run after failed full hydration");
+    });
+    assert.ok(failedHydration instanceof Response);
+    assert.equal(failedHydration.status, 500);
+    const partialStore = getStore();
+    const partialLearning = partialStore.learning;
+    requestRepository.readArtifact = countedReadArtifact;
+
+    const artifactReadsAfterFailedHydration = artifactReads;
+    const hydrationRecovered = await withPersistentStore(() => ({
+      store: getStore(),
+      rawText: getStore().invoices[0]?.extractedData.rawText,
+      extractionEvidence:
+        getStore().invoices[0]?.extractedData.extractionEvidence,
+      documentAnalysis:
+        getStore().invoices[0]?.extractedData.documentAnalysis,
+      learning: getStore().learning,
+      hasAdvancedChange: getStore().auditEvents.some(
+        (event) => event.id === advancedAuditEventId
+      ),
+    }));
+    assert.ok(!(hydrationRecovered instanceof Response));
+    assert.notEqual(hydrationRecovered.store, partialStore);
+    assert.equal(hydrationRecovered.rawText, "Request hydration OCR evidence");
+    assert.deepEqual(hydrationRecovered.extractionEvidence, {
+      referenceCode: {
+        sourceLabel: "Reference",
+        rawValue: "Request hydration reference",
+        confidence: 0.99,
+      },
+    });
+    assert.equal(
+      hydrationRecovered.documentAnalysis?.provider.name,
+      "integration-provider"
+    );
+    assert.notEqual(hydrationRecovered.learning, partialLearning);
+    assert.equal(hydrationRecovered.learning.supplierExamples.length, 1);
+    assert.equal(hydrationRecovered.hasAdvancedChange, true);
+    assert.equal(artifactReads > artifactReadsAfterFailedHydration, true);
+    assert.equal(artifactExistenceReads, 1);
+
+    requestRepository.saveArtifact = async () => {
+      throw new Error("Forced artifact persistence failure");
+    };
+    const rejectedAuditEventId = "rejected-persistence-change";
+    const rejectedLearningPatternKey = "rejected-learning-pattern";
+    const revisionBeforeRejection = hydrationRecovered.store.revision;
+    const rejected = await withPersistentStore(() => {
+      getStore().auditEvents.push({ id: rejectedAuditEventId } as never);
+      getStore().learning.supplierPatterns.push({
+        supplierAccountId: "rejected-supplier",
+        generation: 99,
+        key: rejectedLearningPatternKey,
+        successes: 0,
+        attempts: 0,
+        weight: 0,
+      });
+      persistStoreSoon();
+    });
+    assert.ok(rejected instanceof Response);
+    assert.equal(rejected.status, 500);
+    assert.equal(artifactExistenceReads, 2);
+    requestRepository.saveArtifact = saveArtifact;
+
+    const snapshotAfterRejection =
+      await loadSqliteStoreSnapshot(databasePath);
+    assert.ok(snapshotAfterRejection);
+    assert.equal(snapshotAfterRejection.revision, revisionBeforeRejection);
+    assert.equal(
+      snapshotAfterRejection.auditEvents.some(
+        (event) => event.id === rejectedAuditEventId
+      ),
+      false
+    );
+
+    const recovered = await withPersistentStore(() => ({
+      store: getStore(),
+      learning: getStore().learning,
+      hasRejectedChange: getStore().auditEvents.some(
+        (event) => event.id === rejectedAuditEventId
+      ),
+      hasRejectedLearning: getStore().learning.supplierPatterns.some(
+        (pattern) => pattern.key === rejectedLearningPatternKey
+      ),
+    }));
+    assert.ok(!(recovered instanceof Response));
+    assert.notEqual(recovered.store, hydrationRecovered.store);
+    assert.notEqual(recovered.learning, hydrationRecovered.learning);
+    assert.equal(recovered.hasRejectedChange, false);
+    assert.equal(recovered.hasRejectedLearning, false);
+    assert.equal(artifactExistenceReads, 2);
+    const persistedAfterRecovery =
+      await loadSqliteStoreSnapshot(databasePath);
+    assert.ok(persistedAfterRecovery);
+    assert.equal(
+      persistedAfterRecovery.auditEvents.some(
+        (event) => event.id === rejectedAuditEventId
+      ),
+      false
+    );
+    const readsAfterRecovery = {
+      profiles: profileReads,
+      examples: exampleReads,
+      patterns: patternReads,
+    };
+    const artifactReadsAfterRecovery = artifactReads;
 
     const externalDatabase = new DatabaseSync(databasePath);
     try {
       externalDatabase.exec(`
-        UPDATE supplier_learning_examples SET artifact_id = NULL;
+        PRAGMA foreign_keys = OFF;
         DELETE FROM document_analysis_artifacts;
       `);
     } finally {
@@ -911,26 +1089,38 @@ test("persistent requests reuse unchanged normalized learning but refresh artifa
     }
 
     const second = await withPersistentStore(() => ({
+      store: getStore(),
       rawText: getStore().invoices[0]?.extractedData.rawText,
+      extractionEvidence:
+        getStore().invoices[0]?.extractedData.extractionEvidence,
+      documentAnalysis:
+        getStore().invoices[0]?.extractedData.documentAnalysis,
       learning: getStore().learning,
     }));
     assert.ok(!(second instanceof Response));
+    assert.equal(second.store, recovered.store);
     assert.equal(second.rawText, undefined);
-    assert.equal(second.learning, first.learning);
+    assert.equal(second.extractionEvidence, undefined);
+    assert.equal(second.documentAnalysis, undefined);
+    assert.equal(second.learning, recovered.learning);
+    assert.equal(artifactReads, artifactReadsAfterRecovery);
+    assert.equal(artifactExistenceReads, 3);
     assert.deepEqual(
       {
         profiles: profileReads,
         examples: exampleReads,
         patterns: patternReads,
       },
-      readsAfterFirst
+      readsAfterRecovery
     );
 
     process.env.LEARNING_V2_ENABLED = "false";
     const disabled = await withPersistentStore(() => ({
+      store: getStore(),
       learning: getStore().learning,
     }));
     assert.ok(!(disabled instanceof Response));
+    assert.notEqual(disabled.store, second.store);
     assert.notEqual(disabled.learning, second.learning);
     assert.deepEqual(disabled.learning.supplierProfiles, []);
     assert.deepEqual(disabled.learning.supplierExamples, []);
@@ -941,27 +1131,54 @@ test("persistent requests reuse unchanged normalized learning but refresh artifa
         examples: exampleReads,
         patterns: patternReads,
       },
-      readsAfterFirst
+      readsAfterRecovery
     );
     process.env.LEARNING_V2_ENABLED = "true";
 
     const reenabled = await withPersistentStore(() => ({
+      store: getStore(),
       learning: getStore().learning,
     }));
     assert.ok(!(reenabled instanceof Response));
+    assert.notEqual(reenabled.store, disabled.store);
     assert.notEqual(reenabled.learning, disabled.learning);
     assert.equal(reenabled.learning.supplierProfiles.length, 1);
     assert.equal(reenabled.learning.supplierExamples.length, 1);
-    assert.equal(profileReads, readsAfterFirst.profiles + 1);
-    assert.equal(exampleReads, readsAfterFirst.examples + 1);
-    assert.equal(patternReads, readsAfterFirst.patterns + 1);
+    assert.equal(profileReads, readsAfterRecovery.profiles + 1);
+    assert.equal(exampleReads, readsAfterRecovery.examples + 1);
+    assert.equal(patternReads, readsAfterRecovery.patterns + 1);
+    const artifactReadsAfterReenable = artifactReads;
+    assert.equal(artifactReadsAfterReenable > artifactReadsAfterRecovery, true);
 
     const externalSnapshot = await loadSqliteStoreSnapshot(databasePath);
     assert.ok(externalSnapshot);
+    assert.ok(externalSnapshot.invoices[0]?.analysisArtifactId);
+    externalSnapshot.invoices[0]!.extractedData.rawText =
+      "Externally persisted stale OCR evidence";
+    externalSnapshot.invoices[0]!.extractedData.extractionEvidence = {
+      referenceCode: {
+        sourceLabel: "Stale reference",
+        rawValue: "STALE-REF",
+        confidence: 0.1,
+      },
+    };
+    externalSnapshot.invoices[0]!.extractedData.documentAnalysis = {
+      pages: [],
+      fieldCandidates: [],
+      confidence: 0.1,
+      provider: { name: "stale-provider", model: "stale-v1" },
+      sourceMode: "plain_text",
+    };
     externalSnapshot.auditEvents.push({ id: "external-hydration-change" } as never);
     await saveSqliteStoreSnapshot(externalSnapshot, databasePath);
 
     const third = await withPersistentStore(() => ({
+      store: getStore(),
+      rawText: getStore().invoices[0]?.extractedData.rawText,
+      extractionEvidence:
+        getStore().invoices[0]?.extractedData.extractionEvidence,
+      documentAnalysis:
+        getStore().invoices[0]?.extractedData.documentAnalysis,
       hasExternalChange: getStore().auditEvents.some(
         (event) => event.id === "external-hydration-change"
       ),
@@ -969,10 +1186,16 @@ test("persistent requests reuse unchanged normalized learning but refresh artifa
     }));
     assert.ok(!(third instanceof Response));
     assert.equal(third.hasExternalChange, true);
+    assert.equal(third.rawText, undefined);
+    assert.equal(third.extractionEvidence, undefined);
+    assert.equal(third.documentAnalysis, undefined);
+    assert.notEqual(third.store, reenabled.store);
     assert.notEqual(third.learning, reenabled.learning);
-    assert.equal(profileReads, readsAfterFirst.profiles + 2);
-    assert.equal(exampleReads, readsAfterFirst.examples + 2);
-    assert.equal(patternReads, readsAfterFirst.patterns + 2);
+    assert.equal(profileReads, readsAfterRecovery.profiles + 2);
+    assert.equal(exampleReads, readsAfterRecovery.examples + 2);
+    assert.equal(patternReads, readsAfterRecovery.patterns + 2);
+    assert.equal(artifactReads > artifactReadsAfterReenable, true);
+    assert.equal(artifactExistenceReads, 3);
   } finally {
     restoreRepositoryMethods?.();
     if (previous.mode === undefined) delete process.env.DATABASE_MODE;

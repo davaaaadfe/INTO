@@ -18,6 +18,7 @@ import { createMockExactConnection } from "../lib/services/exact-online-service"
 import {
   closeSqliteStore,
   databaseMode,
+  loadSqliteStoreRevision,
   loadSqliteStoreSnapshot,
   SnapshotRevisionConflictError,
   saveSqliteStoreSnapshot,
@@ -91,6 +92,34 @@ test("SQLite snapshot writes use compare-and-swap revisions", async () => {
     );
     const restored = await loadSqliteStoreSnapshot(databasePath);
     assert.equal((restored as IntoStore & { revision: number }).revision, 1);
+  } finally {
+    closeSqliteStore();
+    await rm(databasePath, { force: true });
+    await rm(`${databasePath}-shm`, { force: true });
+    await rm(`${databasePath}-wal`, { force: true });
+  }
+});
+
+test("reads only the scalar SQLite snapshot revision", async () => {
+  const databasePath = testDatabasePath();
+  const snapshot = {
+    users: [],
+    currentUserId: "shared_user",
+    invoices: [],
+    exactConnections: [],
+    exactMasterDataCaches: [],
+    supplierOverviewImport: null,
+    duplicateLogs: [],
+    auditEvents: [],
+    learning: { corrections: [] },
+    schemaVersion: 1,
+    revision: 0,
+  } as unknown as IntoStore;
+
+  try {
+    assert.equal(await loadSqliteStoreRevision(databasePath), null);
+    await saveSqliteStoreSnapshot(snapshot, databasePath);
+    assert.equal(await loadSqliteStoreRevision(databasePath), 1);
   } finally {
     closeSqliteStore();
     await rm(databasePath, { force: true });

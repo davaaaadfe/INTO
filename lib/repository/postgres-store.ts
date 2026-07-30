@@ -175,6 +175,21 @@ export async function loadStoreSnapshot() {
   return migrateStoreSnapshot(store);
 }
 
+export async function loadStoreRevision() {
+  if (!isPostgresPersistenceEnabled()) {
+    return null;
+  }
+
+  const sql = await sqlClient();
+  const rows = await sql`
+    SELECT revision
+    FROM into_runtime_store
+    WHERE id = ${snapshotId}
+    LIMIT 1
+  `;
+  return rows[0] ? Number(rows[0].revision) : null;
+}
+
 export async function saveStoreSnapshot(store: IntoStore) {
   if (!isPostgresPersistenceEnabled()) {
     return;

@@ -706,6 +706,18 @@ export class SqliteLearningRepository {
       : null;
   }
 
+  async existingArtifactIds(ids: string[]) {
+    const uniqueIds = [...new Set(ids)];
+    if (!uniqueIds.length) return new Set<string>();
+    const placeholders = uniqueIds.map(() => "?").join(",");
+    const rows = this.database
+      .prepare(
+        `SELECT id FROM document_analysis_artifacts WHERE id IN (${placeholders})`
+      )
+      .all(...uniqueIds) as Array<{ id: string }>;
+    return new Set(rows.map((row) => row.id));
+  }
+
   async readArtifact(id: string) {
     const row = this.database
       .prepare(

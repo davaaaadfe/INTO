@@ -248,6 +248,40 @@ test("artifacts are encrypted, content-hash deduplicated, and bound to their has
   });
 });
 
+test("checks referenced artifact existence in one SQLite batch", async () => {
+  await withRepository(async (repository) => {
+    const first = await repository.saveArtifact({
+      companyId: scope.companyId,
+      contentHash: "sha256:artifact-exists-a",
+      rawText: "Artifact A",
+      analysis: artifactAnalysis("Artifact A"),
+      provider: "local",
+      modelVersion: "embedded-pdf-v1",
+      createdAt: "2026-07-21T10:00:00.000Z",
+    });
+    const second = await repository.saveArtifact({
+      companyId: scope.companyId,
+      contentHash: "sha256:artifact-exists-b",
+      rawText: "Artifact B",
+      analysis: artifactAnalysis("Artifact B"),
+      provider: "local",
+      modelVersion: "embedded-pdf-v1",
+      createdAt: "2026-07-21T10:00:00.000Z",
+    });
+
+    assert.deepEqual(
+      await repository.existingArtifactIds([
+        first.id,
+        "artifact_missing",
+        second.id,
+        first.id,
+      ]),
+      new Set([first.id, second.id])
+    );
+    assert.deepEqual(await repository.existingArtifactIds([]), new Set());
+  });
+});
+
 test("concurrent artifact saves converge on one encrypted record", async () => {
   await withRepository(async (repository) => {
     const input = {

@@ -483,6 +483,15 @@ export class PostgresLearningRepository {
     };
   }
 
+  async existingArtifactIds(ids: string[]) {
+    if (!ids.length) return new Set<string>();
+    const rows = await this.query(
+      "SELECT id FROM document_analysis_artifacts WHERE id = ANY($1::text[])",
+      [ids]
+    );
+    return new Set(rows.map((row) => String(row.id)));
+  }
+
   async readArtifact(id: string) {
     const rows = await this.query(
       "SELECT * FROM document_analysis_artifacts WHERE id = $1",

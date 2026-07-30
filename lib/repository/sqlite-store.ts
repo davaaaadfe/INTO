@@ -107,6 +107,15 @@ export async function loadSqliteStoreSnapshot(databasePath = sqliteDatabasePath(
   return migrateStoreSnapshot(store);
 }
 
+export async function loadSqliteStoreRevision(
+  databasePath = sqliteDatabasePath()
+) {
+  const row = openDatabase(databasePath)
+    .prepare("SELECT revision FROM into_runtime_store WHERE id = ? LIMIT 1")
+    .get(snapshotId) as { revision: number } | undefined;
+  return row?.revision ?? null;
+}
+
 export async function saveSqliteStoreSnapshot(
   store: IntoStore,
   databasePath = sqliteDatabasePath()

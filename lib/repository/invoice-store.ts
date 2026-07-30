@@ -69,12 +69,14 @@ import {
 import { createId } from "../utils/id";
 import {
   isPostgresPersistenceEnabled,
+  loadStoreRevision,
   loadStoreSnapshot,
   saveStoreSnapshot,
 } from "./postgres-store";
 import {
   databasePersistenceIdentity,
   databaseMode,
+  loadSqliteStoreRevision,
   loadSqliteStoreSnapshot,
   saveSqliteStoreSnapshot,
   SnapshotRevisionConflictError,
@@ -435,6 +437,18 @@ async function loadConfiguredStoreSnapshot() {
   return null;
 }
 
+async function loadConfiguredStoreRevision() {
+  if (databaseMode() === "sqlite") {
+    return loadSqliteStoreRevision();
+  }
+
+  if (isPostgresPersistenceEnabled()) {
+    return loadStoreRevision();
+  }
+
+  return null;
+}
+
 async function saveConfiguredStoreSnapshot(
   store: IntoStore,
   context = globalStore.__INTO_LEARNING_PERSISTENCE_CONTEXT
@@ -496,53 +510,72 @@ async function hydrateConfiguredStore(
   await globalStore.__INTO_STORE_PERSISTING;
 
   if (!globalStore.__INTO_STORE_HYDRATING) {
-    globalStore.__INTO_STORE_HYDRATING = loadConfiguredStoreSnapshot()
-      .then((snapshot) => {
-        const previousStore = globalStore.__INTO_STORE;
-        const snapshotLearning = snapshot?.learning;
-        const reuseNormalizedLearning = Boolean(
-          reuseUnchangedNormalizedLearning &&
-            snapshot?.learningRepositoryMigratedAt &&
-            globalStore.__INTO_STORE_HYDRATED_FOR === identity &&
-            previousStore?.revision === snapshot.revision
-        );
-        if (snapshot) {
-          globalStore.__INTO_STORE = snapshot;
-          if (reuseNormalizedLearning && previousStore) {
-            snapshot.learning = previousStore.learning;
-          }
-        } else {
-          globalStore.__INTO_STORE = createInitialStore();
-          globalStore.__INTO_STORE_PERSISTING = saveConfiguredStoreSnapshot(
-            globalStore.__INTO_STORE
-          );
+    globalStore.__INTO_STORE_HYDRATING = (async () => {
+      const previousStore = globalStore.__INTO_STORE;
+      const canReuseCachedState = Boolean(
+        reuseUnchangedNormalizedLearning &&
+          previousStore &&
+          globalStore.__INTO_STORE_HYDRATED_FOR === identity &&
+          !globalStore.__INTO_STORE_DIRTY &&
+          !globalStore.__INTO_STORE_PERSISTENCE_ERROR
+      );
+      if (
+        canReuseCachedState &&
+        previousStore &&
+        (await loadConfiguredStoreRevision()) === previousStore.revision &&
+        (await hydrateLearningState(previousStore, false, true))
+      ) {
+        return;
+      }
+
+      delete globalStore.__INTO_STORE_HYDRATED_FOR;
+      const snapshot = await loadConfiguredStoreSnapshot();
+      const snapshotLearning = snapshot?.learning;
+      const reuseNormalizedLearning = Boolean(
+        canReuseCachedState &&
+          snapshot?.learningRepositoryMigratedAt &&
+          previousStore?.revision === snapshot.revision
+      );
+      if (snapshot) {
+        globalStore.__INTO_STORE = snapshot;
+        globalStore.__INTO_STORE_DIRTY = false;
+        globalStore.__INTO_STORE_PERSISTED_DIRTY_REVISION =
+          globalStore.__INTO_STORE_DIRTY_REVISION ?? 0;
+        if (reuseNormalizedLearning && previousStore) {
+          snapshot.learning = previousStore.learning;
         }
-        return hydrateLearningState(getStore(), !reuseNormalizedLearning).then(
-          (learningEnabled) => {
-            if (
-              !learningEnabled &&
-              reuseNormalizedLearning &&
-              snapshot &&
-              snapshotLearning
-            ) {
-              snapshot.learning = snapshotLearning;
-            }
-            if (
-              learningEnabled &&
-              !snapshot?.learningRepositoryMigratedAt
-            ) {
-              globalStore.__INTO_STORE_DIRTY = true;
-              globalStore.__INTO_STORE_DIRTY_REVISION =
-                (globalStore.__INTO_STORE_DIRTY_REVISION ?? 0) + 1;
-            }
-            if (learningEnabled) {
-              globalStore.__INTO_STORE_HYDRATED_FOR = identity;
-            } else {
-              delete globalStore.__INTO_STORE_HYDRATED_FOR;
-            }
-          }
+      } else {
+        globalStore.__INTO_STORE = createInitialStore();
+        globalStore.__INTO_STORE_PERSISTING = saveConfiguredStoreSnapshot(
+          globalStore.__INTO_STORE
         );
-      })
+      }
+      return hydrateLearningState(getStore(), !reuseNormalizedLearning).then(
+        (learningEnabled) => {
+          if (
+            !learningEnabled &&
+            reuseNormalizedLearning &&
+            snapshot &&
+            snapshotLearning
+          ) {
+            snapshot.learning = snapshotLearning;
+          }
+          if (
+            learningEnabled &&
+            !snapshot?.learningRepositoryMigratedAt
+          ) {
+            globalStore.__INTO_STORE_DIRTY = true;
+            globalStore.__INTO_STORE_DIRTY_REVISION =
+              (globalStore.__INTO_STORE_DIRTY_REVISION ?? 0) + 1;
+          }
+          if (learningEnabled) {
+            globalStore.__INTO_STORE_HYDRATED_FOR = identity;
+          } else {
+            delete globalStore.__INTO_STORE_HYDRATED_FOR;
+          }
+        }
+      );
+    })()
       .finally(() => {
         globalStore.__INTO_STORE_HYDRATING = undefined;
       });

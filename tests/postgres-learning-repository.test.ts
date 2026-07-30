@@ -203,3 +203,34 @@ test("PostgreSQL retention unlinks examples before deleting expired artifacts", 
   assert.match(retentionQuery, /UPDATE supplier_learning_examples SET artifact_id = NULL/i);
   assert.match(retentionQuery, /DELETE FROM document_analysis_artifacts/i);
 });
+
+test("PostgreSQL checks referenced artifact existence with one array query", async () => {
+  const calls: Array<{ query: string; parameters?: unknown[] }> = [];
+  const repository = PostgresLearningRepository.fromQuery(
+    async (query, parameters) => {
+      calls.push({ query, parameters });
+      return [{ id: "artifact-a" }, { id: "artifact-c" }];
+    }
+  );
+
+  assert.deepEqual(
+    await repository.existingArtifactIds([
+      "artifact-a",
+      "artifact-missing",
+      "artifact-c",
+    ]),
+    new Set(["artifact-a", "artifact-c"])
+  );
+  assert.equal(calls.length, 1);
+  assert.match(
+    calls[0]!.query,
+    /SELECT id FROM document_analysis_artifacts WHERE id = ANY\(\$1::text\[\]\)/i
+  );
+  assert.deepEqual(calls[0]!.parameters, [
+    ["artifact-a", "artifact-missing", "artifact-c"],
+  ]);
+
+  calls.length = 0;
+  assert.deepEqual(await repository.existingArtifactIds([]), new Set());
+  assert.equal(calls.length, 0);
+});

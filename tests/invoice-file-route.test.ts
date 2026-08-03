@@ -18,9 +18,11 @@ const storagePath = `storage/tmp-tests/file-route-${Date.now()}-${Math.random()
 
 test("serves original PDF, image, and XML invoice bytes for preview and download", async () => {
   const environment = process.env as Record<string, string | undefined>;
+  const previousLocalPath = process.env.LOCAL_INVOICE_STORAGE_PATH;
   const previousPath = process.env.TEMP_INVOICE_STORAGE_PATH;
   const previousNodeEnv = process.env.NODE_ENV;
   environment["NODE_ENV"] = "test";
+  delete process.env.LOCAL_INVOICE_STORAGE_PATH;
   process.env.TEMP_INVOICE_STORAGE_PATH = storagePath;
 
   const cases = [
@@ -115,6 +117,11 @@ test("serves original PDF, image, and XML invoice bytes for preview and download
       "Original invoice file could not be found. Please re-upload or re-read this invoice."
     );
   } finally {
+    if (previousLocalPath === undefined) {
+      delete process.env.LOCAL_INVOICE_STORAGE_PATH;
+    } else {
+      process.env.LOCAL_INVOICE_STORAGE_PATH = previousLocalPath;
+    }
     if (previousPath === undefined) {
       delete process.env.TEMP_INVOICE_STORAGE_PATH;
     } else {
@@ -131,10 +138,12 @@ test("serves original PDF, image, and XML invoice bytes for preview and download
 
 test("a newly uploaded invoice can be previewed and downloaded", async () => {
   const environment = process.env as Record<string, string | undefined>;
+  const previousLocalPath = process.env.LOCAL_INVOICE_STORAGE_PATH;
   const previousPath = process.env.TEMP_INVOICE_STORAGE_PATH;
   const previousNodeEnv = process.env.NODE_ENV;
   const uploadStoragePath = `${storagePath}-upload`;
   environment["NODE_ENV"] = "test";
+  delete process.env.LOCAL_INVOICE_STORAGE_PATH;
   process.env.TEMP_INVOICE_STORAGE_PATH = uploadStoragePath;
   const bytes = new TextEncoder().encode(
     "%PDF-1.7\nInvoice number: PREVIEW-001\nTotal: EUR 121.00"
@@ -181,6 +190,11 @@ test("a newly uploaded invoice can be previewed and downloaded", async () => {
 
     await deleteStoredInvoiceFile(invoice.storageKey);
   } finally {
+    if (previousLocalPath === undefined) {
+      delete process.env.LOCAL_INVOICE_STORAGE_PATH;
+    } else {
+      process.env.LOCAL_INVOICE_STORAGE_PATH = previousLocalPath;
+    }
     if (previousPath === undefined) {
       delete process.env.TEMP_INVOICE_STORAGE_PATH;
     } else {
@@ -197,10 +211,12 @@ test("a newly uploaded invoice can be previewed and downloaded", async () => {
 
 test("an unsupported upload is rejected before any local file is written", async () => {
   const environment = process.env as Record<string, string | undefined>;
+  const previousLocalPath = process.env.LOCAL_INVOICE_STORAGE_PATH;
   const previousPath = process.env.TEMP_INVOICE_STORAGE_PATH;
   const previousNodeEnv = process.env.NODE_ENV;
   const uploadStoragePath = `${storagePath}-unsupported`;
   environment["NODE_ENV"] = "test";
+  delete process.env.LOCAL_INVOICE_STORAGE_PATH;
   process.env.TEMP_INVOICE_STORAGE_PATH = uploadStoragePath;
 
   try {
@@ -216,6 +232,8 @@ test("an unsupported upload is rejected before any local file is written", async
     assert.equal(payload.rejected[0]?.fileName, "notes.txt");
     await assert.rejects(readdir(uploadStoragePath), /ENOENT/);
   } finally {
+    if (previousLocalPath === undefined) delete process.env.LOCAL_INVOICE_STORAGE_PATH;
+    else process.env.LOCAL_INVOICE_STORAGE_PATH = previousLocalPath;
     if (previousPath === undefined) delete process.env.TEMP_INVOICE_STORAGE_PATH;
     else process.env.TEMP_INVOICE_STORAGE_PATH = previousPath;
     if (previousNodeEnv === undefined) delete environment["NODE_ENV"];

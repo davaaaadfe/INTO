@@ -15,15 +15,22 @@ import {
 } from "../lib/services/storage-service";
 
 async function withTempStorage(run: () => Promise<void>) {
+  const previousLocalPath = process.env.LOCAL_INVOICE_STORAGE_PATH;
   const previousPath = process.env.TEMP_INVOICE_STORAGE_PATH;
   const storagePath = `storage/tmp-tests/lifecycle-${Date.now()}-${Math.random()
     .toString(16)
     .slice(2)}`;
+  delete process.env.LOCAL_INVOICE_STORAGE_PATH;
   process.env.TEMP_INVOICE_STORAGE_PATH = storagePath;
 
   try {
     await run();
   } finally {
+    if (previousLocalPath === undefined) {
+      delete process.env.LOCAL_INVOICE_STORAGE_PATH;
+    } else {
+      process.env.LOCAL_INVOICE_STORAGE_PATH = previousLocalPath;
+    }
     if (previousPath === undefined) {
       delete process.env.TEMP_INVOICE_STORAGE_PATH;
     } else {

@@ -42,9 +42,12 @@ reference, and audit history.
 DATABASE_MODE=sqlite
 LOCAL_DATABASE_PATH=data/into.sqlite
 STORAGE_MODE=local
-TEMP_INVOICE_STORAGE_PATH=storage/invoices
+LOCAL_INVOICE_STORAGE_PATH=storage/invoices
 TEMP_INVOICE_RETENTION_DAYS=30
 ```
+
+Existing installations may keep `TEMP_INVOICE_STORAGE_PATH` as a compatibility
+fallback when `LOCAL_INVOICE_STORAGE_PATH` is not set.
 
 SQLite, PostgreSQL, and S3 are not all required: a dedicated local INTO server
 needs only SQLite and local storage. Keep that machine running and backed up.

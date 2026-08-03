@@ -27,6 +27,7 @@ const exactEnvKeys = [
   "EXACT_ONLINE_ENABLE_REAL_BOOKING",
   "EXACT_ONLINE_DOCUMENT_TYPE",
   "OAUTH_TOKEN_ENCRYPTION_KEY",
+  "LOCAL_INVOICE_STORAGE_PATH",
   "TEMP_INVOICE_STORAGE_PATH",
 ];
 
@@ -40,6 +41,7 @@ async function withExactBookingEnv(run: () => Promise<void>) {
   process.env.EXACT_ONLINE_ENABLE_REAL_BOOKING = "true";
   process.env.EXACT_ONLINE_DOCUMENT_TYPE = "55";
   process.env.OAUTH_TOKEN_ENCRYPTION_KEY = "exact-test-encryption-key";
+  delete process.env.LOCAL_INVOICE_STORAGE_PATH;
   process.env.TEMP_INVOICE_STORAGE_PATH = storagePath;
 
   try {

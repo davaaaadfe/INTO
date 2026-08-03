@@ -1,10 +1,11 @@
-import { neon } from "@neondatabase/serverless";
+import { neon, type NeonQueryFunction } from "@neondatabase/serverless";
 import { Buffer } from "node:buffer";
 import type { IntoStore } from "./invoice-store";
 import { migrateStoreSnapshot } from "./store-migrations";
 import {
   CURRENT_SNAPSHOT_SCHEMA_VERSION,
   databaseMode,
+  databasePersistenceIdentity,
   SnapshotRevisionConflictError,
 } from "./sqlite-store";
 
@@ -15,6 +16,22 @@ type VersionedStore = IntoStore & {
   revision?: number;
 };
 
+type SqlClient = NeonQueryFunction<false, false>;
+type SchemaInitialization = {
+  identity: string;
+  promise: Promise<void>;
+};
+type SchemaSlot =
+  | "__INTO_POSTGRES_RUNTIME_SCHEMA"
+  | "__INTO_POSTGRES_INVOICE_FILE_SCHEMA";
+
+const runtime = globalThis as typeof globalThis & {
+  __INTO_POSTGRES_SQL_IDENTITY?: string;
+  __INTO_POSTGRES_SQL_CLIENT?: SqlClient;
+  __INTO_POSTGRES_RUNTIME_SCHEMA?: SchemaInitialization;
+  __INTO_POSTGRES_INVOICE_FILE_SCHEMA?: SchemaInitialization;
+};
+
 function databaseUrl() {
   return process.env.DATABASE_URL?.trim() ?? "";
 }
@@ -23,42 +40,88 @@ export function isPostgresPersistenceEnabled() {
   return databaseMode() === "postgres" && Boolean(databaseUrl());
 }
 
-async function sqlClient() {
+function initializeOnce(
+  slot: SchemaSlot,
+  identity: string,
+  initialize: () => Promise<void>
+) {
+  let state = runtime[slot];
+  if (state?.identity !== identity) {
+    const promise = initialize();
+    state = { identity, promise };
+    runtime[slot] = state;
+    void promise.catch(() => {
+      const current = runtime[slot];
+      if (current?.identity === identity && current.promise === promise) {
+        delete runtime[slot];
+      }
+    });
+  }
+  return state.promise;
+}
+
+function selectSqlClient() {
   const url = databaseUrl();
   if (!url) {
     throw new Error("DATABASE_URL is required for PostgreSQL persistence.");
   }
 
-  const sql = neon(url);
-  await sql`
-    CREATE TABLE IF NOT EXISTS into_runtime_store (
-      id text PRIMARY KEY,
-      payload jsonb NOT NULL,
-      revision integer NOT NULL DEFAULT 0,
-      updated_at timestamptz NOT NULL DEFAULT now()
-    )
-  `;
-  await sql`
-    ALTER TABLE into_runtime_store
-    ADD COLUMN IF NOT EXISTS revision integer NOT NULL DEFAULT 0
-  `;
+  const identity = databasePersistenceIdentity();
+  let sql = runtime.__INTO_POSTGRES_SQL_CLIENT;
+  if (runtime.__INTO_POSTGRES_SQL_IDENTITY !== identity || !sql) {
+    sql = neon(url);
+    runtime.__INTO_POSTGRES_SQL_IDENTITY = identity;
+    runtime.__INTO_POSTGRES_SQL_CLIENT = sql;
+  }
+  const runtimeReady = initializeOnce(
+    "__INTO_POSTGRES_RUNTIME_SCHEMA",
+    identity,
+    async () => {
+      await sql`
+        CREATE TABLE IF NOT EXISTS into_runtime_store (
+          id text PRIMARY KEY,
+          payload jsonb NOT NULL,
+          revision integer NOT NULL DEFAULT 0,
+          updated_at timestamptz NOT NULL DEFAULT now()
+        )
+      `;
+      await sql`
+        ALTER TABLE into_runtime_store
+        ADD COLUMN IF NOT EXISTS revision integer NOT NULL DEFAULT 0
+      `;
+    }
+  );
+  return { identity, sql, runtimeReady };
+}
+
+async function sqlClient() {
+  const { sql, runtimeReady } = selectSqlClient();
+  await runtimeReady;
   return sql;
 }
 
 async function invoiceFileSqlClient() {
-  const sql = await sqlClient();
-  await sql`
-    CREATE TABLE IF NOT EXISTS into_temp_invoice_files (
-      storage_key text PRIMARY KEY,
-      original_file_name text NOT NULL,
-      stored_file_name text NOT NULL,
-      file_type text NOT NULL,
-      file_size bigint NOT NULL,
-      checksum text NOT NULL,
-      content_base64 text NOT NULL,
-      created_at timestamptz NOT NULL DEFAULT now()
-    )
-  `;
+  const { identity, sql, runtimeReady } = selectSqlClient();
+  const fileReady = initializeOnce(
+    "__INTO_POSTGRES_INVOICE_FILE_SCHEMA",
+    identity,
+    async () => {
+      await runtimeReady;
+      await sql`
+        CREATE TABLE IF NOT EXISTS into_temp_invoice_files (
+          storage_key text PRIMARY KEY,
+          original_file_name text NOT NULL,
+          stored_file_name text NOT NULL,
+          file_type text NOT NULL,
+          file_size bigint NOT NULL,
+          checksum text NOT NULL,
+          content_base64 text NOT NULL,
+          created_at timestamptz NOT NULL DEFAULT now()
+        )
+      `;
+    }
+  );
+  await fileReady;
   return sql;
 }
 

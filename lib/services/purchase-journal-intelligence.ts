@@ -523,6 +523,7 @@ function resolveSupplier(
   const identities = supplierIdentityKeys(data);
   const suppliers = exactSuppliers(exactMasterData);
   const applyLearnedMappings = supplierLearningMode() === "apply";
+  const layout = formatFingerprint(data.rawText ?? "");
 
   if (!exactMasterData) {
     return {
@@ -541,7 +542,6 @@ function resolveSupplier(
 
   const currentManualSelection = learning.supplierSelections.find(
     (decision) =>
-      decision.trustState === "pending" &&
       decision.invoiceId === invoice.id &&
       identities.includes(decision.supplierIdentity)
   );
@@ -561,6 +561,20 @@ function resolveSupplier(
       reasoning: ["Applied the supplier explicitly selected for this invoice."],
     };
   }
+
+  const trustedSelections = applyLearnedMappings
+    ? learning.supplierSelections.filter(
+        (decision) =>
+          decision.trustState === "trusted" &&
+          identities.includes(decision.supplierIdentity)
+      )
+    : [];
+  const trustedSelection =
+    trustedSelections.find(
+      (decision) =>
+        Boolean(decision.formatFingerprint) &&
+        decision.formatFingerprint === layout
+    ) ?? trustedSelections.find((decision) => !decision.formatFingerprint);
 
   type Evidence = {
     account: ExactSupplierAccount;
@@ -600,6 +614,8 @@ function resolveSupplier(
     item.reasoning.push(reasoning);
   };
   const hardAccountIds = new Set<string>();
+  const hardMatchGroups: Set<string>[] = [];
+  let unmatchedHardIdentifier = false;
   let hardConflict = false;
   const addHard = (
     value: string,
@@ -609,9 +625,11 @@ function resolveSupplier(
   ) => {
     if (!value) return;
     if (!matches.length) {
+      unmatchedHardIdentifier = true;
       hardConflict = true;
       return;
     }
+    hardMatchGroups.push(new Set(matches.map((account) => account.id)));
     if (matches.length !== 1) hardConflict = true;
     for (const account of matches) {
       const item = forAccount(account);
@@ -646,6 +664,31 @@ function resolveSupplier(
     "Clearly labelled supplier code matched the Exact supplier overview."
   );
   if (hardAccountIds.size > 1) hardConflict = true;
+
+  const trustedAccount = trustedSelection
+    ? suppliers.find((supplier) => supplier.id === trustedSelection.accountId)
+    : undefined;
+  if (
+    trustedAccount &&
+    !unmatchedHardIdentifier &&
+    hardMatchGroups.every((matches) => matches.has(trustedAccount.id))
+  ) {
+    return {
+      selectedAccountId: trustedAccount.id,
+      selectedAccountCode: trustedAccount.code,
+      selectedAccountName: trustedAccount.name,
+      matchConfidence: 1,
+      threshold: SUPPLIER_RESOLUTION_V2_POLICY.minimumConfidence,
+      method: "Learned decision",
+      reviewRequired: false,
+      candidates: [],
+      reasoning: [
+        trustedSelection?.formatFingerprint
+          ? "Matched a supplier explicitly selected for this invoice layout."
+          : "Matched a previously trusted supplier resolution.",
+      ],
+    };
+  }
 
   const dataBic = invoiceBic(data);
   if (dataBic) {
@@ -758,7 +801,6 @@ function resolveSupplier(
     }
   }
 
-  const layout = formatFingerprint(data.rawText ?? "");
   if (layout && applyLearnedMappings) {
     for (const profile of learning.supplierProfiles) {
       if (profile.formatFingerprint !== layout) continue;
@@ -2390,14 +2432,23 @@ export function rememberDecisionsFromInvoice(
   const decidedAt = new Date().toISOString();
   const supplierIdentity = primarySupplierIdentity(invoice.extractedData);
   const supplierAccountId = booking.supplierResolution.selectedAccountId;
+  const supplierFormatFingerprint = formatFingerprint(
+    invoice.extractedData.rawText ?? ""
+  );
   learning.supplierSelections = learning.supplierSelections.filter(
-    (decision) => decision.supplierIdentity !== supplierIdentity
+    (decision) =>
+      decision.supplierIdentity !== supplierIdentity ||
+      Boolean(
+        decision.formatFingerprint &&
+          decision.formatFingerprint !== supplierFormatFingerprint
+      )
   );
   learning.supplierSelections.unshift({
     supplierIdentity,
     accountId: supplierAccountId,
     decidedAt,
     invoiceId: invoice.id,
+    formatFingerprint: supplierFormatFingerprint || undefined,
     trustState: "trusted",
   });
 

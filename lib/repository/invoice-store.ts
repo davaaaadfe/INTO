@@ -2261,6 +2261,9 @@ export function selectInvoiceSupplier(invoiceId: string, accountId: string) {
   );
 
   const supplierIdentity = supplierIdentityForInvoice(invoice);
+  const supplierFormatFingerprint = formatFingerprint(
+    invoice.extractedData.rawText ?? ""
+  );
   const user = getCurrentUser();
   const decidedAt = now();
   captureSupplierAccountCorrection({
@@ -2275,8 +2278,8 @@ export function selectInvoiceSupplier(invoiceId: string, accountId: string) {
     (decision) =>
       !(
         decision.supplierIdentity === supplierIdentity &&
-        decision.invoiceId === invoiceId &&
-        decision.trustState === "pending"
+        (!decision.formatFingerprint ||
+          decision.formatFingerprint === supplierFormatFingerprint)
       )
   );
   store.learning.supplierSelections.unshift({
@@ -2284,7 +2287,8 @@ export function selectInvoiceSupplier(invoiceId: string, accountId: string) {
     accountId: account.id,
     decidedAt,
     invoiceId,
-    trustState: "pending",
+    formatFingerprint: supplierFormatFingerprint || undefined,
+    trustState: "trusted",
   });
 
   const updatedInvoice = recomputeInvoiceState(invoiceId);

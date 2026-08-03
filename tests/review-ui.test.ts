@@ -12,7 +12,7 @@ test("renders unresolved supplier choices inside Required data", () => {
     '<ReviewSection title="Required data">'
   );
   const supplierChoices = activeReviewSource.indexOf(
-    "supplierResolution.candidates.map"
+    "duplicateSupplierCandidates.map"
   );
   const intelligence = activeReviewSource.indexOf(
     "<span>Purchase Journal intelligence</span>"
@@ -82,12 +82,34 @@ test("adds a Supplier learning view with separate reliability copy", () => {
   );
 });
 
-test("uses a contextual supplier chooser without the duplicated warning title", () => {
+test("shows only real duplicate supplier matches without an all-supplier chooser", () => {
   assert.doesNotMatch(activeReviewSource, />\s*Supplier review required\s*</);
-  assert.match(activeReviewSource, /supplierResolution\.reviewRequired/);
-  assert.match(activeReviewSource, /supplierResolution\.candidates\.map/);
-  assert.match(activeReviewSource, /Search all Exact suppliers/);
-  assert.match(activeReviewSource, /contextualSupplierReviewVisible/);
+  assert.doesNotMatch(activeReviewSource, />\s*Choose the Exact supplier\s*</);
+  assert.doesNotMatch(activeReviewSource, /Search all Exact suppliers/);
+  assert.match(
+    activeReviewSource,
+    /supplierResolution\.reasonCode\s*===\s*"supplier_ambiguous"/
+  );
+  assert.match(activeReviewSource, /duplicateSupplierCandidates\.length > 1/);
+  assert.match(activeReviewSource, /duplicateSupplierCandidates\.map/);
+  assert.match(activeReviewSource, /\{contextualSupplierReviewVisible\s*\?\s*\(/);
+  assert.doesNotMatch(
+    activeReviewSource,
+    /\{selectedPurchaseJournal\?\.supplierResolution\.reviewRequired\s*\?\s*\(/
+  );
+});
+
+test("lets users switch between PDF panning and selectable text and copy image OCR", () => {
+  assert.match(
+    activeReviewSource,
+    /type PreviewInteractionMode = "pan" \| "select_text"/
+  );
+  assert.match(activeReviewSource, />\s*Pan mode\s*</);
+  assert.match(activeReviewSource, />\s*Select text mode\s*</);
+  assert.match(activeReviewSource, /previewInteractionMode === "select_text"/);
+  assert.match(activeReviewSource, /title="Selectable PDF invoice"/);
+  assert.match(activeReviewSource, />\s*Copy extracted text\s*</);
+  assert.match(activeReviewSource, /navigator\.clipboard\.writeText/);
 });
 
 test("uses an accessible reset dialog with the approved destructive-action copy", () => {

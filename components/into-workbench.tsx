@@ -98,6 +98,7 @@ type ButtonFeedback = "success" | "error";
 type PreviewFileStatus = "checking" | "available" | "missing";
 type ResolvedPreviewFileStatus = Exclude<PreviewFileStatus, "checking">;
 type ActiveView = "queue" | "archive" | "supplier-learning";
+type PreviewInteractionMode = "pan" | "select_text";
 type FieldTone = "neutral" | "warning" | "error";
 
 type SelectOption = {
@@ -1178,6 +1179,7 @@ function PreviewDocument({
   zoom,
   rotation,
   page,
+  interactionMode,
   onPageCount,
 }: {
   invoice: UploadedInvoice;
@@ -1185,6 +1187,7 @@ function PreviewDocument({
   zoom: number;
   rotation: number;
   page: number;
+  interactionMode: PreviewInteractionMode;
   onPageCount: (pageCount: number) => void;
 }) {
   if (fileStatus === "checking") {
@@ -1231,6 +1234,16 @@ function PreviewDocument({
   }
 
   if (isPdf) {
+    if (interactionMode === "select_text") {
+      return (
+        <iframe
+          src={sourceUrl}
+          title="Selectable PDF invoice"
+          className={`min-h-[680px] w-full ${baseFrame}`}
+        />
+      );
+    }
+
     return (
       <PdfCanvasPreview
         sourceUrl={sourceUrl}
@@ -1292,13 +1305,14 @@ export function IntoWorkbench() {
   const [previewRotation, setPreviewRotation] = useState(0);
   const [previewPage, setPreviewPage] = useState(1);
   const [previewPageCount, setPreviewPageCount] = useState(1);
+  const [previewInteractionMode, setPreviewInteractionMode] =
+    useState<PreviewInteractionMode>("pan");
   const [, setPreviewPan] = useState<PreviewPan>(() => resetPreviewPan());
   const [previewDragging, setPreviewDragging] = useState(false);
   const [previewFileProbe, setPreviewFileProbe] = useState<{
     invoiceId: string;
     status: ResolvedPreviewFileStatus;
   } | null>(null);
-  const [exactSupplierSearch, setExactSupplierSearch] = useState("");
   const [activeView, setActiveView] = useState<ActiveView>("queue");
   const [archiveFilters, setArchiveFilters] =
     useState<ArchiveFilterState>(defaultArchiveFilters);
@@ -1334,6 +1348,16 @@ export function IntoWorkbench() {
     return previewFileProbe.status;
   }, [previewFileProbe, selectedInvoice]);
   const selectedPurchaseJournal = selectedInvoice?.purchaseJournal ?? null;
+  const selectedInvoiceIsPdf = Boolean(
+    selectedInvoice &&
+      (selectedInvoice.fileType === "application/pdf" ||
+        fileExtension(selectedInvoice.fileName) === "pdf")
+  );
+  const selectedInvoiceIsImage = Boolean(
+    selectedInvoice &&
+      (selectedInvoice.fileType.startsWith("image/") ||
+        ["jpg", "jpeg", "png"].includes(fileExtension(selectedInvoice.fileName)))
+  );
   const matchedSupplierLabel =
     selectedPurchaseJournal?.supplierResolution.selectedAccountCode &&
     selectedPurchaseJournal.supplierResolution.selectedAccountName
@@ -1392,11 +1416,12 @@ export function IntoWorkbench() {
         selectedPurchaseJournal.supplierResolution.selectedAccountId
       )
     : undefined;
-  const supplierOptions: SelectOption[] = exactSupplierAccounts
-    .map((supplier) => ({
-      value: supplier.name,
-      label: `${supplier.code} - ${supplier.name}`,
-    }));
+  const duplicateSupplierCandidates =
+    selectedPurchaseJournal?.supplierResolution.reasonCode ===
+      "supplier_ambiguous" &&
+    selectedPurchaseJournal.supplierResolution.candidates.length > 1
+      ? selectedPurchaseJournal.supplierResolution.candidates
+      : [];
   const paymentConditionOptions: SelectOption[] = (
     state.exactMasterData?.paymentConditions ?? []
   )
@@ -1439,7 +1464,8 @@ export function IntoWorkbench() {
       value: costUnit.code,
       label: `${costUnit.code} - ${costUnit.description}`,
     }));
-  const previewCanPan = previewFileStatus === "available";
+  const previewCanPan =
+    previewFileStatus === "available" && previewInteractionMode === "pan";
   const pageCount = previewPageCount;
   const bookingLinePayloads = bookingLineDrafts.map(toBookingLinePayload);
   const hasBookingLineChanges = Boolean(
@@ -1490,7 +1516,7 @@ export function IntoWorkbench() {
       ? getRequiredBookingDataIssues(draft, selectedPurchaseJournal)
       : [];
   const contextualSupplierReviewVisible = Boolean(
-    selectedPurchaseJournal?.supplierResolution.reviewRequired
+    duplicateSupplierCandidates.length > 1
   );
   const requiredIssueFor = (
     fields: ValidationError["field"][]
@@ -2252,7 +2278,7 @@ export function IntoWorkbench() {
         setPreviewPageCount(1);
         setPreviewZoom(defaultPreviewZoom);
         setPreviewRotation(0);
-        setExactSupplierSearch("");
+        setPreviewInteractionMode("pan");
         setPreviewPan(resetPreviewPan());
         resetPreviewScroll();
       }, 0);
@@ -2870,19 +2896,6 @@ export function IntoWorkbench() {
     }
   }
 
-  function chooseExactSupplier(value: string) {
-    setExactSupplierSearch(value);
-    const account = exactSupplierAccounts.find(
-      (supplier) => `${supplier.code} - ${supplier.name}` === value
-    );
-    if (!account) {
-      return;
-    }
-
-    setExactSupplierSearch("");
-    void applyIntelligenceAction("selectSupplier", account.id);
-  }
-
   async function resolveDuplicatePrompt(
     prompt: DuplicateUploadPrompt,
     decision: "re_read" | "keep_existing" | "cancel_upload"
@@ -3292,6 +3305,21 @@ export function IntoWorkbench() {
     document.body.appendChild(link);
     link.click();
     link.remove();
+  }
+
+  async function copyExtractedText() {
+    const extractedText = selectedInvoice?.extractedData.rawText?.trim();
+    if (!extractedText) {
+      setMessage("No extracted invoice text is available to copy.");
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(extractedText);
+      setMessage("Extracted invoice text copied.");
+    } catch {
+      setMessage("Extracted invoice text could not be copied.");
+    }
   }
 
   function busyDisabledReason(actionKey: string) {
@@ -4750,12 +4778,42 @@ export function IntoWorkbench() {
                 </div>
                 <div className="flex flex-wrap gap-2 lg:justify-end">
                   <ActionButton
+                    variant={previewInteractionMode === "pan" ? "secondary" : "ghost"}
+                    onClick={() => setPreviewInteractionMode("pan")}
+                    className="min-h-9 px-3 py-1 text-xs"
+                  >
+                    Pan mode
+                  </ActionButton>
+                  <ActionButton
+                    variant={
+                      previewInteractionMode === "select_text" ? "secondary" : "ghost"
+                    }
+                    onClick={() => {
+                      setPreviewInteractionMode("select_text");
+                      setPreviewDragging(false);
+                      previewDragStartRef.current = null;
+                    }}
+                    disabled={
+                      !selectedInvoiceIsPdf || previewFileStatus !== "available"
+                    }
+                    disabledReason={
+                      selectedInvoiceIsPdf
+                        ? missingInvoiceFileMessage
+                        : "Text selection is available for PDF invoices."
+                    }
+                    className="min-h-9 px-3 py-1 text-xs"
+                  >
+                    Select text mode
+                  </ActionButton>
+                  <ActionButton
                     variant="ghost"
                     onClick={() => {
                       setPreviewRotation((value) => (value + 270) % 360);
                       setPreviewPan(resetPreviewPan());
                       resetPreviewScroll();
                     }}
+                    disabled={previewInteractionMode === "select_text"}
+                    disabledReason="Switch to Pan mode to rotate the invoice."
                     className="min-h-9 px-3 py-1 text-xs"
                   >
                     Rotate left
@@ -4767,6 +4825,8 @@ export function IntoWorkbench() {
                       setPreviewPan(resetPreviewPan());
                       resetPreviewScroll();
                     }}
+                    disabled={previewInteractionMode === "select_text"}
+                    disabledReason="Switch to Pan mode to rotate the invoice."
                     className="min-h-9 px-3 py-1 text-xs"
                   >
                     Rotate right
@@ -4780,14 +4840,28 @@ export function IntoWorkbench() {
                   >
                     Download original
                   </ActionButton>
+                  {selectedInvoiceIsImage &&
+                  selectedInvoice.extractedData.rawText?.trim() ? (
+                    <ActionButton
+                      variant="outline"
+                      onClick={() => void copyExtractedText()}
+                      className="min-h-9 px-3 py-1 text-xs"
+                    >
+                      Copy extracted text
+                    </ActionButton>
+                  ) : null}
                 </div>
               </div>
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200 bg-stone-50/70 px-4 py-2 text-sm">
                 <div className="text-stone-600">
-                  Page {previewPage} of {pageCount} - Zoom {Math.round(previewZoom * 100)}%
-                  {previewRotation ? ` - Rotated ${previewRotation}deg` : ""}
+                  {previewInteractionMode === "select_text"
+                    ? "Select and copy text in the PDF viewer."
+                    : `Page ${previewPage} of ${pageCount} - Zoom ${Math.round(
+                        previewZoom * 100
+                      )}%${previewRotation ? ` - Rotated ${previewRotation}deg` : ""}`}
                 </div>
-                <div className="flex gap-2">
+                {previewInteractionMode === "pan" ? (
+                  <div className="flex gap-2">
                   <ActionButton
                     variant="ghost"
                     onClick={() => setPreviewPage((value) => Math.max(1, value - 1))}
@@ -4808,16 +4882,17 @@ export function IntoWorkbench() {
                   >
                     Next
                   </ActionButton>
-                </div>
+                  </div>
+                ) : null}
               </div>
               <div
                 ref={previewViewportRef}
-                className={`relative h-[min(78vh,980px)] min-h-[680px] select-none overflow-auto bg-[#f7f8f5] p-3 [scrollbar-width:none] sm:p-4 [&::-webkit-scrollbar]:hidden ${
+                className={`relative h-[min(78vh,980px)] min-h-[680px] overflow-auto bg-[#f7f8f5] p-3 [scrollbar-width:none] sm:p-4 [&::-webkit-scrollbar]:hidden ${
                   previewCanPan
                     ? previewDragging
-                      ? "cursor-grabbing"
-                      : "cursor-grab"
-                    : ""
+                      ? "select-none cursor-grabbing"
+                      : "select-none cursor-grab"
+                    : "select-text cursor-text"
                 } lg:h-[calc(100vh-170px)]`}
                 role="presentation"
                 onPointerDown={startPreviewPan}
@@ -4836,6 +4911,7 @@ export function IntoWorkbench() {
                     zoom={previewZoom}
                     rotation={previewRotation}
                     page={previewPage}
+                    interactionMode={previewInteractionMode}
                     onPageCount={handlePreviewPageCount}
                   />
                 </div>
@@ -4875,7 +4951,7 @@ export function IntoWorkbench() {
                       label="Supplier"
                       required
                       value={draft.supplierName}
-                      options={supplierOptions}
+                      options={[]}
                       listId={`supplier-options-${selectedInvoice.id}`}
                       onChange={(value) => updateDraft("supplierName", value)}
                       disabled={!hasPermission("edit")}
@@ -4895,17 +4971,18 @@ export function IntoWorkbench() {
                         <SupplierReliabilityBadge summary={selectedSupplierLearning} />
                       </div>
                     ) : null}
-                    {selectedPurchaseJournal?.supplierResolution.reviewRequired ? (
+                    {contextualSupplierReviewVisible ? (
                       <div className="sm:col-span-2 rounded-lg border border-stone-300 bg-stone-50 p-3">
                         <p className="text-sm font-semibold text-stone-950">
-                          Choose the Exact supplier
+                          Multiple Exact suppliers match
                         </p>
                         <p className="mt-1 text-xs leading-5 text-stone-700">
-                          {selectedPurchaseJournal.supplierResolution.reasoning[0]}
+                          Select the supplier shown on this invoice. INTO will remember
+                          the choice for this supplier layout.
                         </p>
-                        {selectedPurchaseJournal.supplierResolution.candidates.length ? (
+                        {duplicateSupplierCandidates.length > 1 ? (
                           <div className="mt-2 flex flex-wrap gap-2">
-                            {selectedPurchaseJournal.supplierResolution.candidates.map(
+                            {duplicateSupplierCandidates.map(
                               (candidate) => (
                                 <ActionButton
                                   key={candidate.account.id}
@@ -4946,31 +5023,6 @@ export function IntoWorkbench() {
                             )}
                           </div>
                         ) : null}
-                        <label className="mt-3 block text-xs font-semibold text-stone-800">
-                          Search all Exact suppliers
-                          <input
-                            list={`supplier-resolution-options-${selectedInvoice.id}`}
-                            value={exactSupplierSearch}
-                            onChange={(event) => chooseExactSupplier(event.target.value)}
-                            disabled={
-                              !hasPermission("approve") ||
-                              busy.startsWith("supplier-") ||
-                              !exactSupplierAccounts.length
-                            }
-                            placeholder="Code or supplier name"
-                            className="mt-1.5 w-full cursor-text rounded-md border border-stone-300 bg-white px-3 py-2 text-sm font-normal text-stone-900 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100 disabled:cursor-not-allowed disabled:bg-stone-100 disabled:text-stone-500"
-                          />
-                        </label>
-                        <datalist
-                          id={`supplier-resolution-options-${selectedInvoice.id}`}
-                        >
-                          {exactSupplierAccounts.map((supplier) => (
-                            <option
-                              key={supplier.id}
-                              value={`${supplier.code} - ${supplier.name}`}
-                            />
-                          ))}
-                        </datalist>
                       </div>
                     ) : null}
                     <TextField

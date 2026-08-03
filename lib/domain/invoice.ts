@@ -711,6 +711,7 @@ export type SupplierLearningDecision = {
   accountId: string;
   decidedAt: string;
   invoiceId?: string;
+  formatFingerprint?: string;
   trustState?: "pending" | "trusted" | "legacy";
 };
 

@@ -369,14 +369,14 @@ test("re-read and supplier selection each invalidate an earlier Learn draft", ()
     "supplier_ambiguous_a"
   );
   assert.equal(selected.revision, beforeSelectionRevision + 1);
-  assert.ok(
+  assert.equal(
     getStore().learning.supplierSelections.some(
       (decision) =>
         decision.supplierIdentity === "vat:NL123456789B01" &&
-        decision.accountId === "supplier_ambiguous_b" &&
-        decision.trustState === "trusted"
+        decision.accountId === "supplier_ambiguous_b"
     ),
-    "an unapproved selection must not erase prior trusted evidence"
+    false,
+    "the explicit choice must replace the prior default for the same layout"
   );
   assert.throws(
     () =>
@@ -388,6 +388,113 @@ test("re-read and supplier selection each invalidate an earlier Learn draft", ()
       ),
     /revision changed/i
   );
+});
+
+test("an explicit duplicate-supplier choice becomes the default for the same layout", () => {
+  const store = getStore();
+  store.exactMasterDataCaches = [
+    {
+      userId: getCompanyConnectionUserId(),
+      cache: createMockExactMasterData(),
+    },
+  ];
+  const extractedData = {
+    ...emptyExtractedInvoiceData(),
+    supplierName: "Acme Supplies BV",
+    supplierVatNumber: "NL123456789B01",
+    invoiceNumber: "ACME-TRAIN-001",
+    referenceCode: "ACME-TRAIN-001",
+    invoiceDate: "2026-08-03",
+    paymentTerms: "30 days",
+    currency: "EUR",
+    netAmount: 100,
+    vatAmount: 21,
+    grossAmount: 121,
+    expenseDescription: "Office supplies",
+    rawText:
+      "ACME SUPPLIES INVOICE\nFactuurnummer ACME-TRAIN-001\nNet 100.00 VAT 21.00 Total 121.00",
+    documentTextMode: "plain_text" as const,
+  };
+  const trainingInvoice = createUploadedInvoice({
+    fileName: "acme-training.pdf",
+    fileType: "application/pdf",
+    fileSize: 1_000,
+    checksum: "acme-training-hash",
+    storageKey: "storage/tmp-invoices/acme-training.pdf",
+  });
+  updateInvoiceExtraction(trainingInvoice.id, extractedData, {
+    applyLearning: false,
+  });
+  const ambiguous = recomputeInvoiceState(trainingInvoice.id)!;
+
+  assert.equal(ambiguous.purchaseJournal!.supplierResolution.reasonCode, "supplier_ambiguous");
+  const selected = selectInvoiceSupplier(
+    trainingInvoice.id,
+    "supplier_ambiguous_a"
+  )!;
+  const learnedChoice = store.learning.supplierSelections.find(
+    (decision) =>
+      decision.invoiceId === trainingInvoice.id &&
+      decision.accountId === "supplier_ambiguous_a"
+  );
+
+  assert.equal(learnedChoice?.trustState, "trusted");
+  assert.ok(learnedChoice?.formatFingerprint);
+  assert.equal(
+    selected.purchaseJournal!.supplierResolution.selectedAccountId,
+    "supplier_ambiguous_a"
+  );
+
+  const futureInvoice = createUploadedInvoice({
+    fileName: "acme-future.pdf",
+    fileType: "application/pdf",
+    fileSize: 1_000,
+    checksum: "acme-future-hash",
+    storageKey: "storage/tmp-invoices/acme-future.pdf",
+  });
+  updateInvoiceExtraction(
+    futureInvoice.id,
+    {
+      ...extractedData,
+      invoiceNumber: "ACME-TRAIN-002",
+      referenceCode: "ACME-TRAIN-002",
+      rawText:
+        "ACME SUPPLIES INVOICE\nFactuurnummer ACME-TRAIN-002\nNet 200.00 VAT 42.00 Total 242.00",
+      netAmount: 200,
+      vatAmount: 42,
+      grossAmount: 242,
+    },
+    { applyLearning: false }
+  );
+  const learnedMatch = recomputeInvoiceState(futureInvoice.id)!;
+
+  assert.equal(
+    learnedMatch.purchaseJournal!.supplierResolution.selectedAccountId,
+    "supplier_ambiguous_a"
+  );
+  assert.equal(learnedMatch.purchaseJournal!.supplierResolution.reviewRequired, false);
+
+  const conflictingInvoice = createUploadedInvoice({
+    fileName: "acme-conflict.pdf",
+    fileType: "application/pdf",
+    fileSize: 1_000,
+    checksum: "acme-conflict-hash",
+    storageKey: "storage/tmp-invoices/acme-conflict.pdf",
+  });
+  updateInvoiceExtraction(
+    conflictingInvoice.id,
+    {
+      ...extractedData,
+      invoiceNumber: "ACME-TRAIN-003",
+      referenceCode: "ACME-TRAIN-003",
+      iban: "NL11ABNA0101010102",
+    },
+    { applyLearning: false }
+  );
+  const conflictingMatch = recomputeInvoiceState(conflictingInvoice.id)!;
+
+  assert.equal(conflictingMatch.purchaseJournal!.supplierResolution.selectedAccountId, undefined);
+  assert.equal(conflictingMatch.purchaseJournal!.supplierResolution.reasonCode, "supplier_ambiguous");
 });
 
 test("a recompute that changes Learn-visible supplier data increments the revision", () => {

@@ -356,12 +356,48 @@ const globalStore = globalThis as typeof globalThis & {
     promise: Promise<void>;
   };
   __INTO_STORE_PERSISTING?: Promise<void>;
+  __INTO_STORE_PERSISTENCE_BATCH?: StorePersistenceBatch;
   __INTO_STORE_PERSISTENCE_ERROR?: unknown;
   __INTO_STORE_DIRTY?: boolean;
   __INTO_STORE_DIRTY_REVISION?: number;
   __INTO_STORE_PERSISTED_DIRTY_REVISION?: number;
   __INTO_LEARNING_PERSISTENCE_CONTEXT?: LearningPersistenceContext;
 };
+
+type StorePersistenceFailure = {
+  identity: string;
+  store: IntoStore;
+  error: unknown;
+};
+
+type StorePersistenceBatch = {
+  identity: string;
+  store: IntoStore;
+  context: LearningPersistenceContext | undefined;
+  dirtyRevision: number;
+  started: boolean;
+};
+
+function isStorePersistenceFailure(
+  value: unknown
+): value is StorePersistenceFailure {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      "identity" in value &&
+      "store" in value &&
+      "error" in value
+  );
+}
+
+function hasStorePersistenceFailure(identity: string, store: IntoStore) {
+  const failure = globalStore.__INTO_STORE_PERSISTENCE_ERROR;
+  return Boolean(
+    failure &&
+      (!isStorePersistenceFailure(failure) ||
+        (failure.identity === identity && failure.store === store))
+  );
+}
 
 export function getStore() {
   if (
@@ -530,7 +566,7 @@ async function hydrateConfiguredStore(
           previousStore &&
           globalStore.__INTO_STORE_HYDRATED_FOR === identity &&
           !globalStore.__INTO_STORE_DIRTY &&
-          !globalStore.__INTO_STORE_PERSISTENCE_ERROR
+          !hasStorePersistenceFailure(identity, previousStore)
       );
       if (
         canReuseCachedState &&
@@ -622,24 +658,81 @@ export function hydrateStoreForPersistentRequest() {
 }
 
 function queueStorePersistence() {
-  const previous = globalStore.__INTO_STORE_PERSISTING ?? Promise.resolve();
+  const identity = databasePersistenceIdentity();
+  const store = getStore();
+  const context = globalStore.__INTO_LEARNING_PERSISTENCE_CONTEXT;
+  const dirtyRevision = globalStore.__INTO_STORE_DIRTY_REVISION ?? 0;
+  const pending = globalStore.__INTO_STORE_PERSISTENCE_BATCH;
+  if (
+    pending &&
+    !pending.started &&
+    pending.identity === identity &&
+    pending.store === store &&
+    pending.context === context
+  ) {
+    pending.dirtyRevision = Math.max(pending.dirtyRevision, dirtyRevision);
+    return;
+  }
+  const batch: StorePersistenceBatch = {
+    identity,
+    store,
+    context,
+    dirtyRevision,
+    started: false,
+  };
+  globalStore.__INTO_STORE_PERSISTENCE_BATCH = batch;
+  const previous = (
+    globalStore.__INTO_STORE_PERSISTING ?? Promise.resolve()
+  ).catch((error: unknown) => {
+    globalStore.__INTO_STORE_PERSISTENCE_ERROR ??= error;
+  });
   globalStore.__INTO_STORE_PERSISTING = previous
     .then(async () => {
-      const dirtyRevision = globalStore.__INTO_STORE_DIRTY_REVISION ?? 0;
+      batch.started = true;
+      if (globalStore.__INTO_STORE_PERSISTENCE_BATCH === batch) {
+        delete globalStore.__INTO_STORE_PERSISTENCE_BATCH;
+      }
+      if (
+        databasePersistenceIdentity() !== batch.identity ||
+        globalStore.__INTO_STORE !== batch.store
+      ) {
+        return;
+      }
       const persistedRevision =
         globalStore.__INTO_STORE_PERSISTED_DIRTY_REVISION ?? 0;
-      if (dirtyRevision <= persistedRevision) return;
-      await saveConfiguredStoreSnapshot(getStore());
+      if (batch.dirtyRevision <= persistedRevision) return;
+      await saveConfiguredStoreSnapshot(
+        batch.store,
+        batch.context,
+        batch.identity
+      );
+      if (
+        databasePersistenceIdentity() !== batch.identity ||
+        globalStore.__INTO_STORE !== batch.store
+      ) {
+        return;
+      }
       globalStore.__INTO_STORE_PERSISTED_DIRTY_REVISION = Math.max(
         globalStore.__INTO_STORE_PERSISTED_DIRTY_REVISION ?? 0,
-        dirtyRevision
+        batch.dirtyRevision
       );
       globalStore.__INTO_STORE_DIRTY =
         (globalStore.__INTO_STORE_DIRTY_REVISION ?? 0) >
         (globalStore.__INTO_STORE_PERSISTED_DIRTY_REVISION ?? 0);
     })
     .catch((error: unknown) => {
-      globalStore.__INTO_STORE_PERSISTENCE_ERROR ??= error;
+      const current = globalStore.__INTO_STORE_PERSISTENCE_ERROR;
+      if (
+        !current ||
+        (isStorePersistenceFailure(current) &&
+          (current.identity !== batch.identity || current.store !== batch.store))
+      ) {
+        globalStore.__INTO_STORE_PERSISTENCE_ERROR = {
+          identity: batch.identity,
+          store: batch.store,
+          error,
+        } satisfies StorePersistenceFailure;
+      }
     });
 }
 
@@ -660,14 +753,23 @@ export async function flushStoreToPersistence(
   if (context) {
     globalStore.__INTO_LEARNING_PERSISTENCE_CONTEXT = context;
   }
+  const identity = databasePersistenceIdentity();
+  const store = getStore();
   if (databaseMode() !== "memory" && globalStore.__INTO_STORE_DIRTY) {
     queueStorePersistence();
   }
   await globalStore.__INTO_STORE_PERSISTING;
-  if (globalStore.__INTO_STORE_PERSISTENCE_ERROR) {
-    const error = globalStore.__INTO_STORE_PERSISTENCE_ERROR;
+  const failure = globalStore.__INTO_STORE_PERSISTENCE_ERROR;
+  if (failure) {
     globalStore.__INTO_STORE_PERSISTENCE_ERROR = undefined;
-    throw error;
+    if (!isStorePersistenceFailure(failure)) {
+      // Preserve one-time reporting for an untagged failure left by an older
+      // hot-reloaded module.
+      throw failure;
+    }
+    if (failure.identity === identity && failure.store === store) {
+      throw failure.error;
+    }
   }
 }
 

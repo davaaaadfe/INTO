@@ -1,11 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  flushStoreToPersistence,
   getStore,
   hydrateStoreFromPersistence,
+  hydrateStoreForPersistentRequest,
+  persistStoreSoon,
+  setLearningPersistenceContext,
   type IntoStore,
 } from "../lib/repository/invoice-store";
 import { closeConfiguredLearningRepository } from "../lib/repository/configured-learning-repository";
+import { databasePersistenceIdentity } from "../lib/repository/sqlite-store";
 
 function snapshot(invoiceId: string): IntoStore {
   return {
@@ -46,6 +51,7 @@ type HydrationRuntime = typeof globalThis & {
   __INTO_STORE_HYDRATED_FOR?: string;
   __INTO_STORE_HYDRATING?: unknown;
   __INTO_STORE_PERSISTING?: Promise<void>;
+  __INTO_STORE_PERSISTENCE_BATCH?: unknown;
   __INTO_STORE_PERSISTENCE_ERROR?: unknown;
   __INTO_STORE_DIRTY?: boolean;
   __INTO_STORE_DIRTY_REVISION?: number;
@@ -65,6 +71,7 @@ const hydrationRuntimeKeys = [
   "__INTO_STORE_HYDRATED_FOR",
   "__INTO_STORE_HYDRATING",
   "__INTO_STORE_PERSISTING",
+  "__INTO_STORE_PERSISTENCE_BATCH",
   "__INTO_STORE_PERSISTENCE_ERROR",
   "__INTO_STORE_DIRTY",
   "__INTO_STORE_DIRTY_REVISION",
@@ -127,6 +134,11 @@ async function withPostgresHydration(
   const runtime = globalThis as HydrationRuntime;
   const previousRuntime = snapshotHydrationRuntime(runtime);
   const selectedUrls: string[] = [];
+  const revisions = new Map(
+    [...snapshots].flatMap(([url, stored]) =>
+      stored && !(stored instanceof Error) ? [[url, stored.revision]] : []
+    )
+  );
 
   environment.NODE_ENV = "production";
   process.env.DATABASE_MODE = "postgres";
@@ -140,6 +152,7 @@ async function withPostgresHydration(
     assert.ok(connectionString);
     const body = JSON.parse(String(init?.body)) as {
       query?: string;
+      params?: unknown[];
       queries?: Array<{ query: string }>;
     };
     if (body.queries) {
@@ -170,7 +183,35 @@ async function withPostgresHydration(
           { name: "payload", dataTypeID: 114 },
           { name: "revision", dataTypeID: 23 },
         ];
-        rows = [[JSON.stringify(stored), "1"]];
+        rows = [[JSON.stringify(stored), String(revisions.get(connectionString) ?? 0)]];
+      }
+    } else if (sql.startsWith("SELECT revision FROM into_runtime_store")) {
+      const revision = revisions.get(connectionString);
+      fields = [{ name: "revision", dataTypeID: 23 }];
+      if (revision !== undefined) rows = [[String(revision)]];
+    } else if (
+      sql.startsWith("INSERT INTO into_runtime_store") ||
+      sql.startsWith("UPDATE into_runtime_store SET")
+    ) {
+      const insert = sql.startsWith("INSERT INTO into_runtime_store");
+      const payload = body.params?.[insert ? 1 : 0];
+      const nextRevision = Number(body.params?.[insert ? 2 : 1]);
+      const expectedRevision = Number(body.params?.[3]);
+      assert.ok(typeof payload === "string");
+      const currentRevision = revisions.get(connectionString);
+      if (
+        (insert &&
+          (currentRevision === undefined || currentRevision === expectedRevision)) ||
+        (!insert &&
+          currentRevision !== undefined &&
+          currentRevision === expectedRevision)
+      ) {
+        const nextSnapshot = JSON.parse(payload) as IntoStore;
+        assert.equal(nextSnapshot.revision, nextRevision);
+        snapshots.set(connectionString, nextSnapshot);
+        revisions.set(connectionString, nextRevision);
+        fields = [{ name: "revision", dataTypeID: 23 }];
+        rows = [[String(nextRevision)]];
       }
     }
 
@@ -238,6 +279,211 @@ test("a PostgreSQL identity switch cannot return the previous database snapshot"
       await secondHydration;
       assert.equal(getStore().invoices[0]?.id, "invoice-from-b");
       await firstHydration;
+    }
+  );
+});
+
+test("queued persistence keeps the database and store identity captured before hydration switches", async () => {
+  const firstUrl = "postgresql://test:test@queued-persistence-a.example/into";
+  const secondUrl = "postgresql://test:test@queued-persistence-b.example/into";
+  const snapshots = new Map<string, IntoStore | Error | null>([
+    [firstUrl, snapshot("invoice-from-a")],
+    [secondUrl, snapshot("invoice-from-b")],
+  ]);
+
+  await withPostgresHydration(
+    firstUrl,
+    snapshots,
+    async () => {},
+    async () => {
+      await hydrateStoreFromPersistence(true);
+      getStore().invoices[0]!.id = "queued-change-from-a";
+      persistStoreSoon();
+
+      process.env.DATABASE_URL = secondUrl;
+      await hydrateStoreFromPersistence(true);
+      await flushStoreToPersistence();
+
+      assert.equal(getStore().invoices[0]?.id, "invoice-from-b");
+      const persistedSecondSnapshot = snapshots.get(secondUrl);
+      assert.ok(
+        persistedSecondSnapshot && !(persistedSecondSnapshot instanceof Error)
+      );
+      assert.equal(
+        persistedSecondSnapshot.invoices[0]?.id,
+        "invoice-from-b"
+      );
+    }
+  );
+});
+
+test("synchronous persistence requests for one store coalesce into one CAS save", async () => {
+  const url = "postgresql://test:test@queued-coalescing.example/into";
+  const snapshots = new Map<string, IntoStore | Error | null>([
+    [url, snapshot("invoice-before-coalescing")],
+  ]);
+
+  await withPostgresHydration(
+    url,
+    snapshots,
+    async () => {},
+    async () => {
+      await hydrateStoreFromPersistence(true);
+      getStore().invoices[0]!.id = "first-synchronous-change";
+      persistStoreSoon();
+      getStore().invoices[0]!.id = "second-synchronous-change";
+      persistStoreSoon();
+      await flushStoreToPersistence();
+
+      const persisted = snapshots.get(url);
+      assert.ok(persisted && !(persisted instanceof Error));
+      assert.equal(persisted.invoices[0]?.id, "second-synchronous-change");
+      assert.equal(persisted.revision, 2);
+    }
+  );
+});
+
+test("synchronous persistence requests with distinct contexts keep separate CAS ownership", async () => {
+  const url = "postgresql://test:test@queued-context-ownership.example/into";
+  const snapshots = new Map<string, IntoStore | Error | null>([
+    [url, snapshot("invoice-before-contexts")],
+  ]);
+
+  await withPostgresHydration(
+    url,
+    snapshots,
+    async () => {},
+    async () => {
+      await hydrateStoreFromPersistence(true);
+      setLearningPersistenceContext({ requestId: "first-context" });
+      getStore().invoices[0]!.id = "first-context-change";
+      persistStoreSoon();
+      setLearningPersistenceContext({ requestId: "second-context" });
+      getStore().invoices[0]!.id = "second-context-change";
+      persistStoreSoon();
+      await flushStoreToPersistence();
+
+      const persisted = snapshots.get(url);
+      assert.ok(persisted && !(persisted instanceof Error));
+      assert.equal(persisted.invoices[0]?.id, "second-context-change");
+      assert.equal(persisted.revision, 3);
+    }
+  );
+});
+
+test("a queued save survives an inherited rejected HMR tail and reports that legacy error once", async () => {
+  const url = "postgresql://test:test@rejected-hmr-tail.example/into";
+  const snapshots = new Map<string, IntoStore | Error | null>([
+    [url, snapshot("invoice-before-hmr-tail")],
+  ]);
+
+  await withPostgresHydration(
+    url,
+    snapshots,
+    async () => {},
+    async () => {
+      await hydrateStoreFromPersistence(true);
+      getStore().invoices[0]!.id = "invoice-saved-after-hmr-tail";
+      const legacyError = new Error("legacy HMR persistence failure");
+      const runtime = globalThis as HydrationRuntime;
+      runtime.__INTO_STORE_PERSISTING = Promise.reject(legacyError);
+
+      persistStoreSoon();
+      await runtime.__INTO_STORE_PERSISTING;
+
+      const persisted = snapshots.get(url);
+      assert.ok(persisted && !(persisted instanceof Error));
+      assert.equal(persisted.invoices[0]?.id, "invoice-saved-after-hmr-tail");
+      await assert.rejects(
+        flushStoreToPersistence(),
+        (error: unknown) => error === legacyError
+      );
+      await assert.doesNotReject(flushStoreToPersistence());
+    }
+  );
+});
+
+test("a stale tagged failure does not disable warm hydration for the current store", async () => {
+  const staleUrl = "postgresql://test:test@stale-warm-error-a.example/into";
+  const currentUrl = "postgresql://test:test@stale-warm-error-b.example/into";
+  const currentSnapshot = snapshot("invoice-from-warm-b");
+  currentSnapshot.learningRepositoryMigratedAt = "2026-08-03T00:00:00.000Z";
+  const snapshots = new Map<string, IntoStore | Error | null>([
+    [currentUrl, currentSnapshot],
+  ]);
+
+  await withPostgresHydration(
+    currentUrl,
+    snapshots,
+    async () => {},
+    async () => {
+      process.env.LEARNING_V2_ENABLED = "true";
+      process.env.SUPPLIER_LEARNING_MODE = "apply";
+      process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY = "stale-warm-error-key";
+      await hydrateStoreFromPersistence(true);
+      const currentStore = getStore();
+
+      process.env.DATABASE_URL = staleUrl;
+      const staleIdentity = databasePersistenceIdentity();
+      process.env.DATABASE_URL = currentUrl;
+      const runtime = globalThis as HydrationRuntime;
+      runtime.__INTO_STORE_PERSISTENCE_ERROR = {
+        identity: staleIdentity,
+        store: snapshot("invoice-from-stale-a"),
+        error: new Error("stale A persistence failure"),
+      };
+      snapshots.set(currentUrl, new Error("full B snapshot reload was used"));
+
+      await hydrateStoreForPersistentRequest();
+
+      assert.equal(getStore(), currentStore);
+      assert.equal(getStore().invoices[0]?.id, "invoice-from-warm-b");
+    }
+  );
+});
+
+test("a persistence failure reported for one identity cannot poison a later identity flush", async () => {
+  const firstUrl = "postgresql://test:test@queued-failure-a.example/into";
+  const secondUrl = "postgresql://test:test@queued-failure-b.example/into";
+  const snapshots = new Map<string, IntoStore | Error | null>([
+    [firstUrl, snapshot("invoice-from-failing-a")],
+    [secondUrl, snapshot("invoice-from-healthy-b")],
+  ]);
+  let queuedFailureReached!: () => void;
+  const queuedFailure = new Promise<void>((resolve) => {
+    queuedFailureReached = resolve;
+  });
+  let observeNextFailure = false;
+
+  await withPostgresHydration(
+    firstUrl,
+    snapshots,
+    async () => {},
+    async () => {
+      await hydrateStoreFromPersistence(true);
+      getStore().invoices[0]!.id = "first-failed-change-from-a";
+      persistStoreSoon();
+      await assert.rejects(flushStoreToPersistence(), /A persistence failed/);
+
+      getStore().invoices[0]!.id = "second-failed-change-from-a";
+      observeNextFailure = true;
+      persistStoreSoon();
+      await queuedFailure;
+
+      process.env.DATABASE_URL = secondUrl;
+      await hydrateStoreFromPersistence(true);
+      await assert.doesNotReject(flushStoreToPersistence());
+      assert.equal(getStore().invoices[0]?.id, "invoice-from-healthy-b");
+    },
+    async (connectionString, sql) => {
+      if (
+        connectionString === firstUrl &&
+        (sql.startsWith("INSERT INTO into_runtime_store") ||
+          sql.startsWith("UPDATE into_runtime_store SET"))
+      ) {
+        if (observeNextFailure) queuedFailureReached();
+        throw new Error("A persistence failed");
+      }
     }
   );
 });

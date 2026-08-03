@@ -512,6 +512,10 @@ test("persistent supplier learning is normalized, encrypted, and authoritative",
         bookingLines: [],
       },
     ];
+    store.learning.supplierExamples[0]!.originalExtractedData!.lineItems =
+      undefined as never;
+    store.learning.supplierExamples[0]!.finalExtractedData!.lineItems =
+      undefined as never;
     store.learning.supplierSelections = [
       {
         supplierIdentity: `name:${otherSupplier.name}`,

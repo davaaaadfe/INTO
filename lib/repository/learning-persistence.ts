@@ -304,7 +304,7 @@ function minimizedExtractedData(data: ExtractedInvoiceData | undefined) {
     serviceEndDate: data.serviceEndDate,
     reverseChargeMentioned: data.reverseChargeMentioned,
     intraCommunityMentioned: data.intraCommunityMentioned,
-    lineItems: data.lineItems.map((line) => ({
+    lineItems: (data.lineItems ?? []).map((line) => ({
       description: line.description,
       quantity: line.quantity,
       unitPrice: line.unitPrice,

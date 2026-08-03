@@ -351,7 +351,10 @@ function createInitialStore(): IntoStore {
 const globalStore = globalThis as typeof globalThis & {
   __INTO_STORE?: IntoStore;
   __INTO_STORE_HYDRATED_FOR?: string;
-  __INTO_STORE_HYDRATING?: Promise<void>;
+  __INTO_STORE_HYDRATING?: {
+    identity: string;
+    promise: Promise<void>;
+  };
   __INTO_STORE_PERSISTING?: Promise<void>;
   __INTO_STORE_PERSISTENCE_ERROR?: unknown;
   __INTO_STORE_DIRTY?: boolean;
@@ -451,22 +454,27 @@ async function loadConfiguredStoreRevision() {
 
 async function saveConfiguredStoreSnapshot(
   store: IntoStore,
-  context = globalStore.__INTO_LEARNING_PERSISTENCE_CONTEXT
+  context = globalStore.__INTO_LEARNING_PERSISTENCE_CONTEXT,
+  expectedIdentity?: string
 ) {
+  const identityIsCurrent = () =>
+    !expectedIdentity || databasePersistenceIdentity() === expectedIdentity;
   const saveSnapshot = async (snapshot: IntoStore) => {
+    if (!identityIsCurrent()) return false;
     if (databaseMode() === "sqlite") {
       await saveSqliteStoreSnapshot(snapshot);
-      return;
-    }
-    if (isPostgresPersistenceEnabled()) {
+    } else if (isPostgresPersistenceEnabled()) {
       await saveStoreSnapshot(snapshot);
     }
+    return identityIsCurrent();
   };
 
   // Store OCR/layout evidence only in encrypted artifacts. Preparing those
   // artifacts before the CAS can at worst leave an unreferenced encrypted row;
   // it cannot publish a losing Learn or reset mutation.
+  if (!identityIsCurrent()) return;
   const artifactsPrepared = await persistAnalysisArtifacts(store);
+  if (!identityIsCurrent()) return;
   const commitSnapshot = artifactsPrepared
     ? snapshotWithoutDocumentEvidence(store)
     : store;
@@ -474,17 +482,18 @@ async function saveConfiguredStoreSnapshot(
   // The revision-protected, already-sanitized snapshot is the mutation commit
   // point. Project learning only after this request wins the CAS, so a losing
   // serverless instance cannot leave behind a ghost Learn or reset operation.
-  await saveSnapshot(commitSnapshot);
+  if (!(await saveSnapshot(commitSnapshot))) return;
   if (commitSnapshot !== store) {
     store.schemaVersion = commitSnapshot.schemaVersion;
     store.revision = commitSnapshot.revision;
   }
   const normalized = await persistLearningState(store, context);
+  if (!identityIsCurrent()) return;
   if (normalized) {
     const compactSnapshot = snapshotWithoutActiveLearning(store);
     compactSnapshot.revision = store.revision;
     try {
-      await saveSnapshot(compactSnapshot);
+      if (!(await saveSnapshot(compactSnapshot))) return;
       store.schemaVersion = compactSnapshot.schemaVersion;
       store.revision = compactSnapshot.revision;
     } catch (error) {
@@ -508,9 +517,13 @@ async function hydrateConfiguredStore(
   }
 
   await globalStore.__INTO_STORE_PERSISTING;
+  if (databasePersistenceIdentity() !== identity) {
+    return hydrateConfiguredStore(force, reuseUnchangedNormalizedLearning);
+  }
 
-  if (!globalStore.__INTO_STORE_HYDRATING) {
-    globalStore.__INTO_STORE_HYDRATING = (async () => {
+  let hydration = globalStore.__INTO_STORE_HYDRATING;
+  if (!hydration) {
+    const promise = (async () => {
       const previousStore = globalStore.__INTO_STORE;
       const canReuseCachedState = Boolean(
         reuseUnchangedNormalizedLearning &&
@@ -523,6 +536,7 @@ async function hydrateConfiguredStore(
         canReuseCachedState &&
         previousStore &&
         (await loadConfiguredStoreRevision()) === previousStore.revision &&
+        databasePersistenceIdentity() === identity &&
         (await hydrateLearningState(previousStore, false, true))
       ) {
         return;
@@ -530,6 +544,7 @@ async function hydrateConfiguredStore(
 
       delete globalStore.__INTO_STORE_HYDRATED_FOR;
       const snapshot = await loadConfiguredStoreSnapshot();
+      if (databasePersistenceIdentity() !== identity) return;
       const snapshotLearning = snapshot?.learning;
       const reuseNormalizedLearning = Boolean(
         canReuseCachedState &&
@@ -546,12 +561,16 @@ async function hydrateConfiguredStore(
         }
       } else {
         globalStore.__INTO_STORE = createInitialStore();
-        globalStore.__INTO_STORE_PERSISTING = saveConfiguredStoreSnapshot(
-          globalStore.__INTO_STORE
+        await saveConfiguredStoreSnapshot(
+          globalStore.__INTO_STORE,
+          undefined,
+          identity
         );
+        if (databasePersistenceIdentity() !== identity) return;
       }
       return hydrateLearningState(getStore(), !reuseNormalizedLearning).then(
         (learningEnabled) => {
+          if (databasePersistenceIdentity() !== identity) return;
           if (
             !learningEnabled &&
             reuseNormalizedLearning &&
@@ -575,13 +594,23 @@ async function hydrateConfiguredStore(
           }
         }
       );
-    })()
-      .finally(() => {
-        globalStore.__INTO_STORE_HYDRATING = undefined;
-      });
+    })();
+    hydration = { identity, promise };
+    globalStore.__INTO_STORE_HYDRATING = hydration;
   }
 
-  await globalStore.__INTO_STORE_HYDRATING;
+  try {
+    await hydration.promise;
+  } catch (error) {
+    if (databasePersistenceIdentity() === hydration.identity) throw error;
+  } finally {
+    if (globalStore.__INTO_STORE_HYDRATING === hydration) {
+      delete globalStore.__INTO_STORE_HYDRATING;
+    }
+  }
+  if (databasePersistenceIdentity() !== hydration.identity) {
+    return hydrateConfiguredStore(force, reuseUnchangedNormalizedLearning);
+  }
 }
 
 export function hydrateStoreFromPersistence(force = false) {

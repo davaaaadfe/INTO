@@ -678,7 +678,8 @@ test("an unmatched hard supplier identifier blocks a contradictory soft match", 
 
   assert.equal(booking.supplierResolution.selectedAccountId, undefined);
   assert.equal(booking.supplierResolution.reviewRequired, true);
-  assert.equal(booking.supplierResolution.reasonCode, "supplier_ambiguous");
+  assert.equal(booking.supplierResolution.reasonCode, "supplier_low_confidence");
+  assert.equal(booking.supplierResolution.candidates.length, 0);
 });
 
 test("low supplier reliability requests field review without overriding a unique identity", () => {
@@ -992,7 +993,7 @@ test("combines supplier name and address before automatic selection", () => {
   assert.equal(booking.supplierResolution.method, "Evidence fusion");
 });
 
-test("requires review when city and country identify multiple imported suppliers", () => {
+test("treats city-and-country-only supplier matches as low confidence", () => {
   const masterData = {
     ...exactMasterData,
     suppliers: [
@@ -1031,14 +1032,11 @@ test("requires review when city and country identify multiple imported suppliers
 
   assert.equal(booking.supplierResolution.selectedAccountId, undefined);
   assert.equal(booking.supplierResolution.reviewRequired, true);
-  assert.equal(
-    booking.supplierResolution.reasoning[0],
-    "Multiple supplier matches found. Please choose the correct supplier."
-  );
-  assert.equal(booking.supplierResolution.candidates.length, 2);
+  assert.equal(booking.supplierResolution.reasonCode, "supplier_low_confidence");
+  assert.equal(booking.supplierResolution.candidates.length, 0);
 });
 
-test("limits unresolved supplier suggestions to the strongest useful candidates", () => {
+test("does not suggest unrelated suppliers that only share a city", () => {
   const masterData = {
     ...exactMasterData,
     suppliers: Array.from({ length: 12 }, (_, index) =>
@@ -1068,13 +1066,8 @@ test("limits unresolved supplier suggestions to the strongest useful candidates"
   );
 
   assert.equal(booking.supplierResolution.reviewRequired, true);
-  assert.equal(booking.supplierResolution.candidates.length, 5);
-  assert.equal(
-    booking.supplierResolution.candidates.every((candidate) =>
-      candidate.account.id.startsWith("supplier_city_")
-    ),
-    true
-  );
+  assert.equal(booking.supplierResolution.reasonCode, "supplier_low_confidence");
+  assert.equal(booking.supplierResolution.candidates.length, 0);
 });
 
 test("does not match an imported account that is not marked as a supplier", () => {

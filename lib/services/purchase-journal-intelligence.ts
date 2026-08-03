@@ -845,8 +845,12 @@ function resolveSupplier(
         left.item.account.id.localeCompare(right.item.account.id)
     );
   const meaningful = ranked.filter(
-    ({ confidence }) =>
-      confidence >= SUPPLIER_RESOLUTION_V2_POLICY.minimumCandidateConfidence
+    ({ item, confidence }) =>
+      confidence >= SUPPLIER_RESOLUTION_V2_POLICY.minimumCandidateConfidence &&
+      (item.hardMethods.size > 0 ||
+        item.familyScores.has("name") ||
+        item.familyScores.size >=
+          SUPPLIER_RESOLUTION_V2_POLICY.minimumSoftSignalFamilies)
   );
   const candidates: SupplierMatchCandidate[] =
     meaningful.length >= 2
@@ -877,12 +881,15 @@ function resolveSupplier(
         bestSoftFamilies >=
           SUPPLIER_RESOLUTION_V2_POLICY.minimumSoftSignalFamilies)
   );
+  const meaningfulMargin = meaningful[0]
+    ? meaningful[0].confidence - (meaningful[1]?.confidence ?? 0)
+    : 0;
   const ambiguous =
-    hardConflict ||
+    (hardConflict && !unmatchedHardIdentifier) ||
     Boolean(
-      best &&
-        runnerUp &&
-        margin < SUPPLIER_RESOLUTION_V2_POLICY.minimumMargin
+      meaningful[0] &&
+        meaningful[1] &&
+        meaningfulMargin < SUPPLIER_RESOLUTION_V2_POLICY.minimumMargin
     );
   const reasonCode = ambiguous
     ? ("supplier_ambiguous" as const)

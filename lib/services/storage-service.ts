@@ -77,7 +77,9 @@ function temporaryInvoiceStorageRoot() {
 }
 
 export function temporaryInvoiceStoragePath() {
-  const configuredPath = envValue("TEMP_INVOICE_STORAGE_PATH");
+  const configuredPath =
+    envValue("LOCAL_INVOICE_STORAGE_PATH") ||
+    envValue("TEMP_INVOICE_STORAGE_PATH");
   if (!configuredPath) {
     return path.join(temporaryInvoiceStorageRoot(), "storage", "invoices");
   }

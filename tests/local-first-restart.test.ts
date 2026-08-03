@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import test from "node:test";
 import { GET as getInvoiceAudit } from "../app/api/invoices/[invoiceId]/audit/route";
 import { POST as bookInvoice } from "../app/api/invoices/[invoiceId]/book/route";
@@ -45,15 +45,19 @@ function clearRuntimeStore() {
   for (const key of runtimeKeys) delete runtime[key];
 }
 
-async function withLocalFirstEnvironment(run: () => Promise<void>) {
+async function withLocalFirstEnvironment(
+  run: (paths: { storagePath: string }) => Promise<void>
+) {
   const root = await mkdtemp(join(tmpdir(), "into-local-first-restart-"));
+  const storagePath = join(root, "storage");
   const environment = process.env as Record<string, string | undefined>;
   const values = {
     NODE_ENV: "test",
     DATABASE_MODE: "sqlite",
     LOCAL_DATABASE_PATH: join(root, "data", "into.sqlite"),
     STORAGE_MODE: "local",
-    TEMP_INVOICE_STORAGE_PATH: join(root, "storage"),
+    LOCAL_INVOICE_STORAGE_PATH: storagePath,
+    TEMP_INVOICE_STORAGE_PATH: undefined,
     LEARNING_V2_ENABLED: "false",
     SUPPLIER_LEARNING_MODE: "off",
     EXACT_ONLINE_BASE_URL: "https://exact.restart.test",
@@ -68,12 +72,15 @@ async function withLocalFirstEnvironment(run: () => Promise<void>) {
     Object.keys(values).map((key) => [key, process.env[key]])
   );
 
-  Object.assign(environment, values);
+  for (const [key, value] of Object.entries(values)) {
+    if (value === undefined) delete environment[key];
+    else environment[key] = value;
+  }
   clearRuntimeStore();
   closeSqliteStore();
 
   try {
-    await run();
+    await run({ storagePath });
   } finally {
     clearRuntimeStore();
     closeSqliteStore();
@@ -165,7 +172,7 @@ async function exactConnection(): Promise<ExactConnection> {
 }
 
 test("uploaded invoice files and audit state survive a local restart", async () => {
-  await withLocalFirstEnvironment(async () => {
+  await withLocalFirstEnvironment(async ({ storagePath }) => {
     const pdfBytes = new TextEncoder().encode(
       "%PDF-1.7\nInvoice number: RESTART-PDF-001\nTotal: EUR 121.00"
     );
@@ -228,6 +235,14 @@ test("uploaded invoice files and audit state survive a local restart", async () 
       assert.equal(invoice.checksum, sha256(fixture.bytes));
       assert.equal(invoice.localFileStatus, "available");
       assert.ok(invoice.storageKey);
+      const storageRelativePath = relative(
+        resolve(storagePath),
+        resolve(invoice.storageKey)
+      );
+      assert.equal(
+        storageRelativePath.startsWith("..") || isAbsolute(storageRelativePath),
+        false
+      );
 
       const auditResponse = await getInvoiceAudit(
         new Request(`http://localhost/api/invoices/${invoice.id}/audit`),

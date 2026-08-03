@@ -16,12 +16,15 @@ export type ConfiguredLearningRepository =
   | SqliteLearningRepository
   | PostgresLearningRepository;
 
+type LearningRepositoryLoading = {
+  identity: string;
+  promise: Promise<ConfiguredLearningRepository>;
+};
+
 const runtime = globalThis as typeof globalThis & {
   __INTO_LEARNING_REPOSITORY?: ConfiguredLearningRepository;
   __INTO_LEARNING_REPOSITORY_IDENTITY?: string;
-  __INTO_LEARNING_REPOSITORY_LOADING?: Promise<
-    ConfiguredLearningRepository | null
-  >;
+  __INTO_LEARNING_REPOSITORY_LOADING?: LearningRepositoryLoading;
   __INTO_CLOSE_LEARNING_REPOSITORY?: () => void;
 };
 
@@ -57,22 +60,37 @@ export async function configuredLearningRepository(): Promise<
   ) {
     return runtime.__INTO_LEARNING_REPOSITORY;
   }
-  if (!runtime.__INTO_LEARNING_REPOSITORY_LOADING) {
-    runtime.__INTO_LEARNING_REPOSITORY_LOADING = (async () => {
-      closeCurrentRepository();
-      const repository =
-        mode === "sqlite"
-          ? new SqliteLearningRepository(sqliteDatabasePath())
-          : new PostgresLearningRepository();
-      await repository.migrate();
-      runtime.__INTO_LEARNING_REPOSITORY = repository;
-      runtime.__INTO_LEARNING_REPOSITORY_IDENTITY = identity;
-      return repository;
-    })().finally(() => {
-      delete runtime.__INTO_LEARNING_REPOSITORY_LOADING;
-    });
+  const currentLoading = runtime.__INTO_LEARNING_REPOSITORY_LOADING;
+  if (currentLoading?.identity === identity) {
+    return currentLoading.promise;
   }
-  return runtime.__INTO_LEARNING_REPOSITORY_LOADING;
+
+  closeCurrentRepository();
+  const repository =
+    mode === "sqlite"
+      ? new SqliteLearningRepository(sqliteDatabasePath())
+      : new PostgresLearningRepository();
+  const { promise, resolve, reject } =
+    Promise.withResolvers<ConfiguredLearningRepository>();
+  const loading = { identity, promise };
+  runtime.__INTO_LEARNING_REPOSITORY_LOADING = loading;
+  void (async () => {
+    try {
+      await repository.migrate();
+      if (runtime.__INTO_LEARNING_REPOSITORY_LOADING === loading) {
+        runtime.__INTO_LEARNING_REPOSITORY = repository;
+        runtime.__INTO_LEARNING_REPOSITORY_IDENTITY = identity;
+      }
+      resolve(repository);
+    } catch (error) {
+      reject(error);
+    } finally {
+      if (runtime.__INTO_LEARNING_REPOSITORY_LOADING === loading) {
+        delete runtime.__INTO_LEARNING_REPOSITORY_LOADING;
+      }
+    }
+  })();
+  return promise;
 }
 
 export function closeConfiguredLearningRepository() {

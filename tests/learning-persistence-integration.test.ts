@@ -316,7 +316,7 @@ test("booking attempt snapshots omit nested document evidence without losing aud
   );
 });
 
-test("legacy snapshots normalize learning arrays before repository migration", async () => {
+test("legacy snapshots with missing learning arrays survive migration and the next write", async () => {
   const databasePath = testDatabasePath();
   const previous = {
     mode: process.env.DATABASE_MODE,
@@ -328,9 +328,16 @@ test("legacy snapshots normalize learning arrays before repository migration", a
 
   clearRuntime();
   const legacySnapshot = structuredClone(getStore());
+  legacySnapshot.schemaVersion = 1;
   delete (
     legacySnapshot.learning as Partial<IntoStore["learning"]>
   ).supplierProfiles;
+  delete (
+    legacySnapshot.learning as Partial<IntoStore["learning"]>
+  ).supplierExamples;
+  delete (
+    legacySnapshot.learning as Partial<IntoStore["learning"]>
+  ).corrections;
   process.env.DATABASE_MODE = "sqlite";
   process.env.LOCAL_DATABASE_PATH = databasePath;
   process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY = "legacy-hydration-key";
@@ -343,8 +350,12 @@ test("legacy snapshots normalize learning arrays before repository migration", a
     closeSqliteStore();
 
     await hydrateStoreFromPersistence();
+    persistStoreSoon();
+    await flushStoreToPersistence();
 
     assert.deepEqual(getStore().learning.supplierProfiles, []);
+    assert.deepEqual(getStore().learning.supplierExamples, []);
+    assert.deepEqual(getStore().learning.corrections, []);
   } finally {
     if (previous.mode === undefined) delete process.env.DATABASE_MODE;
     else process.env.DATABASE_MODE = previous.mode;

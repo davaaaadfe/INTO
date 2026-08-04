@@ -329,7 +329,7 @@ function extractedDataWithoutDocumentEvidence(
 
 function rollbackLearningStore(learning: BookingLearningStore) {
   const rollback = structuredClone(learning);
-  rollback.supplierExamples = rollback.supplierExamples.map((example) => ({
+  rollback.supplierExamples = (rollback.supplierExamples ?? []).map((example) => ({
     ...example,
     originalExtractedData: extractedDataWithoutDocumentEvidence(
       example.originalExtractedData
@@ -338,7 +338,7 @@ function rollbackLearningStore(learning: BookingLearningStore) {
       example.finalExtractedData
     ),
   }));
-  rollback.corrections = rollback.corrections.map((correction) => {
+  rollback.corrections = (rollback.corrections ?? []).map((correction) => {
     const minimized = structuredClone(correction);
     delete minimized.invoiceTextContext;
     return minimized;

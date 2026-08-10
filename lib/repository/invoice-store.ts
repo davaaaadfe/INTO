@@ -362,12 +362,17 @@ const globalStore = globalThis as typeof globalThis & {
   __INTO_STORE_DIRTY_REVISION?: number;
   __INTO_STORE_PERSISTED_DIRTY_REVISION?: number;
   __INTO_LEARNING_PERSISTENCE_CONTEXT?: LearningPersistenceContext;
+  __INTO_STORE_TEST_HOOKS?: StorePersistenceTestHooks;
 };
 
 type StorePersistenceFailure = {
   identity: string;
   store: IntoStore;
   error: unknown;
+};
+
+type StorePersistenceTestHooks = {
+  beforeLearningProjection?: () => void | Promise<void>;
 };
 
 type StorePersistenceBatch = {
@@ -523,6 +528,7 @@ async function saveConfiguredStoreSnapshot(
     store.schemaVersion = commitSnapshot.schemaVersion;
     store.revision = commitSnapshot.revision;
   }
+  await globalStore.__INTO_STORE_TEST_HOOKS?.beforeLearningProjection?.();
   const normalized = await persistLearningState(store, context);
   if (!identityIsCurrent()) return;
   if (normalized) {

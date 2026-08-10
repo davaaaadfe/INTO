@@ -455,6 +455,52 @@ test("patterns aggregate by stable supplier, generation, cluster, field, and key
   });
 });
 
+test("undesirable: replaying one pattern projection from independent writers increments its counters twice", async () => {
+  const databasePath = testDatabasePath();
+  const previousKey = process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY;
+  process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY = "independent-pattern-writer-key";
+  const firstWriter = new SqliteLearningRepository(databasePath);
+  const secondWriter = new SqliteLearningRepository(databasePath);
+  try {
+    await firstWriter.migrate();
+    const profile = await firstWriter.ensureProfile({
+      ...scope,
+      fallbackSupplierCode: "SUP-A",
+      createdAt: "2026-08-10T10:00:00.000Z",
+    });
+    const projection = {
+      id: "independent-pattern-projection",
+      ...scope,
+      generation: profile.generation,
+      formatCluster: "layout-a",
+      field: "referenceCode",
+      patternKey: "label:invoice-number:right",
+      supportCount: 1,
+      successCount: 1,
+      correctionCount: 0,
+      driftState: "none" as const,
+      modelVersion: "locator-v1",
+      createdAt: "2026-08-10T10:00:00.000Z",
+    };
+
+    await firstWriter.savePattern(projection);
+    await secondWriter.savePattern({ ...projection, id: "replayed-pattern-projection" });
+
+    const stored = await firstWriter.listPatterns(scope);
+    assert.equal(stored.length, 1);
+    assert.equal(stored[0]?.support_count, 2);
+    assert.equal(stored[0]?.success_count, 2);
+  } finally {
+    firstWriter.close();
+    secondWriter.close();
+    if (previousKey === undefined) delete process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY;
+    else process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY = previousKey;
+    await rm(databasePath, { force: true });
+    await rm(`${databasePath}-shm`, { force: true });
+    await rm(`${databasePath}-wal`, { force: true });
+  }
+});
+
 test("reset uses generation CAS and only deactivates the selected supplier", async () => {
   await withRepository(async (repository) => {
     const profileA = await repository.ensureProfile({

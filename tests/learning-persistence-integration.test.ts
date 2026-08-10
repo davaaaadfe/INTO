@@ -72,6 +72,86 @@ async function removeDatabase(databasePath: string) {
   await rm(`${databasePath}-wal`, { force: true });
 }
 
+test("undesirable: a post-CAS learning projection failure leaves the committed snapshot ahead of normalized learning", async () => {
+  const databasePath = testDatabasePath();
+  const previous = {
+    mode: process.env.DATABASE_MODE,
+    path: process.env.LOCAL_DATABASE_PATH,
+    key: process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY,
+    enabled: process.env.LEARNING_V2_ENABLED,
+    learningMode: process.env.SUPPLIER_LEARNING_MODE,
+  };
+  const runtime = globalThis as typeof globalThis & {
+    __INTO_STORE_TEST_HOOKS?: {
+      beforeLearningProjection?: () => void | Promise<void>;
+    };
+  };
+  process.env.DATABASE_MODE = "sqlite";
+  process.env.LOCAL_DATABASE_PATH = databasePath;
+  process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY = "post-cas-fault-key";
+  process.env.LEARNING_V2_ENABLED = "true";
+  process.env.SUPPLIER_LEARNING_MODE = "apply";
+
+  try {
+    clearRuntime();
+    await hydrateStoreFromPersistence();
+    const store = getStore();
+    const supplier = createMockExactMasterData().suppliers[0]!;
+    const invoice = store.invoices[0]!;
+    store.exactMasterDataCaches = [{ userId: "company_connection", cache: createMockExactMasterData() }];
+    store.learning.supplierProfiles = [{
+      supplierAccountId: supplier.id,
+      generation: 0,
+      exampleCount: 1,
+      lastLearnedAt: "2026-08-10T10:00:00.000Z",
+      formatFingerprint: "post-cas-layout",
+      formatDrift: "none",
+    }];
+    store.learning.supplierExamples = [{
+      id: "post-cas-example",
+      supplierAccountId: supplier.id,
+      generation: 0,
+      invoiceId: invoice.id,
+      contentHash: "sha256:post-cas-example",
+      formatFingerprint: "post-cas-layout",
+      learnedAt: "2026-08-10T10:00:00.000Z",
+      learnedByUserId: "shared_user",
+      originalExtractedData: structuredClone(invoice.extractedData),
+      finalExtractedData: structuredClone(invoice.extractedData),
+      bookingLines: [],
+    }];
+    runtime.__INTO_STORE_TEST_HOOKS = {
+      beforeLearningProjection: () => {
+        throw new Error("post-CAS projection fault");
+      },
+    };
+
+    persistStoreSoon();
+    await assert.rejects(flushStoreToPersistence(), /post-CAS projection fault/);
+
+    const snapshot = await loadSqliteStoreSnapshot(databasePath);
+    assert.equal(snapshot?.learning.supplierExamples[0]?.id, "post-cas-example");
+    const repository = await configuredLearningRepository();
+    assert.equal(
+      (await repository?.listProfiles("into-company", "unassigned"))?.length,
+      0
+    );
+  } finally {
+    delete runtime.__INTO_STORE_TEST_HOOKS;
+    if (previous.mode === undefined) delete process.env.DATABASE_MODE;
+    else process.env.DATABASE_MODE = previous.mode;
+    if (previous.path === undefined) delete process.env.LOCAL_DATABASE_PATH;
+    else process.env.LOCAL_DATABASE_PATH = previous.path;
+    if (previous.key === undefined) delete process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY;
+    else process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY = previous.key;
+    if (previous.enabled === undefined) delete process.env.LEARNING_V2_ENABLED;
+    else process.env.LEARNING_V2_ENABLED = previous.enabled;
+    if (previous.learningMode === undefined) delete process.env.SUPPLIER_LEARNING_MODE;
+    else process.env.SUPPLIER_LEARNING_MODE = previous.learningMode;
+    await removeDatabase(databasePath);
+  }
+});
+
 test("storage cleanup prunes only expired encrypted learning artifacts", async () => {
   const databasePath = testDatabasePath();
   const previous = {

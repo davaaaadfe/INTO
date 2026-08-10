@@ -7,6 +7,20 @@ export type LearningEvaluationBookingLine = {
   amount: number;
 };
 
+export type SupplierSelectionOutcome =
+  | "manual_selection"
+  | "shadow_recommendation"
+  | "eligible_automatic_selection"
+  | "override";
+
+export const LEARNING_PRODUCTION_EVALUATION_GATE = Object.freeze({
+  enabled: false,
+  minimumPrecision: 0.995,
+  minimumLowerConfidenceBound: 0.99,
+  minimumEligibleDecisions: 500,
+  minimumSuppliers: 50,
+});
+
 export type LearningEvaluationResult = {
   supplierAccountId: string | null;
   fields: Record<string, LearningEvaluationValue>;
@@ -18,7 +32,10 @@ export type LearningEvaluationCase = {
   id: string;
   scenario: string;
   expected: LearningEvaluationResult;
-  prediction: LearningEvaluationResult & { autoSelected: boolean };
+  prediction: LearningEvaluationResult & {
+    selectionOutcome: SupplierSelectionOutcome;
+    policyViolation?: boolean;
+  };
 };
 
 export type LearningGoldenCorpusCase = {
@@ -27,6 +44,7 @@ export type LearningGoldenCorpusCase = {
   sourceText: string;
   fileName?: string;
   processingPurpose?: "booking" | "learning_only";
+  supplierSelectionOutcome?: SupplierSelectionOutcome;
   correctedFields?: Record<string, LearningEvaluationValue>;
   learning?: {
     supplierAccountId: string;
@@ -41,6 +59,17 @@ export type LearningGoldenCorpusCase = {
 
 function ratio(correct: number, attempts: number) {
   return attempts ? correct / attempts : 0;
+}
+
+function lowerConfidenceBound(correct: number, attempts: number) {
+  if (!attempts) return 0;
+  const z = 1.96;
+  const proportion = correct / attempts;
+  const denominator = 1 + (z * z) / attempts;
+  const centre = proportion + (z * z) / (2 * attempts);
+  const margin =
+    z * Math.sqrt((proportion * (1 - proportion)) / attempts + (z * z) / (4 * attempts * attempts));
+  return (centre - margin) / denominator;
 }
 
 function sameValue(left: LearningEvaluationValue, right: LearningEvaluationValue) {
@@ -69,12 +98,16 @@ function sameBookingLines(
 }
 
 export function evaluateLearningCorpus(
-  cases: readonly LearningEvaluationCase[],
-  minimumAutoSelections = 5
+  cases: readonly LearningEvaluationCase[]
 ) {
+  let manualSelections = 0;
+  let shadowRecommendations = 0;
   let autoSelections = 0;
   let correctAutoSelections = 0;
-  let eligibleSupplierSelections = 0;
+  let eligibleDecisions = 0;
+  const eligibleSuppliers = new Set<string>();
+  let overrides = 0;
+  let policyViolations = 0;
   let fieldAttempts = 0;
   let correctFields = 0;
   let validationAttempts = 0;
@@ -83,8 +116,16 @@ export function evaluateLearningCorpus(
   let correctBookingLines = 0;
 
   for (const item of cases) {
-    if (item.expected.supplierAccountId) eligibleSupplierSelections += 1;
-    if (item.prediction.autoSelected) {
+    const outcome = item.prediction.selectionOutcome;
+    if (outcome === "manual_selection") manualSelections += 1;
+    if (outcome === "shadow_recommendation") shadowRecommendations += 1;
+    if (outcome === "override") overrides += 1;
+    if (item.prediction.policyViolation) policyViolations += 1;
+    if (outcome === "eligible_automatic_selection") {
+      eligibleDecisions += 1;
+      if (item.expected.supplierAccountId) {
+        eligibleSuppliers.add(item.expected.supplierAccountId);
+      }
       autoSelections += 1;
       if (
         item.expected.supplierAccountId !== null &&
@@ -116,18 +157,38 @@ export function evaluateLearningCorpus(
 
   const falseAutoSelections = autoSelections - correctAutoSelections;
   const precision = ratio(correctAutoSelections, autoSelections);
+  const rawConfidenceLowerBound = lowerConfidenceBound(
+    correctAutoSelections,
+    autoSelections
+  );
+  const confidenceLowerBound =
+    Math.round(rawConfidenceLowerBound * 10_000) / 10_000;
+  const recommendedGatePassed =
+    precision >= LEARNING_PRODUCTION_EVALUATION_GATE.minimumPrecision &&
+    rawConfidenceLowerBound >=
+      LEARNING_PRODUCTION_EVALUATION_GATE.minimumLowerConfidenceBound &&
+    policyViolations === 0 &&
+    eligibleDecisions >=
+      LEARNING_PRODUCTION_EVALUATION_GATE.minimumEligibleDecisions &&
+    eligibleSuppliers.size >= LEARNING_PRODUCTION_EVALUATION_GATE.minimumSuppliers;
   return {
     caseCount: cases.length,
     supplier: {
+      manualSelections,
+      shadowRecommendations,
+      eligibleDecisions,
+      eligibleSuppliers: eligibleSuppliers.size,
       autoSelections,
       correctAutoSelections,
       falseAutoSelections,
+      overrides,
+      policyViolations,
       precision,
-      recall: ratio(correctAutoSelections, eligibleSupplierSelections),
+      recall: ratio(correctAutoSelections, eligibleDecisions),
+      confidenceLowerBound,
+      recommendedGatePassed,
       acceptanceGatePassed:
-        autoSelections >= minimumAutoSelections &&
-        falseAutoSelections === 0 &&
-        precision >= 0.99,
+        LEARNING_PRODUCTION_EVALUATION_GATE.enabled && recommendedGatePassed,
     },
     fields: {
       attempts: fieldAttempts,
@@ -259,10 +320,12 @@ export async function runLearningCorpusCase(
   const prediction: LearningEvaluationCase["prediction"] = {
     supplierAccountId:
       booking.supplierResolution.selectedAccountId ?? null,
-    autoSelected: Boolean(
-      booking.supplierResolution.selectedAccountId &&
-        !booking.supplierResolution.reviewRequired
-    ),
+    selectionOutcome:
+      item.supplierSelectionOutcome ??
+      (booking.supplierResolution.selectedAccountId &&
+      !booking.supplierResolution.reviewRequired
+        ? "eligible_automatic_selection"
+        : "manual_selection"),
     fields: {
       referenceCode: corrected.referenceCode,
       invoiceDate: corrected.invoiceDate,

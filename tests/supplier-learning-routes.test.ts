@@ -116,7 +116,7 @@ test("supplier learning routes return stable not-found and list responses", asyn
   );
   assert.equal(resetResponse.status, 404);
 
-  const listResponse = await listSupplierLearningRoute();
+  const listResponse = await listSupplierLearningRoute(new Request("http://localhost/api/suppliers/learning"));
   assert.equal(listResponse.status, 200);
   const payload = (await listResponse.json()) as { suppliers?: unknown[] };
   assert.ok(Array.isArray(payload.suppliers));
@@ -134,7 +134,7 @@ test("supplier learning read state stays off until both rollout flags are enable
     delete process.env.LEARNING_V2_ENABLED;
     delete process.env.LEARNING_UI_ENABLED;
 
-    const productionDefault = await listSupplierLearningRoute();
+    const productionDefault = await listSupplierLearningRoute(new Request("http://localhost/api/suppliers/learning"));
     assert.deepEqual(await productionDefault.json(), {
       enabled: false,
       suppliers: [],
@@ -142,7 +142,7 @@ test("supplier learning read state stays off until both rollout flags are enable
 
     process.env.LEARNING_V2_ENABLED = "true";
     process.env.LEARNING_UI_ENABLED = "false";
-    const hiddenUi = await listSupplierLearningRoute();
+    const hiddenUi = await listSupplierLearningRoute(new Request("http://localhost/api/suppliers/learning"));
     assert.deepEqual(await hiddenUi.json(), {
       enabled: false,
       suppliers: [],
@@ -150,14 +150,14 @@ test("supplier learning read state stays off until both rollout flags are enable
 
     process.env.LEARNING_V2_ENABLED = "false";
     process.env.LEARNING_UI_ENABLED = "true";
-    const disabledLearning = await listSupplierLearningRoute();
+    const disabledLearning = await listSupplierLearningRoute(new Request("http://localhost/api/suppliers/learning"));
     assert.deepEqual(await disabledLearning.json(), {
       enabled: false,
       suppliers: [],
     });
 
     process.env.LEARNING_V2_ENABLED = "true";
-    const enabled = await listSupplierLearningRoute();
+    const enabled = await listSupplierLearningRoute(new Request("http://localhost/api/suppliers/learning"));
     const payload = (await enabled.json()) as {
       enabled?: boolean;
       suppliers?: unknown[];
@@ -410,7 +410,7 @@ test("bulk booking excludes learning-only ready invoices before attempts or conn
   invoice.processingPurpose = "learning_only";
   const auditCount = getStore().auditEvents.length;
 
-  const response = await bookReadyRoute();
+  const response = await bookReadyRoute(new Request("http://localhost/api/invoices/book-ready", { method: "POST" }));
   const payload = (await response.json()) as { results?: unknown[] };
 
   assert.equal(response.status, 200);

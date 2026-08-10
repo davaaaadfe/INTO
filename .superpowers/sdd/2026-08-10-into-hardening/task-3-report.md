@@ -8,7 +8,8 @@ Status: DONE_WITH_CONCERNS
 - Added versioned opaque verified-session tokens, digest-only persistence, revocation, bounded last-seen updates, and explicit verified/legacy principals.
 - Added auth schema migration v4 plus SQLite and PostgreSQL session lifecycle methods.
 - Added the authoritative protected-request wrapper and wired it through persistent protected API routes; `proxy.ts` is now early rejection only.
-- Added dual/verified unsafe-method origin validation using exact trusted origins.
+- Added dual/verified unsafe-method origin validation using explicit exact trusted origins; forwarded headers never establish trust.
+- Kept auth-repository cache loads identity-aware and preserved the resolved principal's request/session context through persistence and route authorization.
 
 ## TDD evidence
 
@@ -17,8 +18,8 @@ Status: DONE_WITH_CONCERNS
 
 ## Verification
 
-- Focused auth/session suite: 25 passed, 0 failed.
-- Full `pnpm test`: 334 passed, 0 failed.
+- Focused auth/session suite: 27 passed, 0 failed.
+- Full `pnpm test`: 336 passed, 0 failed.
 - `pnpm run typecheck`: passed.
 - `pnpm run lint`: passed.
 

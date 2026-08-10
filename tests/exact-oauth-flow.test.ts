@@ -181,7 +181,7 @@ test("uses Vercel Exact credentials for OAuth, encrypted tokens, refresh, and ma
       try {
         assert.equal(exactIntegrationMode(), "real");
 
-        const connectResponse = await exactConnect();
+        const connectResponse = await exactConnect(new Request("http://localhost/api/exact/connect", { method: "POST" }));
         assert.equal(connectResponse.status, 200);
         const authorization = await connectResponse.json();
         assert.equal(authorization.mode, "real");
@@ -271,7 +271,7 @@ test("uses Vercel Exact credentials for OAuth, encrypted tokens, refresh, and ma
           false
         );
 
-        const statusResponse = await exactStatus();
+        const statusResponse = await exactStatus(new Request("http://localhost/api/exact/status"));
         const status = await statusResponse.json();
         const serializedStatus = JSON.stringify(status);
         assert.equal(status.configuration.ready, true);

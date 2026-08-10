@@ -8,7 +8,7 @@ import { withPersistentStore } from "../../../../lib/repository/persistent-reque
 import { exactOAuthConfigurationStatus } from "../../../../lib/services/app-config-service";
 import { exactIntegrationMode } from "../../../../lib/services/exact-api-client";
 
-export async function GET(request?: Request) {
+export async function GET(request: Request) {
   return withPersistentStore(() => {
     return Response.json({
       connection: publicExactConnection(),

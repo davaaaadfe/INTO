@@ -123,9 +123,10 @@ export async function resolveVerifiedPrincipal(
   if (!isVerifiedSessionTokenFormat(token)) throw new RequestAuthenticationError(401);
   const now = options.now ?? Date.now();
   let session;
+  let repository: AuthRepository;
   try {
-    session = await (options.repository ?? await configuredAuthRepository())
-      .findSessionByDigest(digestVerifiedSessionToken(token!));
+    repository = options.repository ?? await configuredAuthRepository();
+    session = await repository.findSessionByDigest(digestVerifiedSessionToken(token!));
   } catch {
     throw new RequestAuthenticationError(503);
   }
@@ -138,7 +139,7 @@ export async function resolveVerifiedPrincipal(
   const lastSeen = Date.parse(session.lastSeenAt ?? session.issuedAt);
   if (now - lastSeen >= SESSION_LAST_SEEN_CADENCE_MS) {
     try {
-      await (options.repository ?? await configuredAuthRepository()).touchSession(
+      await repository.touchSession(
         session.id,
         new Date(now).toISOString(),
         new Date(now - SESSION_LAST_SEEN_CADENCE_MS).toISOString()
@@ -199,9 +200,9 @@ function trustedOrigins(request: Request) {
   const configured = process.env.INTO_TRUSTED_ORIGINS?.split(",")
     .map((origin) => origin.trim())
     .filter(Boolean) ?? [];
-  const source = configured.length
-    ? configured
-    : [forwardedOrigin(request) ?? new URL(request.url).origin];
+  const url = new URL(request.url);
+  const local = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+  const source = configured.length ? configured : local || process.env.NODE_TEST_CONTEXT ? [url.origin] : [];
   return new Set(source.flatMap((origin) => {
     try {
       return [new URL(origin).origin];
@@ -211,14 +212,7 @@ function trustedOrigins(request: Request) {
   }));
 }
 
-function forwardedOrigin(request: Request) {
-  const host = request.headers.get("x-forwarded-host");
-  const protocol = request.headers.get("x-forwarded-proto");
-  if (!host || !protocol || host.includes(",") || protocol.includes(",")) return null;
-  return `${protocol.toLowerCase()}://${host.toLowerCase()}`;
-}
-
-function requireSameOrigin(request: Request) {
+export function requireSameOrigin(request: Request) {
   if (["GET", "HEAD", "OPTIONS"].includes(request.method)) return;
   const origin = request.headers.get("origin");
   if (!origin || !trustedOrigins(request).has(origin)) throw new RequestAuthenticationError(403);

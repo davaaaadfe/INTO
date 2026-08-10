@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { resolve } from "node:path";
+import { readFile, readdir } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { SqliteAuthRepository } from "../lib/repository/auth-repository";
 import {
@@ -10,6 +11,7 @@ import {
   parseAuthMode,
   RequestAuthenticationError,
   revokeVerifiedSession,
+  requireSameOrigin,
   resolveVerifiedPrincipal,
 } from "../lib/services/verified-session-auth";
 import { GET as listInvoices } from "../app/api/invoices/route";
@@ -39,6 +41,52 @@ test("auth mode parsing defaults invalid configuration to legacy_password", () =
   assert.equal(parseAuthMode("verified_user"), "verified_user");
   assert.equal(parseAuthMode("verified-user"), "legacy_password");
 });
+
+test("unsafe verified flows require configured exact origins and reject forwarded-host spoofing", () => {
+  const previousOrigins = process.env.INTO_TRUSTED_ORIGINS;
+  const previousContext = process.env.NODE_TEST_CONTEXT;
+  delete process.env.NODE_TEST_CONTEXT;
+  delete process.env.INTO_TRUSTED_ORIGINS;
+  try {
+    assert.throws(
+      () => requireSameOrigin(new Request("https://into.example.test/api/invoices", {
+        method: "POST",
+        headers: { origin: "https://attacker.example.test", "x-forwarded-host": "attacker.example.test", "x-forwarded-proto": "https" },
+      })),
+      (error: unknown) => error instanceof RequestAuthenticationError && error.status === 403
+    );
+    process.env.INTO_TRUSTED_ORIGINS = "https://into.example.test";
+    assert.doesNotThrow(() => requireSameOrigin(new Request("https://into.example.test/api/invoices", {
+      method: "POST", headers: { origin: "https://into.example.test" },
+    })));
+    assert.throws(() => requireSameOrigin(new Request("https://into.example.test/api/invoices", {
+      method: "POST", headers: { origin: "https://into.example.test.attacker" },
+    })), RequestAuthenticationError);
+  } finally {
+    if (previousOrigins === undefined) delete process.env.INTO_TRUSTED_ORIGINS;
+    else process.env.INTO_TRUSTED_ORIGINS = previousOrigins;
+    if (previousContext === undefined) delete process.env.NODE_TEST_CONTEXT;
+    else process.env.NODE_TEST_CONTEXT = previousContext;
+  }
+});
+
+test("every protected API route uses the persistent request wrapper", async () => {
+  const routes = await routeFiles(resolve("app", "api"));
+  const publicRoutes = new Set(["access/login/route.ts", "access/logout/route.ts", "exact/callback/route.ts"]);
+  for (const route of routes) {
+    const relative = route.replace(/\\/g, "/").replace(/^.*app\/api\//, "");
+    if (publicRoutes.has(relative)) continue;
+    assert.match(await readFile(route, "utf8"), /withPersistentStore\(/, relative);
+  }
+});
+
+async function routeFiles(directory: string): Promise<string[]> {
+  const entries = await readdir(directory, { withFileTypes: true });
+  const nested = await Promise.all(entries.map((entry) => entry.isDirectory()
+    ? routeFiles(resolve(directory, entry.name))
+    : entry.name === "route.ts" ? [resolve(directory, entry.name)] : []));
+  return nested.flat();
+}
 
 test("verified session expiry, revocation, and last-seen writes fail closed", async () => {
   const { path, repository } = await repositoryWithActiveUser();

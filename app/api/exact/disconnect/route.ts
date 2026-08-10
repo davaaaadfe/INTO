@@ -8,9 +8,9 @@ import { withPersistentStore } from "../../../../lib/repository/persistent-reque
 import { logger } from "../../../../lib/utils/logger";
 
 export async function POST(request: Request) {
-  return withPersistentStore(() => {
+  return withPersistentStore((principal) => {
     try {
-      requireSystemOwner();
+      requireSystemOwner(principal);
       const disconnected = disconnectExactConnection();
 
       logger.info("exact.disconnected", {

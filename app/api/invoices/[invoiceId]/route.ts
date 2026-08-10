@@ -21,9 +21,9 @@ async function invoiceIdFromContext(context: RouteContext) {
 }
 
 export async function GET(request: Request, context: RouteContext) {
-  return withPersistentStore(async () => {
+  return withPersistentStore(async (principal) => {
     try {
-      requirePermission("view");
+      requirePermission("view", principal);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Not allowed.";
       return Response.json({ error: message }, { status: 403 });
@@ -40,9 +40,9 @@ export async function GET(request: Request, context: RouteContext) {
 }
 
 export async function PATCH(request: Request, context: RouteContext) {
-  return withPersistentStore(async () => {
+  return withPersistentStore(async (principal) => {
     try {
-      requirePermission("edit");
+      requirePermission("edit", principal);
       const invoiceId = await invoiceIdFromContext(context);
       const invoice = getInvoice(invoiceId);
 

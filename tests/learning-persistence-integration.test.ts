@@ -16,7 +16,7 @@ import {
   setExactConnection,
   syncExactDataNow,
 } from "../lib/repository/invoice-store";
-import { withPersistentStore } from "../lib/repository/persistent-request";
+import { withPersistentStoreForTest as withPersistentStore } from "../lib/repository/persistent-request";
 import {
   configuredLearningRepository,
   closeConfiguredLearningRepository,

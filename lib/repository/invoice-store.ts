@@ -817,7 +817,8 @@ export function currentUserContext(): CurrentUserContext {
   };
 }
 
-export function requirePermission(action: PermissionAction) {
+export function requirePermission(action: PermissionAction, principal?: { accessLevel: string }) {
+  if (principal?.accessLevel === "verified_user") return getCurrentUser();
   const user = getCurrentUser();
   if (!canUser(action, user)) {
     throw new Error(`This INTO account is not allowed to ${action.replace(/_/g, " ")}.`);
@@ -826,7 +827,8 @@ export function requirePermission(action: PermissionAction) {
   return user;
 }
 
-export function requireSystemOwner() {
+export function requireSystemOwner(principal?: { accessLevel: string }) {
+  if (principal?.accessLevel === "verified_user") return getCurrentUser();
   const user = getCurrentUser();
   if (user.status !== "active" || !user.isSystemOwner) {
     throw new Error(

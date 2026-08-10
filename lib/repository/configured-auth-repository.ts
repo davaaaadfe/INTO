@@ -16,7 +16,7 @@ export type ConfiguredAuthRepository = AuthRepository & {
 const runtime = globalThis as typeof globalThis & {
   __INTO_AUTH_REPOSITORY?: ConfiguredAuthRepository;
   __INTO_AUTH_REPOSITORY_IDENTITY?: string;
-  __INTO_AUTH_REPOSITORY_LOADING?: Promise<ConfiguredAuthRepository>;
+  __INTO_AUTH_REPOSITORY_LOADING?: { identity: string; promise: Promise<ConfiguredAuthRepository> };
 };
 
 function shouldAutoMigrate() {
@@ -31,24 +31,31 @@ export async function configuredAuthRepository(): Promise<ConfiguredAuthReposito
   ) {
     return runtime.__INTO_AUTH_REPOSITORY;
   }
-  if (runtime.__INTO_AUTH_REPOSITORY_LOADING) return runtime.__INTO_AUTH_REPOSITORY_LOADING;
+  const currentLoading = runtime.__INTO_AUTH_REPOSITORY_LOADING;
+  if (currentLoading?.identity === identity) return currentLoading.promise;
 
   const repository: ConfiguredAuthRepository = databaseMode() === "postgres"
     ? new PostgresAuthRepository()
     : new SqliteAuthRepository(sqliteDatabasePath());
-  const loading = (async () => {
-    if (shouldAutoMigrate()) await repository.migrate();
-    runtime.__INTO_AUTH_REPOSITORY = repository;
-    runtime.__INTO_AUTH_REPOSITORY_IDENTITY = identity;
-    return repository;
-  })();
-  runtime.__INTO_AUTH_REPOSITORY_LOADING = loading;
-  try {
-    return await loading;
-  } finally {
-    if (runtime.__INTO_AUTH_REPOSITORY_LOADING === loading) {
-      delete runtime.__INTO_AUTH_REPOSITORY_LOADING;
+  const { promise, resolve, reject } = Promise.withResolvers<ConfiguredAuthRepository>();
+  const taggedLoading = { identity, promise };
+  runtime.__INTO_AUTH_REPOSITORY_LOADING = taggedLoading;
+  void (async () => {
+    try {
+      if (shouldAutoMigrate()) await repository.migrate();
+      if (runtime.__INTO_AUTH_REPOSITORY_LOADING === taggedLoading) {
+        runtime.__INTO_AUTH_REPOSITORY = repository;
+        runtime.__INTO_AUTH_REPOSITORY_IDENTITY = identity;
+      }
+      resolve(repository);
+    } catch (error) {
+      reject(error);
     }
+  })();
+  try {
+    return await promise;
+  } finally {
+    if (runtime.__INTO_AUTH_REPOSITORY_LOADING === taggedLoading) delete runtime.__INTO_AUTH_REPOSITORY_LOADING;
   }
 }
 

@@ -3,7 +3,7 @@ import {
   setExactConnection,
   syncExactDataNow,
 } from "../../../../lib/repository/invoice-store";
-import { withPersistentStore } from "../../../../lib/repository/persistent-request";
+import { withPublicPersistentStore } from "../../../../lib/repository/persistent-request";
 import { createMockExactConnection } from "../../../../lib/services/exact-online-service";
 import {
   exchangeExactAuthorizationCode,
@@ -13,7 +13,7 @@ import {
 import { logger } from "../../../../lib/utils/logger";
 
 export async function GET(request: Request) {
-  return withPersistentStore(async () => {
+  return withPublicPersistentStore(async () => {
     const url = new URL(request.url);
     const error = url.searchParams.get("error");
     const code = url.searchParams.get("code");
@@ -67,5 +67,5 @@ export async function GET(request: Request) {
     });
 
     return Response.redirect(new URL("/", request.url));
-  });
+  }, request);
 }

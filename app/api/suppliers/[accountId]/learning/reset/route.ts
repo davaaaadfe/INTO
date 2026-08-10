@@ -15,7 +15,7 @@ type RouteContext = {
 };
 
 export async function POST(request: Request, context: RouteContext) {
-  return withPersistentStore(async () => {
+  return withPersistentStore(async (principal) => {
     if (
       !learningFeatureFlags().learningV2Enabled ||
       supplierLearningMode() === "off"
@@ -26,7 +26,7 @@ export async function POST(request: Request, context: RouteContext) {
       );
     }
     try {
-      requirePermission("manage_learning");
+      requirePermission("manage_learning", principal);
     } catch (error) {
       return Response.json(
         { error: error instanceof Error ? error.message : "Not allowed." },

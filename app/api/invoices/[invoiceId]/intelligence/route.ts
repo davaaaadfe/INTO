@@ -24,9 +24,9 @@ async function invoiceIdFromContext(context: RouteContext) {
 }
 
 export async function POST(request: Request, context: RouteContext) {
-  return withPersistentStore(async () => {
+  return withPersistentStore(async (principal) => {
     try {
-      requirePermission("approve");
+      requirePermission("approve", principal);
       const invoiceId = await invoiceIdFromContext(context);
       const invoice = getInvoice(invoiceId);
 

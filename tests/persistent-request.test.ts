@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { withPersistentStore } from "../lib/repository/persistent-request";
+import { withPersistentStoreForTest as withPersistentStore } from "../lib/repository/persistent-request";
 
 test("unhandled API failures return a JSON response", async () => {
   const previousMode = process.env.DATABASE_MODE;

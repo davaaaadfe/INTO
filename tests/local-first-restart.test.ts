@@ -221,7 +221,7 @@ test("uploaded invoice files and audit state survive a local restart", async () 
     clearRuntimeStore();
     await hydrateStoreFromPersistence();
 
-    const listResponse = await listInvoices();
+    const listResponse = await listInvoices(new Request("http://localhost/api/invoices"));
     assert.equal(listResponse.status, 200);
     const listed = (await listResponse.json()) as { invoices: UploadedInvoice[] };
 
@@ -401,7 +401,7 @@ test("a failed Exact booking remains retryable with its original file after rest
       clearRuntimeStore();
       await hydrateStoreFromPersistence();
 
-      const listResponse = await listInvoices();
+      const listResponse = await listInvoices(new Request("http://localhost/api/invoices"));
       const listed = (await listResponse.json()) as { invoices: UploadedInvoice[] };
       const retained = listed.invoices.find(
         (candidate) => candidate.id === invoice.id

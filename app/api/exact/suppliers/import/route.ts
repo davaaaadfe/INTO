@@ -12,9 +12,9 @@ import { logger } from "../../../../../lib/utils/logger";
 const maximumWorkbookSize = 10 * 1024 * 1024;
 
 export async function POST(request: Request) {
-  return withPersistentStore(async () => {
+  return withPersistentStore(async (principal) => {
     try {
-      requireSystemOwner();
+      requireSystemOwner(principal);
       const formData = await request.formData();
       const file = formData.get("file");
       if (!(file instanceof File)) {

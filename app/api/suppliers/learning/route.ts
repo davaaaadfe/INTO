@@ -5,10 +5,10 @@ import {
 import { withPersistentStore } from "../../../../lib/repository/persistent-request";
 import { learningFeatureFlags } from "../../../../lib/services/learning-feature-flags";
 
-export async function GET(request?: Request) {
-  return withPersistentStore(async () => {
+export async function GET(request: Request) {
+  return withPersistentStore(async (principal) => {
     try {
-      requirePermission("view");
+      requirePermission("view", principal);
     } catch (error) {
       return Response.json(
         { error: error instanceof Error ? error.message : "Not allowed." },

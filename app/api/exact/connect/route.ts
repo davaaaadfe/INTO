@@ -19,10 +19,10 @@ import {
 import { createId } from "../../../../lib/utils/id";
 import { logger } from "../../../../lib/utils/logger";
 
-export async function GET(request?: Request) {
-  return withPersistentStore(async () => {
+export async function GET(request: Request) {
+  return withPersistentStore(async (principal) => {
     try {
-      requireSystemOwner();
+      requireSystemOwner(principal);
       if (isRealExactMode()) {
         const authorization = await createRealExactAuthorizationUrl(
           getCompanyConnectionUserId()
@@ -55,10 +55,10 @@ export async function GET(request?: Request) {
   }, request);
 }
 
-export async function POST(request?: Request) {
-  return withPersistentStore(async () => {
+export async function POST(request: Request) {
+  return withPersistentStore(async (principal) => {
     try {
-      requireSystemOwner();
+      requireSystemOwner(principal);
       if (isRealExactMode()) {
         const authorization = await createRealExactAuthorizationUrl(
           getCompanyConnectionUserId()

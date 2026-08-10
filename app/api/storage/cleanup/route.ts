@@ -6,9 +6,9 @@ import {
 import { withPersistentStore } from "../../../../lib/repository/persistent-request";
 
 export async function POST(request: Request) {
-  return withPersistentStore(async () => {
+  return withPersistentStore(async (principal) => {
     try {
-      requireSystemOwner();
+      requireSystemOwner(principal);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Not allowed.";
       return Response.json({ error: message }, { status: 403 });

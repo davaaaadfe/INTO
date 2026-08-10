@@ -24,7 +24,7 @@ async function invoiceIdFromContext(context: RouteContext) {
 }
 
 export async function POST(request: Request, context: RouteContext) {
-  return withPersistentStore(async () => {
+  return withPersistentStore(async (principal) => {
     const invoiceId = await invoiceIdFromContext(context);
     const invoice = getInvoice(invoiceId);
 
@@ -33,7 +33,7 @@ export async function POST(request: Request, context: RouteContext) {
     }
 
     try {
-      requirePermission("edit");
+      requirePermission("edit", principal);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Not allowed.";
       return Response.json({ error: message }, { status: 403 });

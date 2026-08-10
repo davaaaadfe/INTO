@@ -15,14 +15,14 @@ import { bookInvoiceInExact } from "../../../../lib/services/exact-online-servic
 import { assertInvoiceBookingAllowed } from "../../../../lib/domain/invoice";
 import { logger } from "../../../../lib/utils/logger";
 
-export async function POST(request?: Request) {
-  return withPersistentStore(async () => {
+export async function POST(request: Request) {
+  return withPersistentStore(async (principal) => {
     const results: unknown[] = [];
     let connection;
     let masterData = getExactMasterData();
 
     try {
-      requirePermission("book");
+      requirePermission("book", principal);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Not allowed.";
       return Response.json({ error: message, invoices: listInvoices(), results }, { status: 403 });

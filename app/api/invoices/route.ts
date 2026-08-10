@@ -21,14 +21,14 @@ import type {
 } from "../../../lib/domain/invoice";
 import { withPersistentStore } from "../../../lib/repository/persistent-request";
 
-export async function GET(request?: Request) {
+export async function GET(request: Request) {
   return withPersistentStore(() => Response.json({ invoices: listInvoices() }), request);
 }
 
 export async function POST(request: Request) {
-  return withPersistentStore(async () => {
+  return withPersistentStore(async (principal) => {
     try {
-      requirePermission("upload");
+      requirePermission("upload", principal);
       const formData = await request.formData();
       const files = formData
         .getAll("files")

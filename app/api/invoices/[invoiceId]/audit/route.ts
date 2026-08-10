@@ -15,9 +15,9 @@ async function invoiceIdFromContext(context: RouteContext) {
 }
 
 export async function GET(request: Request, context: RouteContext) {
-  return withPersistentStore(async () => {
+  return withPersistentStore(async (principal) => {
     try {
-      requirePermission("view");
+      requirePermission("view", principal);
       const invoiceId = await invoiceIdFromContext(context);
       const invoice = getInvoice(invoiceId);
 

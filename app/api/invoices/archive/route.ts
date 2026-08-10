@@ -20,9 +20,9 @@ function numberParam(params: URLSearchParams, key: string) {
 }
 
 export async function GET(request: Request) {
-  return withPersistentStore(() => {
+  return withPersistentStore((principal) => {
     try {
-      requirePermission("search_archive");
+      requirePermission("search_archive", principal);
       const params = new URL(request.url).searchParams;
       const filters: InvoiceArchiveFilters = {
         keyword: params.get("keyword") ?? undefined,

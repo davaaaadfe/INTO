@@ -4,8 +4,7 @@ import {
   setLearningPersistenceContext,
 } from "./invoice-store";
 import { randomUUID } from "node:crypto";
-import { sessionCorrelationIdFromRequest } from "../services/into-access-auth";
-import { withVerifiedPersistentRequest } from "../services/verified-session-auth";
+import { withVerifiedPersistentRequest, type RequestPrincipal } from "../services/verified-session-auth";
 import { logger } from "../utils/logger";
 
 const runtime = globalThis as typeof globalThis & {
@@ -13,18 +12,43 @@ const runtime = globalThis as typeof globalThis & {
 };
 
 export async function withPersistentStore<T>(
-  handler: () => Promise<T> | T,
-  request?: Request
+  handler: (principal: RequestPrincipal) => Promise<T> | T,
+  request: Request,
+  principal?: RequestPrincipal
 ): Promise<T | Response> {
-  const context = {
-    requestId: request?.headers.get("idempotency-key")?.trim() || randomUUID(),
-    sessionCorrelationId: request
-      ? sessionCorrelationIdFromRequest(request) || "session_unavailable"
-      : "session_unavailable",
-  };
-  if (request) {
-    return withVerifiedPersistentRequest(request, () => withPersistentStore(handler));
+  if (!principal) {
+    return withVerifiedPersistentRequest(request, (resolved) =>
+      withPersistentStore(handler, request, resolved)
+    );
   }
+  return runPersistent(() => handler(principal), {
+    requestId: principal.requestId,
+    sessionCorrelationId: principal.sessionCorrelationId,
+  });
+}
+
+/** Test-only persistence seam for repository behavior that is not an HTTP request. */
+export async function withPersistentStoreForTest<T>(handler: () => Promise<T> | T) {
+  return runPersistent(handler, {
+    requestId: randomUUID(),
+    sessionCorrelationId: "test_session",
+  });
+}
+
+export async function withPublicPersistentStore<T>(
+  handler: () => Promise<T> | T,
+  request: Request
+): Promise<T | Response> {
+  return runPersistent(handler, {
+    requestId: request.headers.get("idempotency-key")?.trim() || randomUUID(),
+    sessionCorrelationId: "oauth_callback",
+  });
+}
+
+async function runPersistent<T>(
+  handler: () => Promise<T> | T,
+  context: { requestId: string; sessionCorrelationId: string }
+): Promise<T | Response> {
   const previous = runtime.__INTO_PERSISTENT_REQUEST_TAIL ?? Promise.resolve();
   let release!: () => void;
   runtime.__INTO_PERSISTENT_REQUEST_TAIL = new Promise<void>((resolve) => {

@@ -8,9 +8,9 @@ import { withPersistentStore } from "../../../../lib/repository/persistent-reque
 import { logger } from "../../../../lib/utils/logger";
 
 export async function POST(request: Request) {
-  return withPersistentStore(async () => {
+  return withPersistentStore(async (principal) => {
     try {
-      requireSystemOwner();
+      requireSystemOwner(principal);
       const masterData = await syncExactDataNow();
       logger.info("exact.master_data_synced", {
         divisionCode: masterData.divisionCode,

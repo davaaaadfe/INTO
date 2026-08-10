@@ -1,5 +1,15 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
-import type { AuthRepository } from "../repository/auth-repository";
+import {
+  createHash,
+  createHmac,
+  randomBytes,
+  randomUUID,
+  scrypt,
+  timingSafeEqual,
+} from "node:crypto";
+import {
+  canonicalAuthEmail,
+  type AuthRepository,
+} from "../repository/auth-repository";
 import { configuredAuthRepository } from "../repository/configured-auth-repository";
 import {
   INTO_ACCESS_COOKIE_NAME,
@@ -10,7 +20,68 @@ import {
 export const VERIFIED_SESSION_COOKIE_NAME = "into_verified_session";
 export const VERIFIED_SESSION_SECONDS = 12 * 60 * 60;
 export const SESSION_LAST_SEEN_CADENCE_MS = 15 * 60 * 1_000;
+const SCRYPT_KEY_LENGTH = 32;
+const SCRYPT_N = 16_384;
+const SCRYPT_R = 8;
+const SCRYPT_P = 1;
+const SCRYPT_MAX_MEMORY = 64 * 1024 * 1024;
 let testLegacyPrincipalEnabled = false;
+
+export type PasswordCredential = Readonly<{
+  algorithm: "scrypt";
+  version: 1;
+  hash: string;
+  salt: string;
+  n: number;
+  r: number;
+  p: number;
+}>;
+
+function validatePassword(password: string) {
+  const length = Buffer.byteLength(password, "utf8");
+  if (length < 12 || length > 1024) {
+    throw new Error("Password must be between 12 and 1024 bytes.");
+  }
+}
+
+function deriveScrypt(password: string, salt: Buffer, credential: Pick<PasswordCredential, "n" | "r" | "p">) {
+  return new Promise<Buffer>((resolve, reject) => {
+    scrypt(password, salt, SCRYPT_KEY_LENGTH, {
+      N: credential.n,
+      r: credential.r,
+      p: credential.p,
+      maxmem: SCRYPT_MAX_MEMORY,
+    }, (error, key) => error ? reject(error) : resolve(key));
+  });
+}
+
+export async function createPasswordCredential(password: string): Promise<PasswordCredential> {
+  validatePassword(password);
+  const salt = randomBytes(16);
+  const parameters = { n: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P };
+  const hash = await deriveScrypt(password, salt, parameters);
+  return Object.freeze({
+    algorithm: "scrypt",
+    version: 1,
+    hash: hash.toString("base64url"),
+    salt: salt.toString("base64url"),
+    ...parameters,
+  });
+}
+
+export async function verifyPasswordCredential(
+  password: string,
+  credential: PasswordCredential
+) {
+  validatePassword(password);
+  if (credential.algorithm !== "scrypt" || credential.version !== 1) {
+    throw new Error("Unsupported credential version.");
+  }
+  const actual = await deriveScrypt(password, Buffer.from(credential.salt, "base64url"), credential);
+  const stored = Buffer.from(credential.hash, "base64url");
+  const comparable = stored.length === actual.length ? stored : Buffer.alloc(actual.length);
+  return timingSafeEqual(actual, comparable) && stored.length === actual.length;
+}
 
 /** Test-loader seam; no environment value can enable this. */
 export function enableLegacyPrincipalForTests() {
@@ -35,6 +106,189 @@ export type LegacyPrincipal = Readonly<{
   requestId: string;
 }>;
 export type RequestPrincipal = VerifiedPrincipal | LegacyPrincipal;
+
+export class InvitationConflictError extends Error {}
+export class InvitationGoneError extends Error {}
+
+export class LoginError extends Error {
+  readonly status: 401 | 403 | 429 | 503;
+
+  constructor(status: 401 | 403 | 429 | 503, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+const INVITATION_SECONDS = 24 * 60 * 60;
+const LOGIN_LOCK_ATTEMPTS = 5;
+const LOGIN_LOCK_MS = 15 * 60 * 1_000;
+
+function invitationSecret() {
+  const secret = process.env.INTO_INVITATION_SECRET ?? "";
+  if (Buffer.byteLength(secret, "utf8") < 32) {
+    throw new LoginError(503, "Authentication service unavailable.");
+  }
+  return secret;
+}
+
+function invitationToken(invitationId: string) {
+  return `v1.${createHmac("sha256", invitationSecret())
+    .update(`INTO invitation:v1:${invitationId}`)
+    .digest("base64url")}`;
+}
+
+function digestInvitationToken(token: string) {
+  return createHash("sha256").update(`INTO invitation digest:v1:${token}`).digest("base64url");
+}
+
+function requireDisplayName(value: string) {
+  const name = value.trim();
+  if (!name || name.length > 120) throw new Error("Display name must be between 1 and 120 characters.");
+  return name;
+}
+
+function createVerifiedSessionRecord(userId: string, now: number) {
+  const token = `v1.${randomBytes(32).toString("base64url")}`;
+  const correlationId = correlationIdForToken(token);
+  const issuedAt = new Date(now).toISOString();
+  const expiresAt = new Date(now + VERIFIED_SESSION_SECONDS * 1_000).toISOString();
+  const sessionId = randomUUID();
+  return {
+    token,
+    sessionId,
+    correlationId,
+    expiresAt,
+    record: {
+      id: sessionId,
+      userId,
+      tokenDigest: digestVerifiedSessionToken(token),
+      correlationIdHash: correlationHash(correlationId),
+      tokenVersion: 1,
+      issuedAt,
+      expiresAt,
+      revokedAt: null,
+      lastSeenAt: issuedAt,
+    },
+  } as const;
+}
+
+export async function createUserInvitation(
+  repository: AuthRepository,
+  principal: RequestPrincipal,
+  input: { email: string; name: string; requestKey: string },
+  origin: string,
+  now = Date.now()
+) {
+  const email = canonicalAuthEmail(input.email);
+  const displayName = requireDisplayName(input.name);
+  const requestKey = input.requestKey.trim();
+  if (!requestKey || requestKey.length > 200) throw new Error("requestKey is required.");
+  const id = randomUUID();
+  const token = invitationToken(id);
+  const fingerprint = createHash("sha256")
+    .update(JSON.stringify({ email, displayName }))
+    .digest("base64url");
+  const result = await repository.createOrReplayInvitation({
+    id,
+    userId: randomUUID(),
+    email,
+    displayName,
+    tokenDigest: digestInvitationToken(token),
+    expiresAt: new Date(now + INVITATION_SECONDS * 1_000).toISOString(),
+    inviterActorId: principal.actorId,
+    inviterSessionId: principal.sessionCorrelationId,
+    requestId: principal.requestId,
+    idempotencyKey: requestKey,
+    requestFingerprint: fingerprint,
+    timestamp: new Date(now).toISOString(),
+  });
+  if (result.state === "conflict") throw new InvitationConflictError("requestKey was already used for different invitation details.");
+  const replayToken = invitationToken(result.invitation.id);
+  const verificationUrl = new URL("/verify", origin);
+  verificationUrl.searchParams.set("token", replayToken);
+  return { state: result.state, verificationUrl: verificationUrl.toString() };
+}
+
+export async function verifyUserInvitation(
+  repository: AuthRepository,
+  input: { token: string; displayName: string; password: string; requestId: string },
+  now = Date.now()
+) {
+  if (!/^v1\.[A-Za-z0-9_-]{32,}$/.test(input.token)) {
+    throw new InvitationGoneError("Invitation is expired or already used.");
+  }
+  const credential = await createPasswordCredential(input.password);
+  const session = createVerifiedSessionRecord("pending-invitation-user", now);
+  const result = await repository.consumeInvitation({
+    tokenDigest: digestInvitationToken(input.token),
+    displayName: requireDisplayName(input.displayName),
+    credential,
+    session: session.record,
+    requestId: input.requestId,
+    timestamp: new Date(now).toISOString(),
+  });
+  if (result.state !== "consumed" || !result.user) {
+    throw new InvitationGoneError("Invitation is expired or already used.");
+  }
+  return {
+    user: result.user,
+    session: {
+      token: session.token,
+      sessionId: session.sessionId,
+      correlationId: session.correlationId,
+      expiresAt: session.expiresAt,
+    },
+  };
+}
+
+export async function loginVerifiedUser(
+  repository: AuthRepository,
+  emailInput: string,
+  password: string,
+  now = Date.now(),
+  context?: { requestId: string; requestSource: string }
+) {
+  let stored = null;
+  try {
+    stored = await repository.findUserCredentialByEmail(canonicalAuthEmail(emailInput));
+  } catch {
+    // Invalid identifiers follow the same password-work path as unknown users.
+  }
+  if (stored?.lockedAt) {
+    const lockedAt = Date.parse(stored.lockedAt);
+    if (Number.isFinite(lockedAt) && now - lockedAt < LOGIN_LOCK_MS) {
+      throw new LoginError(429, "Too many login attempts. Try again later.");
+    }
+    await repository.resetLoginFailures(stored.user.id, new Date(now).toISOString());
+  }
+  const validLength = Buffer.byteLength(password, "utf8") >= 12 && Buffer.byteLength(password, "utf8") <= 1024;
+  const candidate = validLength ? password : "invalid password input";
+  const credential = stored?.credential ?? await createPasswordCredential("unknown user timing password");
+  const valid = await verifyPasswordCredential(candidate, credential);
+  if (!stored || !validLength || !valid) {
+    const failure = stored
+      ? await repository.recordLoginFailure(
+          stored.user.id,
+          new Date(now).toISOString(),
+          LOGIN_LOCK_ATTEMPTS,
+          context ? {
+            requestId: context.requestId,
+            sourceHash: createHash("sha256")
+              .update(`INTO login source:v1:${context.requestSource}`)
+              .digest("base64url"),
+          } : undefined
+        )
+      : null;
+    if (failure?.lockedAt) throw new LoginError(429, "Too many login attempts. Try again later.");
+    throw new LoginError(401, "Invalid email or password.");
+  }
+  if (stored.user.status !== "active" || !stored.user.verifiedAt) {
+    throw new LoginError(403, "Account is not active.");
+  }
+  await repository.resetLoginFailures(stored.user.id, new Date(now).toISOString());
+  const session = await issueVerifiedSession(repository, stored.user.id, now);
+  return { user: stored.user, session };
+}
 
 export class RequestAuthenticationError extends Error {
   readonly status: 401 | 403 | 503;
@@ -82,6 +336,26 @@ function cookieFromRequest(request: Request, name: string) {
   }
 }
 
+export function verifiedSessionTokenFromRequest(request: Request) {
+  return cookieFromRequest(request, VERIFIED_SESSION_COOKIE_NAME);
+}
+
+export function safeAuthUser(user: {
+  id: string;
+  email: string;
+  displayName: string;
+  status: string;
+  version: number;
+}) {
+  return {
+    id: user.id,
+    email: user.email,
+    displayName: user.displayName,
+    status: user.status,
+    version: user.version,
+  };
+}
+
 export function isVerifiedSessionTokenFormat(token: string | null | undefined) {
   return Boolean(token && /^v1\.[A-Za-z0-9_-]{32,}$/.test(token));
 }
@@ -91,23 +365,14 @@ export async function issueVerifiedSession(
   userId: string,
   now = Date.now()
 ) {
-  const token = `v1.${randomBytes(32).toString("base64url")}`;
-  const correlationId = correlationIdForToken(token);
-  const issuedAt = new Date(now).toISOString();
-  const expiresAt = new Date(now + VERIFIED_SESSION_SECONDS * 1_000).toISOString();
-  const sessionId = randomUUID();
-  await repository.createSession({
-    id: sessionId,
-    userId,
-    tokenDigest: digestVerifiedSessionToken(token),
-    correlationIdHash: correlationHash(correlationId),
-    tokenVersion: 1,
-    issuedAt,
-    expiresAt,
-    revokedAt: null,
-    lastSeenAt: issuedAt,
-  });
-  return { token, sessionId, correlationId, expiresAt };
+  const session = createVerifiedSessionRecord(userId, now);
+  await repository.createSession(session.record);
+  return {
+    token: session.token,
+    sessionId: session.sessionId,
+    correlationId: session.correlationId,
+    expiresAt: session.expiresAt,
+  };
 }
 
 export async function revokeVerifiedSession(

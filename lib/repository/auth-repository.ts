@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-export const AUTH_SCHEMA_VERSION = 4;
+export const AUTH_SCHEMA_VERSION = 5;
 
 export type AuthUserStatus = "invited" | "active" | "disabled";
 export type AuthUserRecord = {
@@ -40,6 +40,61 @@ export type AuthSessionRecord = {
 };
 
 export type AuthSessionWithUser = AuthSessionRecord & { user: AuthUserRecord };
+
+export type StoredPasswordCredential = Readonly<{
+  algorithm: "scrypt";
+  version: 1;
+  hash: string;
+  salt: string;
+  n: number;
+  r: number;
+  p: number;
+}>;
+
+export type AuthInvitationRecord = {
+  id: string;
+  userId: string;
+  tokenDigest: string;
+  expiresAt: string;
+  consumedAt: string | null;
+  idempotencyKey: string;
+  requestFingerprint: string;
+  createdAt: string;
+};
+
+export type CreateInvitationInput = {
+  id: string;
+  userId: string;
+  email: string;
+  displayName: string;
+  tokenDigest: string;
+  expiresAt: string;
+  inviterActorId: string;
+  inviterSessionId: string;
+  requestId: string;
+  idempotencyKey: string;
+  requestFingerprint: string;
+  timestamp: string;
+};
+
+export type ConsumeInvitationInput = {
+  tokenDigest: string;
+  displayName: string;
+  credential: StoredPasswordCredential;
+  session: AuthSessionRecord;
+  requestId: string;
+  timestamp: string;
+};
+
+export type UpdateUserStatusInput = {
+  actorId: string;
+  targetId: string;
+  expectedVersion: number;
+  status: "active" | "disabled";
+  requestId: string;
+  sessionId: string;
+  timestamp: string;
+};
 
 export class AuthSchemaVersionError extends Error {}
 export class AuthEmailNormalizationConflictError extends Error {}
@@ -183,6 +238,24 @@ const sqliteV4Schema = `
     ADD COLUMN token_version INTEGER NOT NULL DEFAULT 1 CHECK (token_version = 1);
 `;
 
+const sqliteV5Schema = `
+  CREATE TABLE IF NOT EXISTS into_auth_invitations (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES into_auth_users(id),
+    token_digest TEXT NOT NULL UNIQUE,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT,
+    inviter_actor_id TEXT,
+    inviter_session_id TEXT,
+    request_id TEXT,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  ALTER TABLE into_auth_invitations
+    ADD COLUMN request_fingerprint TEXT NOT NULL DEFAULT '';
+`;
+
 export const SQLITE_AUTH_V1_CHECKSUM = createHash("sha256")
   .update(sqliteV1Schema)
   .digest("hex");
@@ -194,6 +267,9 @@ export const SQLITE_AUTH_V3_CHECKSUM = createHash("sha256")
   .digest("hex");
 export const SQLITE_AUTH_V4_CHECKSUM = createHash("sha256")
   .update(`4\n${sqliteV4Schema}`)
+  .digest("hex");
+export const SQLITE_AUTH_V5_CHECKSUM = createHash("sha256")
+  .update(`5\n${sqliteV5Schema}`)
   .digest("hex");
 /** @deprecated Use the version-specific checksum. */
 export const AUTH_MIGRATION_CHECKSUM = SQLITE_AUTH_V2_CHECKSUM;
@@ -348,6 +424,35 @@ export interface AuthRepository {
   findSessionByDigest(tokenDigest: string): Promise<AuthSessionWithUser | null>;
   touchSession(sessionId: string, timestamp: string, before: string): Promise<boolean>;
   revokeSessionByDigest(tokenDigest: string, timestamp: string): Promise<boolean>;
+  createOrReplayInvitation(input: CreateInvitationInput): Promise<{
+    state: "created" | "replayed" | "conflict";
+    invitation: AuthInvitationRecord;
+  }>;
+  consumeInvitation(input: ConsumeInvitationInput): Promise<{
+    state: "consumed" | "gone";
+    user: AuthUserRecord | null;
+  }>;
+  findUserCredentialByEmail(email: string): Promise<{
+    user: AuthUserRecord;
+    credential: StoredPasswordCredential;
+    failedAttempts: number;
+    lockedAt: string | null;
+  } | null>;
+  countActiveUsers(): Promise<number>;
+  updateUserStatus(input: UpdateUserStatusInput): Promise<{
+    state: "updated" | "conflict" | "not_found" | "final_active" | "unverified";
+    user: AuthUserRecord | null;
+  }>;
+  recordLoginFailure(
+    userId: string,
+    timestamp: string,
+    lockAfter: number,
+    context?: { requestId: string; sourceHash: string }
+  ): Promise<{
+    failedAttempts: number;
+    lockedAt: string | null;
+  }>;
+  resetLoginFailures(userId: string, timestamp: string): Promise<void>;
 }
 
 export class SqliteAuthRepository implements AuthRepository {
@@ -375,6 +480,7 @@ export class SqliteAuthRepository implements AuthRepository {
       [2, SQLITE_AUTH_V2_CHECKSUM],
       [3, SQLITE_AUTH_V3_CHECKSUM],
       [4, SQLITE_AUTH_V4_CHECKSUM],
+      [5, SQLITE_AUTH_V5_CHECKSUM],
     ]);
     for (const row of rows) {
       if (checksums.get(Number(row.version)) !== row.checksum) {
@@ -400,6 +506,7 @@ export class SqliteAuthRepository implements AuthRepository {
     }
     if (current < 3) this.migrateStrictEmailV3();
     if (current < 4) this.migrateSessionVersionV4();
+    if (current < 5) this.migrateInvitationFingerprintV5();
   }
 
   private assertStrictEmailInputs(requireLowercase = true) {
@@ -476,6 +583,20 @@ export class SqliteAuthRepository implements AuthRepository {
       this.database.prepare(
         "INSERT INTO into_auth_schema_migrations (version, checksum, applied_at) VALUES (?, ?, ?)"
       ).run(4, SQLITE_AUTH_V4_CHECKSUM, new Date().toISOString());
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private migrateInvitationFingerprintV5() {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.exec(sqliteV5Schema);
+      this.database.prepare(
+        "INSERT INTO into_auth_schema_migrations (version, checksum, applied_at) VALUES (?, ?, ?)"
+      ).run(5, SQLITE_AUTH_V5_CHECKSUM, new Date().toISOString());
       this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -623,6 +744,263 @@ export class SqliteAuthRepository implements AuthRepository {
     return result.changes === 1;
   }
 
+  async createOrReplayInvitation(input: CreateInvitationInput) {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this.database.prepare(`
+        SELECT * FROM into_auth_invitations WHERE idempotency_key = ? LIMIT 1
+      `).get(input.idempotencyKey) as Record<string, unknown> | undefined;
+      if (existing) {
+        this.database.exec("COMMIT");
+        return {
+          state: existing.request_fingerprint === input.requestFingerprint ? "replayed" as const : "conflict" as const,
+          invitation: invitationFromRow(existing),
+        };
+      }
+
+      const email = canonicalAuthEmail(input.email);
+      const existingUser = this.database.prepare(
+        "SELECT id, status FROM into_auth_users WHERE email = ? LIMIT 1"
+      ).get(email) as { id: string; status: AuthUserStatus } | undefined;
+      const userId = existingUser?.id ?? input.userId;
+      if (!existingUser) {
+        this.database.prepare(`
+          INSERT INTO into_auth_users (
+            id, email, display_name, status, access_level, verified_at, version, created_at, updated_at
+          ) VALUES (?, ?, ?, 'invited', 'verified_user', NULL, 1, ?, ?)
+        `).run(userId, email, input.displayName, input.timestamp, input.timestamp);
+      }
+      this.database.prepare(`
+        INSERT INTO into_auth_invitations (
+          id, user_id, token_digest, expires_at, consumed_at, inviter_actor_id,
+          inviter_session_id, request_id, idempotency_key, request_fingerprint,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        input.id, userId, input.tokenDigest, input.expiresAt, input.inviterActorId,
+        input.inviterSessionId, input.requestId, input.idempotencyKey,
+        input.requestFingerprint, input.timestamp, input.timestamp
+      );
+      this.database.prepare(`
+        INSERT INTO into_auth_events (
+          id, type, actor_id, target_user_id, request_id, session_id,
+          event_key, metadata_json, created_at
+        ) VALUES (?, 'invitation_created', ?, ?, ?, ?, ?, '{}', ?)
+      `).run(
+        `invitation_created:${input.id}`, input.inviterActorId, userId,
+        input.requestId, input.inviterSessionId, `invitation_created:${input.id}`, input.timestamp
+      );
+      const created = this.database.prepare(
+        "SELECT * FROM into_auth_invitations WHERE id = ?"
+      ).get(input.id) as Record<string, unknown>;
+      this.database.exec("COMMIT");
+      return { state: "created" as const, invitation: invitationFromRow(created) };
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  async consumeInvitation(input: ConsumeInvitationInput) {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const invitation = this.database.prepare(`
+        SELECT i.*, u.email, u.display_name, u.status, u.access_level, u.verified_at,
+          u.version, u.created_at AS user_created_at, u.updated_at AS user_updated_at
+        FROM into_auth_invitations i
+        JOIN into_auth_users u ON u.id = i.user_id
+        WHERE i.token_digest = ? AND i.consumed_at IS NULL
+          AND i.expires_at > ? AND u.status = 'invited'
+        LIMIT 1
+      `).get(input.tokenDigest, input.timestamp) as Record<string, unknown> | undefined;
+      if (!invitation) {
+        this.database.exec("COMMIT");
+        return { state: "gone" as const, user: null };
+      }
+      const userId = String(invitation.user_id);
+      this.database.prepare(`
+        INSERT INTO into_auth_credentials (
+          user_id, scrypt_hash, scrypt_salt, scrypt_n, scrypt_r, scrypt_p,
+          scrypt_version, failed_attempts, locked_at, rotated_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, ?, ?)
+      `).run(
+        userId, input.credential.hash, input.credential.salt, input.credential.n,
+        input.credential.r, input.credential.p, input.credential.version,
+        input.timestamp, input.timestamp
+      );
+      this.database.prepare(`
+        UPDATE into_auth_users SET display_name = ?, status = 'active', verified_at = ?,
+          version = version + 1, updated_at = ? WHERE id = ?
+      `).run(input.displayName, input.timestamp, input.timestamp, userId);
+      this.database.prepare(`
+        UPDATE into_auth_invitations SET consumed_at = ?, updated_at = ? WHERE id = ?
+      `).run(input.timestamp, input.timestamp, String(invitation.id));
+      this.database.prepare(`
+        INSERT INTO into_auth_sessions (
+          id, user_id, token_digest, correlation_id_hash, token_version,
+          issued_at, expires_at, revoked_at, last_seen_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        input.session.id, userId, input.session.tokenDigest, input.session.correlationIdHash,
+        input.session.tokenVersion, input.session.issuedAt, input.session.expiresAt,
+        input.session.revokedAt, input.session.lastSeenAt
+      );
+      this.database.prepare(`
+        INSERT INTO into_auth_events (
+          id, type, target_user_id, request_id, session_id, event_key, metadata_json, created_at
+        ) VALUES (?, 'invitation_consumed', ?, ?, ?, ?, '{}', ?)
+      `).run(
+        `invitation_consumed:${invitation.id}`, userId, input.requestId, input.session.id,
+        `invitation_consumed:${invitation.id}`, input.timestamp
+      );
+      const userRow = this.database.prepare(
+        "SELECT * FROM into_auth_users WHERE id = ?"
+      ).get(userId) as Record<string, unknown>;
+      this.database.exec("COMMIT");
+      return { state: "consumed" as const, user: userFromRow(userRow) };
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  async findUserCredentialByEmail(email: string) {
+    const row = this.database.prepare(`
+      SELECT u.*, c.scrypt_hash, c.scrypt_salt, c.scrypt_n, c.scrypt_r,
+        c.scrypt_p, c.scrypt_version, c.failed_attempts, c.locked_at
+      FROM into_auth_users u JOIN into_auth_credentials c ON c.user_id = u.id
+      WHERE u.email = ? LIMIT 1
+    `).get(canonicalAuthEmail(email)) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return {
+      user: userFromRow(row),
+      credential: {
+        algorithm: "scrypt" as const,
+        version: Number(row.scrypt_version) as 1,
+        hash: String(row.scrypt_hash),
+        salt: String(row.scrypt_salt),
+        n: Number(row.scrypt_n),
+        r: Number(row.scrypt_r),
+        p: Number(row.scrypt_p),
+      },
+      failedAttempts: Number(row.failed_attempts),
+      lockedAt: row.locked_at ? String(row.locked_at) : null,
+    };
+  }
+
+  async countActiveUsers() {
+    const row = this.database.prepare(
+      "SELECT COUNT(*) AS count FROM into_auth_users WHERE status = 'active' AND verified_at IS NOT NULL"
+    ).get() as { count: number };
+    return Number(row.count);
+  }
+
+  async updateUserStatus(input: UpdateUserStatusInput) {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.database.prepare(
+        "SELECT * FROM into_auth_users WHERE id = ? LIMIT 1"
+      ).get(input.targetId) as Record<string, unknown> | undefined;
+      if (!row) {
+        this.database.exec("COMMIT");
+        return { state: "not_found" as const, user: null };
+      }
+      const current = userFromRow(row);
+      if (current.version !== input.expectedVersion) {
+        this.database.exec("COMMIT");
+        return { state: "conflict" as const, user: current };
+      }
+      if (input.status === "active" && !current.verifiedAt) {
+        this.database.exec("COMMIT");
+        return { state: "unverified" as const, user: current };
+      }
+      if (input.status === "disabled" && current.status === "active") {
+        const active = this.database.prepare(`
+          SELECT COUNT(*) AS count FROM into_auth_users
+          WHERE status = 'active' AND verified_at IS NOT NULL AND id <> ?
+        `).get(input.targetId) as { count: number };
+        if (Number(active.count) === 0) {
+          this.database.exec("COMMIT");
+          return { state: "final_active" as const, user: current };
+        }
+      }
+      if (current.status === input.status) {
+        this.database.exec("COMMIT");
+        return { state: "updated" as const, user: current };
+      }
+      this.database.prepare(`
+        UPDATE into_auth_users SET status = ?, version = version + 1, updated_at = ?
+        WHERE id = ? AND version = ?
+      `).run(input.status, input.timestamp, input.targetId, input.expectedVersion);
+      this.database.prepare(`
+        INSERT INTO into_auth_events (
+          id, type, actor_id, target_user_id, request_id, session_id,
+          event_key, metadata_json, created_at
+        ) VALUES (?, 'user_status_changed', ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        `user_status:${input.requestId}`, input.actorId, input.targetId,
+        input.requestId, input.sessionId, `user_status:${input.requestId}`,
+        JSON.stringify({ status: input.status }), input.timestamp
+      );
+      const updated = this.database.prepare(
+        "SELECT * FROM into_auth_users WHERE id = ?"
+      ).get(input.targetId) as Record<string, unknown>;
+      this.database.exec("COMMIT");
+      return { state: "updated" as const, user: userFromRow(updated) };
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  async recordLoginFailure(
+    userId: string,
+    timestamp: string,
+    lockAfter: number,
+    context?: { requestId: string; sourceHash: string }
+  ) {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.prepare(`
+        UPDATE into_auth_credentials SET
+          failed_attempts = failed_attempts + 1,
+          locked_at = CASE WHEN failed_attempts + 1 >= ? THEN ? ELSE locked_at END,
+          updated_at = ?
+        WHERE user_id = ?
+      `).run(lockAfter, timestamp, timestamp, userId);
+      const row = this.database.prepare(
+        "SELECT failed_attempts, locked_at FROM into_auth_credentials WHERE user_id = ?"
+      ).get(userId) as { failed_attempts: number; locked_at: string | null };
+      if (context) {
+        this.database.prepare(`
+          INSERT OR IGNORE INTO into_auth_events (
+            id, type, target_user_id, request_id, event_key, metadata_json, created_at
+          ) VALUES (?, 'login_failed', ?, ?, ?, ?, ?)
+        `).run(
+          `login_failed:${context.requestId}`, userId, context.requestId,
+          `login_failed:${context.requestId}`,
+          JSON.stringify({ sourceHash: context.sourceHash }), timestamp
+        );
+      }
+      this.database.exec("COMMIT");
+      return {
+        failedAttempts: Number(row.failed_attempts),
+        lockedAt: row.locked_at ? String(row.locked_at) : null,
+      };
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  async resetLoginFailures(userId: string, timestamp: string) {
+    this.database.prepare(`
+      UPDATE into_auth_credentials
+      SET failed_attempts = 0, locked_at = NULL, updated_at = ?
+      WHERE user_id = ?
+    `).run(timestamp, userId);
+  }
+
   async countRows(table: (typeof authTables)[number]) {
     if (!authTables.includes(table)) throw new Error("Unsupported auth table.");
     const row = this.database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number };
@@ -632,6 +1010,33 @@ export class SqliteAuthRepository implements AuthRepository {
   close() {
     this.database.close();
   }
+}
+
+function invitationFromRow(row: Record<string, unknown>): AuthInvitationRecord {
+  return {
+    id: String(row.id),
+    userId: String(row.user_id),
+    tokenDigest: String(row.token_digest),
+    expiresAt: String(row.expires_at),
+    consumedAt: row.consumed_at ? String(row.consumed_at) : null,
+    idempotencyKey: String(row.idempotency_key),
+    requestFingerprint: String(row.request_fingerprint),
+    createdAt: String(row.created_at),
+  };
+}
+
+function userFromRow(row: Record<string, unknown>): AuthUserRecord {
+  return {
+    id: String(row.id),
+    email: String(row.email),
+    displayName: String(row.display_name),
+    status: row.status as AuthUserStatus,
+    accessLevel: "verified_user",
+    verifiedAt: row.verified_at ? String(row.verified_at) : null,
+    version: Number(row.version),
+    createdAt: String(row.created_at ?? row.user_created_at),
+    updatedAt: String(row.updated_at ?? row.user_updated_at),
+  };
 }
 
 function sessionWithUserFromRow(row: Record<string, unknown>): AuthSessionWithUser {

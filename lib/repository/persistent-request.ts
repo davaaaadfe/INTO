@@ -6,6 +6,9 @@ import {
 import { randomUUID } from "node:crypto";
 import { withVerifiedPersistentRequest, type RequestPrincipal } from "../services/verified-session-auth";
 import { logger } from "../utils/logger";
+import { withRequestPrincipalContext } from "./request-principal-context";
+
+export { withRequestPrincipalContext } from "./request-principal-context";
 
 const runtime = globalThis as typeof globalThis & {
   __INTO_PERSISTENT_REQUEST_TAIL?: Promise<void>;
@@ -21,10 +24,14 @@ export async function withPersistentStore<T>(
       withPersistentStore(handler, request, resolved)
     );
   }
-  return runPersistent(() => handler(principal), {
-    requestId: principal.requestId,
-    sessionCorrelationId: principal.sessionCorrelationId,
-  });
+  return withRequestPrincipalContext(principal, () =>
+    runPersistent(() => handler(principal), {
+      actorId: principal.actorId,
+      actorName: principal.actorName,
+      requestId: principal.requestId,
+      sessionCorrelationId: principal.sessionCorrelationId,
+    })
+  );
 }
 
 /** Test-only persistence seam for repository behavior that is not an HTTP request. */
@@ -47,7 +54,12 @@ export async function withPublicPersistentStore<T>(
 
 async function runPersistent<T>(
   handler: () => Promise<T> | T,
-  context: { requestId: string; sessionCorrelationId: string }
+  context: {
+    actorId?: string;
+    actorName?: string;
+    requestId: string;
+    sessionCorrelationId: string;
+  }
 ): Promise<T | Response> {
   const previous = runtime.__INTO_PERSISTENT_REQUEST_TAIL ?? Promise.resolve();
   let release!: () => void;

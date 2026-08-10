@@ -44,7 +44,7 @@ async function withRepository(
 test("SQLite auth migration creates safe normalized storage and is replayable", async () => {
   await withRepository(async (repository) => {
     await repository.migrate();
-    assert.equal(await repository.schemaVersion(), 4);
+    assert.equal(await repository.schemaVersion(), 5);
     assert.deepEqual(await repository.tableNames(), [
       "into_auth_credentials",
       "into_auth_events",
@@ -256,7 +256,7 @@ test("SQLite upgrades an immutable v1 auth fixture to canonical email v2", async
   const repository = new SqliteAuthRepository(path);
   try {
     await repository.migrate();
-    assert.equal(await repository.schemaVersion(), 4);
+    assert.equal(await repository.schemaVersion(), 5);
     assert.equal((await repository.listUsers())[0]?.email, "v1@example.test");
     assert.match(await repository.schemaSql(), /email NOT GLOB '\*\[\^!-~\]\*'/);
   } finally {
@@ -402,7 +402,7 @@ test("configured auth storage auto-migrates locally but never in production", as
     environment.NODE_ENV = "test";
     closeConfiguredAuthRepository();
     const local = await configuredAuthRepository();
-    assert.equal(await local.schemaVersion(), 4);
+    assert.equal(await local.schemaVersion(), 5);
     assert.equal(typeof local.migrateLegacyUsers, "function");
 
     closeConfiguredAuthRepository();

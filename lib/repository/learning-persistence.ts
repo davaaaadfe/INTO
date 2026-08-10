@@ -45,6 +45,8 @@ function companyId() {
 }
 
 export type LearningPersistenceContext = {
+  actorId?: string;
+  actorName?: string;
   requestId?: string;
   sessionCorrelationId?: string;
 };
@@ -506,7 +508,7 @@ function exampleInput(
     source: legacy ? "legacy" : (example.source ?? "explicit_learn"),
     trustState: legacy ? "legacy" : (example.trustState ?? "trusted"),
     trigger: legacy ? "migration" : (example.trigger ?? "learn"),
-    actorId: example.learnedByUserId ?? "shared_user",
+    actorId: example.learnedByUserId ?? context.actorId ?? "shared_user",
     sessionCorrelationId: context.sessionCorrelationId || "session_unavailable",
     requestId:
       context.requestId ||
@@ -669,7 +671,7 @@ function lifecycleExampleInput(
     source,
     trustState: "trusted",
     trigger: source,
-    actorId: "shared_user",
+    actorId: context.actorId ?? "shared_user",
     sessionCorrelationId: context.sessionCorrelationId || "session_unavailable",
     requestId:
       context.requestId || stableId("request", [source, invoice.id, contentHash]),
@@ -750,7 +752,7 @@ export async function persistLearningState(
       profile = await repository.resetSupplier({
         ...scope,
         expectedGeneration: existingProfile.generation,
-        actorId: "shared_user",
+        actorId: context.actorId ?? "shared_user",
         sessionCorrelationId: context.sessionCorrelationId || "session_unavailable",
         requestId:
           context.requestId ||

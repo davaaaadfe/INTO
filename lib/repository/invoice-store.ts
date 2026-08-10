@@ -82,6 +82,7 @@ import {
   SnapshotRevisionConflictError,
 } from "./sqlite-store";
 import { CURRENT_STORE_SCHEMA_VERSION } from "./store-migrations";
+import { currentRequestPrincipal } from "./request-principal-context";
 import {
   hydrateLearningState,
   persistAnalysisArtifacts,
@@ -174,6 +175,21 @@ function createSharedUser(): IntoUser {
 
 function userDisplayName(user: IntoUser | null | undefined) {
   return user?.name || user?.email || "Unknown user";
+}
+
+function mutationUser(): IntoUser {
+  const principal = currentRequestPrincipal();
+  if (!principal || principal.accessLevel === "legacy_shared") return getCurrentUser();
+  const timestamp = now();
+  return {
+    id: principal.actorId,
+    email: "",
+    name: principal.actorName,
+    status: "active",
+    isSystemOwner: false,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
 }
 
 function createSeedInvoice(overrides: Partial<UploadedInvoice>): UploadedInvoice {
@@ -1088,9 +1104,10 @@ export function addAuditEvent(
   input: Omit<AuditEvent, "id" | "createdAt" | "userId" | "userName"> &
     Partial<Pick<AuditEvent, "userId" | "userName" | "createdAt">>
 ) {
+  const principal = currentRequestPrincipal();
   const user = input.userId
-    ? getStore().users.find((item) => item.id === input.userId) ?? getCurrentUser()
-    : getCurrentUser();
+    ? getStore().users.find((item) => item.id === input.userId) ?? mutationUser()
+    : mutationUser();
   const event: AuditEvent = {
     id: createId("audit"),
     userId: input.userId ?? user.id,
@@ -1102,7 +1119,13 @@ export function addAuditEvent(
     field: input.field,
     oldValue: input.oldValue,
     newValue: input.newValue,
-    metadata: input.metadata,
+    metadata: principal
+      ? {
+          ...input.metadata,
+          requestId: principal.requestId,
+          sessionCorrelationId: principal.sessionCorrelationId,
+        }
+      : input.metadata,
   };
 
   getStore().auditEvents.unshift(event);
@@ -1141,7 +1164,7 @@ export function auditInvoiceFieldChanges(
       field,
       oldValue: previous[field],
       newValue: next[field],
-      message: `${getCurrentUser().name} changed ${field}.`,
+      message: `${mutationUser().name} changed ${field}.`,
     });
   }
 
@@ -1284,8 +1307,8 @@ export function createUploadedInvoice(input: {
 }) {
   const user =
     input.userId
-      ? getStore().users.find((item) => item.id === input.userId) ?? getCurrentUser()
-      : getCurrentUser();
+      ? getStore().users.find((item) => item.id === input.userId) ?? mutationUser()
+      : mutationUser();
   const timestamp = now();
   const invoice: UploadedInvoice = {
     id: createId("invoice"),
@@ -1401,7 +1424,7 @@ export function saveInvoiceReview(
     throw new Error("Learned invoices cannot be edited.");
   }
 
-  const user = getCurrentUser();
+  const user = mutationUser();
   const captured = captureUserCorrections({
     invoice,
     nextExtractedData: nextData,
@@ -1632,7 +1655,7 @@ export function learnInvoice(
     contentHash,
     formatFingerprint: formatFingerprint(finalExtractedData.rawText ?? ""),
     learnedAt,
-    learnedByUserId: getCurrentUser().id,
+    learnedByUserId: mutationUser().id,
     originalExtractedData,
     finalExtractedData,
     originalSupplierAccountId,
@@ -1685,7 +1708,7 @@ export function learnInvoice(
       requestKey,
     }),
     learnedAt,
-    learnedByUserId: getCurrentUser().id,
+    learnedByUserId: mutationUser().id,
   };
   recomputeInvoiceInStore(store, invoiceId);
   addAuditEvent({
@@ -2272,7 +2295,7 @@ export function selectInvoiceSupplier(invoiceId: string, accountId: string) {
   const supplierFormatFingerprint = formatFingerprint(
     invoice.extractedData.rawText ?? ""
   );
-  const user = getCurrentUser();
+  const user = mutationUser();
   const decidedAt = now();
   captureSupplierAccountCorrection({
     invoice,

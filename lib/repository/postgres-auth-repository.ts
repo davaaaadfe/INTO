@@ -12,9 +12,13 @@ import {
   type AuthSessionWithUser,
   type AuthRepository,
   type AuthMigrationReport,
+  type AuthInvitationRecord,
   type AuthUserRecord,
   type AuthUserStatus,
+  type ConsumeInvitationInput,
+  type CreateInvitationInput,
   type LegacyAuthUser,
+  type UpdateUserStatusInput,
 } from "./auth-repository";
 
 export const POSTGRES_AUTH_V1_MIGRATIONS = [
@@ -121,11 +125,17 @@ export const POSTGRES_AUTH_V4_MIGRATIONS = [
    ADD COLUMN token_version integer NOT NULL DEFAULT 1 CHECK (token_version = 1)`,
 ] as const;
 
+export const POSTGRES_AUTH_V5_MIGRATIONS = [
+  `ALTER TABLE into_auth_invitations
+   ADD COLUMN IF NOT EXISTS request_fingerprint text NOT NULL DEFAULT ''`,
+] as const;
+
 export const POSTGRES_AUTH_MIGRATIONS = [
   ...POSTGRES_AUTH_V1_MIGRATIONS,
   ...POSTGRES_AUTH_V2_MIGRATIONS,
   ...POSTGRES_AUTH_V3_MIGRATIONS,
   ...POSTGRES_AUTH_V4_MIGRATIONS,
+  ...POSTGRES_AUTH_V5_MIGRATIONS,
 ] as const;
 
 export const POSTGRES_AUTH_V1_CHECKSUM = createHash("sha256")
@@ -139,6 +149,9 @@ export const POSTGRES_AUTH_V3_CHECKSUM = createHash("sha256")
   .digest("hex");
 export const POSTGRES_AUTH_V4_CHECKSUM = createHash("sha256")
   .update(`4\n${POSTGRES_AUTH_V4_MIGRATIONS.join("\n")}`)
+  .digest("hex");
+export const POSTGRES_AUTH_V5_CHECKSUM = createHash("sha256")
+  .update(`5\n${POSTGRES_AUTH_V5_MIGRATIONS.join("\n")}`)
   .digest("hex");
 /** @deprecated Use the version-specific checksum. */
 export const POSTGRES_AUTH_MIGRATION_CHECKSUM = POSTGRES_AUTH_V2_CHECKSUM;
@@ -195,7 +208,9 @@ export class PostgresAuthRepository implements AuthRepository {
           ? row.checksum === POSTGRES_AUTH_V2_CHECKSUM
           : version === 3
             ? row.checksum === POSTGRES_AUTH_V3_CHECKSUM
-            : version === 4 && row.checksum === POSTGRES_AUTH_V4_CHECKSUM;
+            : version === 4
+              ? row.checksum === POSTGRES_AUTH_V4_CHECKSUM
+              : version === 5 && row.checksum === POSTGRES_AUTH_V5_CHECKSUM;
       if (!valid) {
         throw new AuthSchemaVersionError("Auth database migration checksum does not match this release.");
       }
@@ -216,6 +231,7 @@ export class PostgresAuthRepository implements AuthRepository {
     }
     if (current < 3) await this.migrateStrictEmailV3();
     if (current < 4) await this.migrateSessionVersionV4();
+    if (current < 5) await this.migrateInvitationFingerprintV5();
   }
 
   private async assertStrictEmailInputs(requireLowercase = true) {
@@ -279,6 +295,17 @@ export class PostgresAuthRepository implements AuthRepository {
         query: `INSERT INTO into_auth_schema_migrations (version, checksum, applied_at)
                 VALUES ($1, $2, now()) ON CONFLICT(version) DO NOTHING`,
         parameters: [4, POSTGRES_AUTH_V4_CHECKSUM],
+      },
+    ]);
+  }
+
+  private async migrateInvitationFingerprintV5() {
+    await this.transaction([
+      ...POSTGRES_AUTH_V5_MIGRATIONS.map((query) => ({ query })),
+      {
+        query: `INSERT INTO into_auth_schema_migrations (version, checksum, applied_at)
+                VALUES ($1, $2, now()) ON CONFLICT(version) DO NOTHING`,
+        parameters: [5, POSTGRES_AUTH_V5_CHECKSUM],
       },
     ]);
   }
@@ -403,6 +430,224 @@ export class PostgresAuthRepository implements AuthRepository {
     `, [timestamp, tokenDigest]);
     return rows.length === 1;
   }
+
+  async createOrReplayInvitation(input: CreateInvitationInput) {
+    const rows = await this.query(`
+      WITH existing_invitation AS (
+        SELECT * FROM into_auth_invitations WHERE idempotency_key = $8
+      ), user_insert AS (
+        INSERT INTO into_auth_users (
+          id, email, display_name, status, access_level, verified_at, version, created_at, updated_at
+        ) SELECT $2, $3, $4, 'invited', 'verified_user', NULL, 1, $11, $11
+        WHERE NOT EXISTS (SELECT 1 FROM existing_invitation)
+        ON CONFLICT (email) DO UPDATE SET updated_at = into_auth_users.updated_at
+        RETURNING id
+      ), invitation_insert AS (
+        INSERT INTO into_auth_invitations (
+          id, user_id, token_digest, expires_at, consumed_at, inviter_actor_id,
+          inviter_session_id, request_id, idempotency_key, request_fingerprint,
+          created_at, updated_at
+        ) SELECT $1, (SELECT id FROM user_insert LIMIT 1), $5, $6, NULL, $7,
+          $9, $10, $8, $12, $11, $11
+        WHERE NOT EXISTS (SELECT 1 FROM existing_invitation)
+        RETURNING *
+      ), event_insert AS (
+        INSERT INTO into_auth_events (
+          id, type, actor_id, target_user_id, request_id, session_id,
+          event_key, metadata_json, created_at
+        ) SELECT 'invitation_created:' || id, 'invitation_created', $7, user_id,
+          $10, $9, 'invitation_created:' || id, '{}'::jsonb, $11
+        FROM invitation_insert ON CONFLICT (event_key) DO NOTHING
+      )
+      SELECT 'created' AS state, * FROM invitation_insert
+      UNION ALL
+      SELECT CASE WHEN request_fingerprint = $12 THEN 'replayed' ELSE 'conflict' END AS state,
+        existing_invitation.* FROM existing_invitation
+      LIMIT 1
+    `, [
+      input.id, input.userId, canonicalAuthEmail(input.email), input.displayName,
+      input.tokenDigest, input.expiresAt, input.inviterActorId, input.idempotencyKey,
+      input.inviterSessionId, input.requestId, input.timestamp, input.requestFingerprint,
+    ]);
+    const row = rows[0];
+    if (!row) throw new Error("Invitation command did not return a result.");
+    return {
+      state: row.state as "created" | "replayed" | "conflict",
+      invitation: invitationFromRow(row),
+    };
+  }
+
+  async consumeInvitation(input: ConsumeInvitationInput) {
+    const rows = await this.query(`
+      WITH candidate_invitation AS (
+        SELECT i.id, i.user_id FROM into_auth_invitations i
+        JOIN into_auth_users u ON u.id = i.user_id
+        WHERE i.token_digest = $1 AND i.consumed_at IS NULL
+          AND i.expires_at > $2 AND u.status = 'invited'
+        FOR UPDATE
+      ), credential_insert AS (
+        INSERT INTO into_auth_credentials (
+          user_id, scrypt_hash, scrypt_salt, scrypt_n, scrypt_r, scrypt_p,
+          scrypt_version, failed_attempts, locked_at, rotated_at, created_at, updated_at
+        ) SELECT user_id, $3, $4, $5, $6, $7, $8, 0, NULL, NULL, $2, $2
+        FROM candidate_invitation RETURNING user_id
+      ), user_update AS (
+        UPDATE into_auth_users u SET display_name = $9, status = 'active',
+          verified_at = $2, version = u.version + 1, updated_at = $2
+        FROM credential_insert c WHERE u.id = c.user_id RETURNING u.*
+      ), invitation_update AS (
+        UPDATE into_auth_invitations i SET consumed_at = $2, updated_at = $2
+        FROM candidate_invitation c WHERE i.id = c.id RETURNING i.id
+      ), session_insert AS (
+        INSERT INTO into_auth_sessions (
+          id, user_id, token_digest, correlation_id_hash, token_version,
+          issued_at, expires_at, revoked_at, last_seen_at
+        ) SELECT $10, user_id, $11, $12, $13, $14, $15, $16, $17 FROM user_update
+        RETURNING id, user_id
+      ), event_insert AS (
+        INSERT INTO into_auth_events (
+          id, type, target_user_id, request_id, session_id, event_key, metadata_json, created_at
+        ) SELECT 'invitation_consumed:' || i.id, 'invitation_consumed', s.user_id,
+          $18, s.id, 'invitation_consumed:' || i.id, '{}'::jsonb, $2
+        FROM invitation_update i CROSS JOIN session_insert s
+        ON CONFLICT (event_key) DO NOTHING
+      )
+      SELECT 'consumed' AS state, user_update.* FROM user_update
+    `, [
+      input.tokenDigest, input.timestamp, input.credential.hash, input.credential.salt,
+      input.credential.n, input.credential.r, input.credential.p, input.credential.version,
+      input.displayName, input.session.id, input.session.tokenDigest,
+      input.session.correlationIdHash, input.session.tokenVersion, input.session.issuedAt,
+      input.session.expiresAt, input.session.revokedAt, input.session.lastSeenAt, input.requestId,
+    ]);
+    return rows[0]
+      ? { state: "consumed" as const, user: userFromRow(rows[0]) }
+      : { state: "gone" as const, user: null };
+  }
+
+  async findUserCredentialByEmail(email: string) {
+    const rows = await this.query(`
+      SELECT u.*, c.scrypt_hash, c.scrypt_salt, c.scrypt_n, c.scrypt_r,
+        c.scrypt_p, c.scrypt_version, c.failed_attempts, c.locked_at
+      FROM into_auth_users u JOIN into_auth_credentials c ON c.user_id = u.id
+      WHERE u.email = $1 LIMIT 1
+    `, [canonicalAuthEmail(email)]);
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      user: userFromRow(row),
+      credential: {
+        algorithm: "scrypt" as const,
+        version: Number(row.scrypt_version) as 1,
+        hash: String(row.scrypt_hash), salt: String(row.scrypt_salt),
+        n: Number(row.scrypt_n), r: Number(row.scrypt_r), p: Number(row.scrypt_p),
+      },
+      failedAttempts: Number(row.failed_attempts),
+      lockedAt: row.locked_at ? iso(row.locked_at) : null,
+    };
+  }
+
+  async countActiveUsers() {
+    const rows = await this.query(
+      "SELECT COUNT(*) AS count FROM into_auth_users WHERE status = 'active' AND verified_at IS NOT NULL"
+    );
+    return Number(rows[0]?.count ?? 0);
+  }
+
+  async updateUserStatus(input: UpdateUserStatusInput) {
+    const rows = await this.query(`
+      WITH target_user AS (
+        SELECT * FROM into_auth_users WHERE id = $1 FOR UPDATE
+      ), active_others AS (
+        SELECT COUNT(*)::integer AS count FROM into_auth_users
+        WHERE status = 'active' AND verified_at IS NOT NULL AND id <> $1
+      ), decision AS (
+        SELECT CASE
+          WHEN t.version <> $2 THEN 'conflict'
+          WHEN $3 = 'active' AND t.verified_at IS NULL THEN 'unverified'
+          WHEN $3 = 'disabled' AND t.status = 'active' AND a.count = 0 THEN 'final_active'
+          ELSE 'updated' END AS state
+        FROM target_user t CROSS JOIN active_others a
+      ), user_update AS (
+        UPDATE into_auth_users u SET status = $3, version = u.version + 1, updated_at = $4
+        FROM decision d WHERE u.id = $1 AND d.state = 'updated' AND u.status IS DISTINCT FROM $3
+        RETURNING u.*
+      ), event_insert AS (
+        INSERT INTO into_auth_events (
+          id, type, actor_id, target_user_id, request_id, session_id,
+          event_key, metadata_json, created_at
+        ) SELECT 'user_status:' || $6, 'user_status_changed', $5, $1, $6, $7,
+          'user_status:' || $6, jsonb_build_object('status', $3), $4
+        FROM user_update ON CONFLICT (event_key) DO NOTHING
+      )
+      SELECT d.state, COALESCE(u.id, t.id) AS id, COALESCE(u.email, t.email) AS email,
+        COALESCE(u.display_name, t.display_name) AS display_name,
+        COALESCE(u.status, t.status) AS status, COALESCE(u.verified_at, t.verified_at) AS verified_at,
+        COALESCE(u.version, t.version) AS version, COALESCE(u.created_at, t.created_at) AS created_at,
+        COALESCE(u.updated_at, t.updated_at) AS updated_at
+      FROM decision d CROSS JOIN target_user t LEFT JOIN user_update u ON true
+      UNION ALL SELECT 'not_found', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+      WHERE NOT EXISTS (SELECT 1 FROM target_user)
+    `, [
+      input.targetId, input.expectedVersion, input.status, input.timestamp,
+      input.actorId, input.requestId, input.sessionId,
+    ]);
+    const row = rows[0];
+    return {
+      state: row?.state as "updated" | "conflict" | "not_found" | "final_active" | "unverified",
+      user: row?.id ? userFromRow(row) : null,
+    };
+  }
+
+  async recordLoginFailure(
+    userId: string,
+    timestamp: string,
+    lockAfter: number,
+    context?: { requestId: string; sourceHash: string }
+  ) {
+    const rows = await this.query(`
+      WITH credential_update AS (
+        UPDATE into_auth_credentials SET failed_attempts = failed_attempts + 1,
+          locked_at = CASE WHEN failed_attempts + 1 >= $3 THEN $2::timestamptz ELSE locked_at END,
+          updated_at = $2 WHERE user_id = $1 RETURNING failed_attempts, locked_at
+      ), event_insert AS (
+        INSERT INTO into_auth_events (
+          id, type, target_user_id, request_id, event_key, metadata_json, created_at
+        ) SELECT 'login_failed:' || $4, 'login_failed', $1, $4,
+          'login_failed:' || $4, jsonb_build_object('sourceHash', $5), $2
+        FROM credential_update WHERE $4 IS NOT NULL ON CONFLICT (event_key) DO NOTHING
+      ) SELECT * FROM credential_update
+    `, [userId, timestamp, lockAfter, context?.requestId ?? null, context?.sourceHash ?? null]);
+    return {
+      failedAttempts: Number(rows[0]?.failed_attempts ?? 0),
+      lockedAt: rows[0]?.locked_at ? iso(rows[0].locked_at) : null,
+    };
+  }
+
+  async resetLoginFailures(userId: string, timestamp: string) {
+    await this.query(`
+      UPDATE into_auth_credentials SET failed_attempts = 0, locked_at = NULL, updated_at = $2
+      WHERE user_id = $1
+    `, [userId, timestamp]);
+  }
+}
+
+function invitationFromRow(row: Record<string, unknown>): AuthInvitationRecord {
+  return {
+    id: String(row.id), userId: String(row.user_id), tokenDigest: String(row.token_digest),
+    expiresAt: iso(row.expires_at), consumedAt: row.consumed_at ? iso(row.consumed_at) : null,
+    idempotencyKey: String(row.idempotency_key), requestFingerprint: String(row.request_fingerprint),
+    createdAt: iso(row.created_at),
+  };
+}
+
+function userFromRow(row: Record<string, unknown>): AuthUserRecord {
+  return {
+    id: String(row.id), email: String(row.email), displayName: String(row.display_name),
+    status: row.status as AuthUserStatus, accessLevel: "verified_user",
+    verifiedAt: row.verified_at ? iso(row.verified_at) : null,
+    version: Number(row.version), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at),
+  };
 }
 
 function sessionWithUserFromRow(row: Record<string, unknown>): AuthSessionWithUser {

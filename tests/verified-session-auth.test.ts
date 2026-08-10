@@ -72,11 +72,15 @@ test("unsafe verified flows require configured exact origins and reject forwarde
 
 test("every protected API route uses the persistent request wrapper", async () => {
   const routes = await routeFiles(resolve("app", "api"));
-  const publicRoutes = new Set(["access/login/route.ts", "access/logout/route.ts", "exact/callback/route.ts"]);
+  const publicRoutes = new Set(["access/login/route.ts", "access/logout/route.ts", "access/verify/route.ts", "exact/callback/route.ts"]);
   for (const route of routes) {
     const relative = route.replace(/\\/g, "/").replace(/^.*app\/api\//, "");
     if (publicRoutes.has(relative)) continue;
-    assert.match(await readFile(route, "utf8"), /withPersistentStore\(/, relative);
+    assert.match(
+      await readFile(route, "utf8"),
+      /withPersistentStore\(|withVerifiedPersistentRequest\(|resolveRequestPrincipal\(/,
+      relative
+    );
   }
 });
 

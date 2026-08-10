@@ -6,6 +6,7 @@ import {
   POSTGRES_AUTH_V2_CHECKSUM,
   POSTGRES_AUTH_V3_CHECKSUM,
   POSTGRES_AUTH_V4_CHECKSUM,
+  POSTGRES_AUTH_V5_CHECKSUM,
   PostgresAuthRepository,
 } from "../lib/repository/postgres-auth-repository";
 import {
@@ -29,6 +30,58 @@ test("PostgreSQL auth migrations define secret-safe normalized auth tables", () 
   assert.match(sql, /token_digest text NOT NULL UNIQUE/i);
   assert.match(sql, /CHECK \(email = lower\(btrim\(email\)\)\)/i);
   assert.doesNotMatch(sql, /raw_token|password(?:\s|,|\))/i);
+});
+
+test("PostgreSQL auth commands use atomic CTE chains for invitations, verification, and status CAS", async () => {
+  const calls: Array<{ query: string; parameters?: unknown[] }> = [];
+  const repository = PostgresAuthRepository.fromQuery(async (query, parameters) => {
+    calls.push({ query, parameters });
+    if (query.includes("existing_invitation")) return [{
+      state: "created", id: "invitation-1", user_id: "user-1", token_digest: "digest",
+      expires_at: "2026-08-11T00:00:00.000Z", consumed_at: null,
+      idempotency_key: "key", request_fingerprint: "fingerprint",
+      created_at: "2026-08-10T00:00:00.000Z",
+    }];
+    if (query.includes("candidate_invitation")) return [{
+      state: "consumed", id: "user-1", email: "user@example.test", display_name: "User",
+      status: "active", verified_at: "2026-08-10T00:05:00.000Z", version: 2,
+      created_at: "2026-08-10T00:00:00.000Z", updated_at: "2026-08-10T00:05:00.000Z",
+    }];
+    if (query.includes("target_user")) return [{
+      state: "updated", id: "user-1", email: "user@example.test", display_name: "User",
+      status: "disabled", verified_at: "2026-08-10T00:05:00.000Z", version: 3,
+      created_at: "2026-08-10T00:00:00.000Z", updated_at: "2026-08-10T00:10:00.000Z",
+    }];
+    return [];
+  });
+  assert.equal(typeof repository.createOrReplayInvitation, "function");
+  await repository.createOrReplayInvitation({
+    id: "invitation-1", userId: "user-1", email: "user@example.test", displayName: "User",
+    tokenDigest: "digest", expiresAt: "2026-08-11T00:00:00.000Z", inviterActorId: "actor",
+    inviterSessionId: "session", requestId: "request", idempotencyKey: "key",
+    requestFingerprint: "fingerprint", timestamp: "2026-08-10T00:00:00.000Z",
+  });
+  await repository.consumeInvitation({
+    tokenDigest: "digest", displayName: "User", requestId: "verify-request",
+    timestamp: "2026-08-10T00:05:00.000Z",
+    credential: { algorithm: "scrypt", version: 1, hash: "hash", salt: "salt", n: 16384, r: 8, p: 1 },
+    session: {
+      id: "session-1", userId: "user-1", tokenDigest: "session-digest",
+      correlationIdHash: "correlation-hash", tokenVersion: 1,
+      issuedAt: "2026-08-10T00:05:00.000Z", expiresAt: "2026-08-10T12:05:00.000Z",
+      revokedAt: null, lastSeenAt: "2026-08-10T00:05:00.000Z",
+    },
+  });
+  await repository.updateUserStatus({
+    actorId: "actor", targetId: "user-1", expectedVersion: 2, status: "disabled",
+    requestId: "status-request", sessionId: "session-1", timestamp: "2026-08-10T00:10:00.000Z",
+  });
+  const sql = calls.map((call) => call.query).join("\n");
+  assert.match(sql, /WITH existing_invitation AS/i);
+  assert.match(sql, /candidate_invitation AS[\s\S]*FOR UPDATE/i);
+  assert.match(sql, /credential_insert AS[\s\S]*session_insert AS[\s\S]*event_insert AS/i);
+  assert.match(sql, /target_user AS[\s\S]*active_others AS[\s\S]*user_update AS/i);
+  assert.equal(sql.includes("raw_token"), false);
 });
 
 test("PostgreSQL auth migration is checksummed and fails closed for newer schemas", async () => {
@@ -71,13 +124,15 @@ test("PostgreSQL upgrades compatible v1 ledger entries through a collision check
     async (statements) => { transactions.push(statements); }
   );
   await repository.migrate();
-  assert.equal(transactions.length, 3);
+  assert.equal(transactions.length, 4);
   assert.match(transactions[0]?.[0]?.query ?? "", /UPDATE into_auth_users SET email = lower\(btrim\(email\)\)/i);
   assert.match(transactions[0]?.[1]?.query ?? "", /ADD CONSTRAINT into_auth_users_email_canonical_check/i);
   assert.deepEqual(transactions[0]?.[2]?.parameters, [2, POSTGRES_AUTH_V2_CHECKSUM]);
   assert.deepEqual(transactions[1]?.[1]?.parameters, [3, POSTGRES_AUTH_V3_CHECKSUM]);
   assert.match(transactions[2]?.[1]?.query ?? "", /ADD COLUMN token_version/i);
   assert.deepEqual(transactions[2]?.[2]?.parameters, [4, POSTGRES_AUTH_V4_CHECKSUM]);
+  assert.match(transactions[3]?.[0]?.query ?? "", /request_fingerprint/i);
+  assert.deepEqual(transactions[3]?.[1]?.parameters, [5, POSTGRES_AUTH_V5_CHECKSUM]);
 });
 
 test("PostgreSQL v1 unsupported email input fails before v2 or v3 changes", async () => {

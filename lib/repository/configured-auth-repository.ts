@@ -19,6 +19,8 @@ const runtime = globalThis as typeof globalThis & {
   __INTO_AUTH_REPOSITORY_LOADING?: { identity: string; promise: Promise<ConfiguredAuthRepository> };
 };
 
+let repositoryFactoryForTest: (() => ConfiguredAuthRepository) | undefined;
+
 function shouldAutoMigrate() {
   return process.env.NODE_ENV !== "production";
 }
@@ -34,9 +36,9 @@ export async function configuredAuthRepository(): Promise<ConfiguredAuthReposito
   const currentLoading = runtime.__INTO_AUTH_REPOSITORY_LOADING;
   if (currentLoading?.identity === identity) return currentLoading.promise;
 
-  const repository: ConfiguredAuthRepository = databaseMode() === "postgres"
+  const repository: ConfiguredAuthRepository = repositoryFactoryForTest?.() ?? (databaseMode() === "postgres"
     ? new PostgresAuthRepository()
-    : new SqliteAuthRepository(sqliteDatabasePath());
+    : new SqliteAuthRepository(sqliteDatabasePath()));
   const { promise, resolve, reject } = Promise.withResolvers<ConfiguredAuthRepository>();
   const taggedLoading = { identity, promise };
   runtime.__INTO_AUTH_REPOSITORY_LOADING = taggedLoading;
@@ -64,4 +66,10 @@ export function closeConfiguredAuthRepository() {
   delete runtime.__INTO_AUTH_REPOSITORY;
   delete runtime.__INTO_AUTH_REPOSITORY_IDENTITY;
   delete runtime.__INTO_AUTH_REPOSITORY_LOADING;
+}
+
+export function setConfiguredAuthRepositoryFactoryForTest(
+  factory: (() => ConfiguredAuthRepository) | undefined
+) {
+  repositoryFactoryForTest = factory;
 }

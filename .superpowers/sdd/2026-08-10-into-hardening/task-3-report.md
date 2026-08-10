@@ -18,12 +18,12 @@ Status: DONE_WITH_CONCERNS
 
 ## Verification
 
-- Focused auth/session suite: 27 passed, 0 failed.
-- Full `pnpm test`: 336 passed, 0 failed.
+- Focused auth/session suite: 29 passed, 0 failed.
+- Full `pnpm test`: 338 passed, 0 failed.
 - `pnpm run typecheck`: passed.
 - `pnpm run lint`: passed.
 
 ## Concerns
 
 - PostgreSQL has SQL-contract coverage only; no live PostgreSQL service was available in this workspace.
-- The existing Node test harness receives an explicit test-only legacy principal when no shared password is configured. Production continues to fail closed with `503` in that condition.
+- The test loader injects a test-only legacy principal seam; no environment variable can grant it. Production continues to fail closed with `503` when no shared password is configured.

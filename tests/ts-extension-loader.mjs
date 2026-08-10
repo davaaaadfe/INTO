@@ -14,3 +14,15 @@ export async function resolve(specifier, context, nextResolve) {
     return nextResolve(`${specifier}.ts`, context);
   }
 }
+
+export async function load(url, context, nextLoad) {
+  const loaded = await nextLoad(url, context);
+  if (url.endsWith(".test.ts") && loaded.source != null) {
+    return {
+      ...loaded,
+      source: `import ${JSON.stringify(testAuthSetup)};\n${String(loaded.source)}`,
+    };
+  }
+  return loaded;
+}
+const testAuthSetup = new URL("./test-auth-setup.ts", import.meta.url).href;

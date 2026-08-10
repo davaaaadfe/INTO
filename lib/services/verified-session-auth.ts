@@ -10,6 +10,12 @@ import {
 export const VERIFIED_SESSION_COOKIE_NAME = "into_verified_session";
 export const VERIFIED_SESSION_SECONDS = 12 * 60 * 60;
 export const SESSION_LAST_SEEN_CADENCE_MS = 15 * 60 * 1_000;
+let testLegacyPrincipalEnabled = false;
+
+/** Test-loader seam; no environment value can enable this. */
+export function enableLegacyPrincipalForTests() {
+  testLegacyPrincipalEnabled = true;
+}
 
 export type AuthMode = "legacy_password" | "dual" | "verified_user";
 export type VerifiedPrincipal = Readonly<{
@@ -161,7 +167,7 @@ export async function resolveVerifiedPrincipal(
 function legacyPrincipal(request: Request): LegacyPrincipal {
   const token = cookieFromRequest(request, INTO_ACCESS_COOKIE_NAME);
   if (!isIntoAccessPasswordConfigured()) {
-    if (process.env.NODE_TEST_CONTEXT) {
+    if (testLegacyPrincipalEnabled) {
       return Object.freeze({
         actorId: "shared_user",
         actorName: "Shared access",
@@ -202,7 +208,7 @@ function trustedOrigins(request: Request) {
     .filter(Boolean) ?? [];
   const url = new URL(request.url);
   const local = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
-  const source = configured.length ? configured : local || process.env.NODE_TEST_CONTEXT ? [url.origin] : [];
+  const source = configured.length ? configured : local || testLegacyPrincipalEnabled ? [url.origin] : [];
   return new Set(source.flatMap((origin) => {
     try {
       return [new URL(origin).origin];

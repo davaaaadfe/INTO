@@ -15,6 +15,7 @@ import {
 import {
   closeConfiguredAuthRepository,
   configuredAuthRepository,
+  setConfiguredAuthRepositoryFactoryForTest,
 } from "../lib/repository/configured-auth-repository";
 
 function databasePath() {
@@ -418,5 +419,47 @@ test("configured auth storage auto-migrates locally but never in production", as
     if (previous.localPath === undefined) delete environment.LOCAL_DATABASE_PATH;
     else environment.LOCAL_DATABASE_PATH = previous.localPath;
     await rm(path, { force: true });
+  }
+});
+
+test("a delayed old auth repository load cannot replace the newer persistence identity", async () => {
+  const environment = process.env as Record<string, string | undefined>;
+  const previous = { mode: environment.DATABASE_MODE, path: environment.LOCAL_DATABASE_PATH, nodeEnv: environment.NODE_ENV };
+  const firstPath = databasePath();
+  const secondPath = databasePath();
+  const gate = Promise.withResolvers<void>();
+  let created = 0;
+  let older: SqliteAuthRepository | undefined;
+  let newer: SqliteAuthRepository | undefined;
+  try {
+    environment.DATABASE_MODE = "sqlite";
+    environment.LOCAL_DATABASE_PATH = firstPath;
+    environment.NODE_ENV = "test";
+    closeConfiguredAuthRepository();
+    setConfiguredAuthRepositoryFactoryForTest(() => {
+      const repository = new SqliteAuthRepository(created++ === 0 ? firstPath : secondPath);
+      if (created === 1) {
+        const migrate = repository.migrate.bind(repository);
+        repository.migrate = async () => { await gate.promise; await migrate(); };
+      }
+      return repository;
+    });
+    const oldLoad = configuredAuthRepository();
+    environment.LOCAL_DATABASE_PATH = secondPath;
+    newer = await configuredAuthRepository() as SqliteAuthRepository;
+    gate.resolve();
+    older = await oldLoad as SqliteAuthRepository;
+    assert.notEqual(older, newer);
+    assert.equal(await configuredAuthRepository(), newer);
+  } finally {
+    gate.resolve();
+    setConfiguredAuthRepositoryFactoryForTest(undefined);
+    closeConfiguredAuthRepository();
+    older?.close();
+    if (previous.mode === undefined) delete environment.DATABASE_MODE; else environment.DATABASE_MODE = previous.mode;
+    if (previous.path === undefined) delete environment.LOCAL_DATABASE_PATH; else environment.LOCAL_DATABASE_PATH = previous.path;
+    if (previous.nodeEnv === undefined) delete environment.NODE_ENV; else environment.NODE_ENV = previous.nodeEnv;
+    await rm(firstPath, { force: true });
+    await rm(secondPath, { force: true });
   }
 });

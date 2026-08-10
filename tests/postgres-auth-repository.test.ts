@@ -135,3 +135,28 @@ test("PostgreSQL legacy migration upserts canonical users and append-only events
     "2026-08-10T00:00:00.000Z",
   ]);
 });
+
+test("PostgreSQL session lifecycle uses digest-only lookup, bounded touch, and idempotent revoke SQL", async () => {
+  const calls: Array<{ query: string; parameters?: unknown[] }> = [];
+  const repository = PostgresAuthRepository.fromQuery(async (query, parameters) => {
+    calls.push({ query, parameters });
+    return query.includes("RETURNING id") ? [{ id: "session-1" }] : [];
+  });
+  const session = {
+    id: "session-1", userId: "user-1", tokenDigest: "digest-only", correlationIdHash: "correlation-hash",
+    tokenVersion: 1, issuedAt: "2026-08-10T00:00:00.000Z", expiresAt: "2026-08-11T00:00:00.000Z",
+    revokedAt: null, lastSeenAt: null,
+  };
+  await repository.createSession(session);
+  await repository.findSessionByDigest("digest-only");
+  await repository.touchSession("session-1", "2026-08-10T00:20:00.000Z", "2026-08-10T00:05:00.000Z");
+  await repository.revokeSessionByDigest("digest-only", "2026-08-10T00:21:00.000Z");
+
+  const sql = calls.map((call) => call.query).join("\n");
+  assert.match(sql, /INSERT INTO into_auth_sessions/i);
+  assert.match(sql, /WHERE s\.token_digest = \$1/i);
+  assert.match(sql, /last_seen_at IS NULL OR last_seen_at < \$3/i);
+  assert.match(sql, /WHERE token_digest = \$2 AND revoked_at IS NULL/i);
+  assert.deepEqual(calls[0]?.parameters?.slice(0, 5), ["session-1", "user-1", "digest-only", "correlation-hash", 1]);
+  assert.equal(sql.includes("raw_token"), false);
+});

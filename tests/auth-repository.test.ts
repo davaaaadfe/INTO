@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   AuthSchemaVersionError,
-  AuthEmailNormalizationConflictError,
+  AuthEmailValidationError,
   SqliteAuthRepository,
   SQLITE_AUTH_V1_CHECKSUM,
   inventoryLegacyUsers,
@@ -43,7 +43,7 @@ async function withRepository(
 test("SQLite auth migration creates safe normalized storage and is replayable", async () => {
   await withRepository(async (repository) => {
     await repository.migrate();
-    assert.equal(await repository.schemaVersion(), 2);
+    assert.equal(await repository.schemaVersion(), 3);
     assert.deepEqual(await repository.tableNames(), [
       "into_auth_credentials",
       "into_auth_events",
@@ -101,7 +101,7 @@ test("legacy role inventory maps verified roles without treating role as verific
 
   const inventory = inventoryLegacyUsers({
     users: [
-      { id: "admin", email: " ADMIN@Example.test ", name: "Admin", role: "Admin" },
+      { id: "admin", email: "ADMIN@Example.test", name: "Admin", role: "Admin" },
       { id: "active", email: "active@example.test", role: "reviewer", verifiedAt: "2026-08-01T00:00:00.000Z" },
       { id: "disabled", email: "disabled@example.test", role: "Viewer", status: "disabled", verifiedAt: "2026-08-01T00:00:00.000Z" },
       { id: "shared_user", email: "shared_user@internal", role: "Admin" },
@@ -171,7 +171,7 @@ test("auth repositories canonicalize email before unique upsert comparisons", as
   await withRepository(async (repository) => {
     await repository.upsertLegacyUsers([{
       id: "case-user",
-      email: " CASE@Example.test ",
+      email: "CASE@Example.test",
       displayName: "Case User",
       status: "invited",
       accessLevel: "verified_user",
@@ -201,10 +201,29 @@ test("auth repositories canonicalize email before unique upsert comparisons", as
   });
 });
 
+test("public auth upserts reject non-ASCII and whitespace email input", async () => {
+  await withRepository(async (repository) => {
+    for (const email of [" user@example.test", "user@example.test\t", "user@example.test\n", "user@exam\u00a0ple.test", "\u00dcser@example.test"]) {
+      await assert.rejects(
+        repository.upsertLegacyUsers([{
+          id: `bad-${JSON.stringify(email)}`,
+          email,
+          displayName: "Bad",
+          status: "invited",
+          accessLevel: "verified_user",
+          verifiedAt: null,
+        }], "2026-08-10T00:00:00.000Z"),
+        AuthEmailValidationError
+      );
+    }
+    assert.equal(await repository.countRows("into_auth_users"), 0);
+  });
+});
+
 test("SQLite enforces canonical lowercase email storage", async () => {
   await withRepository(async (repository) => {
     const schema = await repository.schemaSql();
-    assert.match(schema, /CHECK \(email = lower\(trim\(email\)\)\)/);
+    assert.match(schema, /email NOT GLOB '\*\[\^!-~\]\*'/);
   });
 });
 
@@ -228,7 +247,7 @@ test("SQLite upgrades an immutable v1 auth fixture to canonical email v2", async
       updated_at TEXT NOT NULL
     );
     INSERT INTO into_auth_users VALUES (
-      'v1-user', ' V1@Example.test ', 'V1', 'invited', 'verified_user', NULL, 1,
+      'v1-user', 'V1@Example.test', 'V1', 'invited', 'verified_user', NULL, 1,
       '2026-08-10T00:00:00.000Z', '2026-08-10T00:00:00.000Z'
     );
   `);
@@ -236,16 +255,43 @@ test("SQLite upgrades an immutable v1 auth fixture to canonical email v2", async
   const repository = new SqliteAuthRepository(path);
   try {
     await repository.migrate();
-    assert.equal(await repository.schemaVersion(), 2);
+    assert.equal(await repository.schemaVersion(), 3);
     assert.equal((await repository.listUsers())[0]?.email, "v1@example.test");
-    assert.match(await repository.schemaSql(), /CHECK \(email = lower\(trim\(email\)\)\)/);
+    assert.match(await repository.schemaSql(), /email NOT GLOB '\*\[\^!-~\]\*'/);
   } finally {
     repository.close();
     await rm(path, { force: true });
   }
 });
 
-test("SQLite v1 email canonicalization collision fails closed without a v2 write", async () => {
+test("SQLite v1 unsupported email input fails before recording v2", async () => {
+  for (const email of ["case@example.test\t", "case@example.test\n", "case@exam\u00a0ple.test", "\u00dcser@example.test"]) {
+    const path = databasePath();
+    const database = new DatabaseSync(path);
+    database.exec(`
+      CREATE TABLE into_auth_schema_migrations (version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL);
+      INSERT INTO into_auth_schema_migrations VALUES (1, '${SQLITE_AUTH_V1_CHECKSUM}', '2026-08-10T00:00:00.000Z');
+      CREATE TABLE into_auth_users (
+        id TEXT PRIMARY KEY, email TEXT NOT NULL COLLATE NOCASE UNIQUE, display_name TEXT NOT NULL,
+        status TEXT NOT NULL, access_level TEXT NOT NULL, verified_at TEXT, version INTEGER NOT NULL,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+    `);
+    database.prepare("INSERT INTO into_auth_users VALUES (?, ?, 'Bad', 'invited', 'verified_user', NULL, 1, ?, ?)")
+      .run("bad", email, "2026-08-10T00:00:00.000Z", "2026-08-10T00:00:00.000Z");
+    database.close();
+    const repository = new SqliteAuthRepository(path);
+    try {
+      await assert.rejects(repository.migrate(), AuthEmailValidationError);
+      assert.equal(await repository.schemaVersion(), 1);
+    } finally {
+      repository.close();
+      await rm(path, { force: true });
+    }
+  }
+});
+
+test("SQLite v1 outer-whitespace collision candidates fail closed without a v2 write", async () => {
   const path = databasePath();
   const database = new DatabaseSync(path);
   database.exec(`
@@ -271,7 +317,7 @@ test("SQLite v1 email canonicalization collision fails closed without a v2 write
   database.close();
   const repository = new SqliteAuthRepository(path);
   try {
-    await assert.rejects(repository.migrate(), AuthEmailNormalizationConflictError);
+    await assert.rejects(repository.migrate(), AuthEmailValidationError);
     assert.equal(await repository.schemaVersion(), 1);
     assert.deepEqual((await repository.listUsers()).map((user) => user.email), [
       " case@example.test",
@@ -355,7 +401,7 @@ test("configured auth storage auto-migrates locally but never in production", as
     environment.NODE_ENV = "test";
     closeConfiguredAuthRepository();
     const local = await configuredAuthRepository();
-    assert.equal(await local.schemaVersion(), 2);
+    assert.equal(await local.schemaVersion(), 3);
     assert.equal(typeof local.migrateLegacyUsers, "function");
 
     closeConfiguredAuthRepository();

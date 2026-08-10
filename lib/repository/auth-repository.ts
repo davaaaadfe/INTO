@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-export const AUTH_SCHEMA_VERSION = 2;
+export const AUTH_SCHEMA_VERSION = 3;
 
 export type AuthUserStatus = "invited" | "active" | "disabled";
 export type AuthUserRecord = {
@@ -29,6 +29,7 @@ export type AuthMigrationReport = LegacyUserInventory;
 
 export class AuthSchemaVersionError extends Error {}
 export class AuthEmailNormalizationConflictError extends Error {}
+export class AuthEmailValidationError extends Error {}
 
 const migrationTable = `
   PRAGMA foreign_keys = ON;
@@ -126,17 +127,52 @@ const sqliteV2Schema = `
   ALTER TABLE into_auth_users_next RENAME TO into_auth_users;
 `;
 
+const sqliteV3Schema = `
+  CREATE TABLE into_auth_users_next (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK (
+      email NOT GLOB '*[^!-~]*'
+      AND email = lower(email)
+      AND instr(email, '@') > 1
+      AND instr(email, '@') < length(email)
+      AND instr(substr(email, instr(email, '@') + 1), '@') = 0
+    ),
+    display_name TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('invited', 'active', 'disabled')),
+    access_level TEXT NOT NULL CHECK (access_level = 'verified_user'),
+    verified_at TEXT,
+    version INTEGER NOT NULL CHECK (version > 0),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  INSERT INTO into_auth_users_next (
+    id, email, display_name, status, access_level, verified_at, version, created_at, updated_at
+  ) SELECT
+    id, email, display_name, status, access_level, verified_at, version, created_at, updated_at
+  FROM into_auth_users;
+  DROP TABLE into_auth_users;
+  ALTER TABLE into_auth_users_next RENAME TO into_auth_users;
+`;
+
 export const SQLITE_AUTH_V1_CHECKSUM = createHash("sha256")
   .update(sqliteV1Schema)
   .digest("hex");
 export const SQLITE_AUTH_V2_CHECKSUM = createHash("sha256")
   .update(`2\n${sqliteV2Schema}`)
   .digest("hex");
+export const SQLITE_AUTH_V3_CHECKSUM = createHash("sha256")
+  .update(`3\n${sqliteV3Schema}`)
+  .digest("hex");
 /** @deprecated Use the version-specific checksum. */
 export const AUTH_MIGRATION_CHECKSUM = SQLITE_AUTH_V2_CHECKSUM;
 
 export function canonicalAuthEmail(email: string) {
-  return email.trim().toLowerCase();
+  if (!/^[!-~]+$/.test(email) || !/^[^@]+@[^@]+$/.test(email)) {
+    throw new AuthEmailValidationError("Auth email must use visible ASCII characters and one @.");
+  }
+  return email.replace(/[A-Z]/g, (character) =>
+    String.fromCharCode(character.charCodeAt(0) + 32)
+  );
 }
 
 const authTables = [
@@ -152,6 +188,14 @@ function legacyValue(record: Record<string, unknown>, ...keys: string[]) {
   for (const key of keys) {
     const value = record[key];
     if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+function legacyRawValue(record: Record<string, unknown>, ...keys: string[]) {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value) return value;
   }
   return null;
 }
@@ -187,8 +231,14 @@ export function inventoryLegacyUsers(snapshot: unknown): LegacyUserInventory {
       unknown.push(id);
       continue;
     }
-    const rawEmail = legacyValue(row, "email");
-    const email = rawEmail ? canonicalAuthEmail(rawEmail) : null;
+    const rawEmail = legacyRawValue(row, "email");
+    let email: string | null = null;
+    try {
+      email = rawEmail ? canonicalAuthEmail(rawEmail) : null;
+    } catch {
+      unknown.push(id);
+      continue;
+    }
     if (!email) {
       unknown.push(id);
       continue;
@@ -287,6 +337,7 @@ export class SqliteAuthRepository implements AuthRepository {
     const checksums = new Map([
       [1, SQLITE_AUTH_V1_CHECKSUM],
       [2, SQLITE_AUTH_V2_CHECKSUM],
+      [3, SQLITE_AUTH_V3_CHECKSUM],
     ]);
     for (const row of rows) {
       if (checksums.get(Number(row.version)) !== row.checksum) {
@@ -306,7 +357,29 @@ export class SqliteAuthRepository implements AuthRepository {
         throw error;
       }
     }
-    if (current < 2) this.migrateCanonicalEmailV2();
+    if (current < 2) {
+      this.assertStrictEmailInputs(false);
+      this.migrateCanonicalEmailV2();
+    }
+    if (current < 3) this.migrateStrictEmailV3();
+  }
+
+  private assertStrictEmailInputs(requireLowercase = true) {
+    const invalid = this.database.prepare(`
+      SELECT id, email FROM into_auth_users
+      WHERE email GLOB '*[^!-~]*'
+        OR (
+          ${requireLowercase ? "email <> lower(email) OR" : ""}
+          instr(email, '@') <= 1
+        OR instr(email, '@') >= length(email)
+        OR instr(substr(email, instr(email, '@') + 1), '@') <> 0)
+      ORDER BY id
+    `).all() as Array<{ id: string; email: string }>;
+    if (invalid.length) {
+      throw new AuthEmailValidationError(
+        `Auth emails require visible ASCII and one @: ${invalid.map((row) => row.id).join(", ")}.`
+      );
+    }
   }
 
   private migrateCanonicalEmailV2() {
@@ -331,6 +404,24 @@ export class SqliteAuthRepository implements AuthRepository {
       this.database.prepare(
         "INSERT INTO into_auth_schema_migrations (version, checksum, applied_at) VALUES (?, ?, ?)"
       ).run(2, SQLITE_AUTH_V2_CHECKSUM, new Date().toISOString());
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    } finally {
+      this.database.exec("PRAGMA foreign_keys = ON");
+    }
+  }
+
+  private migrateStrictEmailV3() {
+    this.assertStrictEmailInputs();
+    this.database.exec("PRAGMA foreign_keys = OFF");
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.exec(sqliteV3Schema);
+      this.database.prepare(
+        "INSERT INTO into_auth_schema_migrations (version, checksum, applied_at) VALUES (?, ?, ?)"
+      ).run(3, SQLITE_AUTH_V3_CHECKSUM, new Date().toISOString());
       this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -381,6 +472,10 @@ export class SqliteAuthRepository implements AuthRepository {
   }
 
   async upsertLegacyUsers(users: LegacyAuthUser[], timestamp: string) {
+    const canonicalUsers = users.map((user) => ({
+      ...user,
+      email: canonicalAuthEmail(user.email),
+    }));
     const statement = this.database.prepare(`
       INSERT INTO into_auth_users (
         id, email, display_name, status, access_level, verified_at, version, created_at, updated_at
@@ -399,10 +494,10 @@ export class SqliteAuthRepository implements AuthRepository {
         OR into_auth_users.access_level IS NOT excluded.access_level
         OR into_auth_users.verified_at IS NOT excluded.verified_at
     `);
-    for (const user of users) {
+    for (const user of canonicalUsers) {
       statement.run(
         user.id,
-        canonicalAuthEmail(user.email),
+        user.email,
         user.displayName,
         user.status,
         user.verifiedAt,

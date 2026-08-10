@@ -4,9 +4,13 @@ import {
   POSTGRES_AUTH_MIGRATIONS,
   POSTGRES_AUTH_V1_CHECKSUM,
   POSTGRES_AUTH_V2_CHECKSUM,
+  POSTGRES_AUTH_V3_CHECKSUM,
   PostgresAuthRepository,
 } from "../lib/repository/postgres-auth-repository";
-import { AuthEmailNormalizationConflictError } from "../lib/repository/auth-repository";
+import {
+  AuthEmailNormalizationConflictError,
+  AuthEmailValidationError,
+} from "../lib/repository/auth-repository";
 
 test("PostgreSQL auth migrations define secret-safe normalized auth tables", () => {
   const sql = POSTGRES_AUTH_MIGRATIONS.join("\n");
@@ -51,7 +55,7 @@ test("PostgreSQL auth migration is checksummed and fails closed for newer schema
 test("PostgreSQL rejects a current schema with a stale PostgreSQL migration checksum", async () => {
   const repository = PostgresAuthRepository.fromQuery(async (query) =>
     query.startsWith("SELECT version, checksum")
-      ? [{ version: 2, checksum: "sqlite-derived-checksum" }]
+      ? [{ version: 3, checksum: "sqlite-derived-checksum" }]
       : []
   );
   await assert.rejects(repository.migrate(), /checksum does not match/);
@@ -66,10 +70,25 @@ test("PostgreSQL upgrades compatible v1 ledger entries through a collision check
     async (statements) => { transactions.push(statements); }
   );
   await repository.migrate();
-  assert.equal(transactions.length, 1);
+  assert.equal(transactions.length, 2);
   assert.match(transactions[0]?.[0]?.query ?? "", /UPDATE into_auth_users SET email = lower\(btrim\(email\)\)/i);
   assert.match(transactions[0]?.[1]?.query ?? "", /ADD CONSTRAINT into_auth_users_email_canonical_check/i);
   assert.deepEqual(transactions[0]?.[2]?.parameters, [2, POSTGRES_AUTH_V2_CHECKSUM]);
+  assert.deepEqual(transactions[1]?.[1]?.parameters, [3, POSTGRES_AUTH_V3_CHECKSUM]);
+});
+
+test("PostgreSQL v1 unsupported email input fails before v2 or v3 changes", async () => {
+  let transactions = 0;
+  const repository = PostgresAuthRepository.fromQuery(
+    async (query) => query.startsWith("SELECT version, checksum")
+      ? [{ version: 1, checksum: POSTGRES_AUTH_V1_CHECKSUM }]
+      : query.includes("email !~ '^[!-~]+$'")
+        ? [{ id: "bad", email: "case@example.test\t" }]
+        : [],
+    async () => { transactions += 1; }
+  );
+  await assert.rejects(repository.migrate(), AuthEmailValidationError);
+  assert.equal(transactions, 0);
 });
 
 test("PostgreSQL v1 canonical email collisions fail closed before v2 changes", async () => {
@@ -93,7 +112,7 @@ test("PostgreSQL legacy migration upserts canonical users and append-only events
     return [];
   });
   const report = await repository.migrateLegacyUsers({ users: [
-    { id: "pg-user", email: " PG@Example.test ", role: "Reviewer" },
+    { id: "pg-user", email: "PG@Example.test", role: "Reviewer" },
     { id: "shared_user", email: "shared@internal", role: "Admin" },
     { id: "unknown", email: "unknown@example.test", role: "Owner" },
   ] }, "request-pg", "2026-08-10T00:00:00.000Z");

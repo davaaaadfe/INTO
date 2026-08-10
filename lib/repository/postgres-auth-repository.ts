@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   AUTH_SCHEMA_VERSION,
   AuthEmailNormalizationConflictError,
+  AuthEmailValidationError,
   AuthSchemaVersionError,
   canonicalAuthEmail,
   inventoryLegacyUsers,
@@ -93,9 +94,20 @@ export const POSTGRES_AUTH_V2_MIGRATIONS = [
    CHECK (email = lower(btrim(email)))`,
 ] as const;
 
+export const POSTGRES_AUTH_V3_MIGRATIONS = [
+  `ALTER TABLE into_auth_users
+   ADD CONSTRAINT into_auth_users_email_ascii_check
+   CHECK (
+     email ~ '^[!-~]+$'
+     AND email = lower(email)
+     AND email ~ '^[^@]+@[^@]+$'
+   )`,
+] as const;
+
 export const POSTGRES_AUTH_MIGRATIONS = [
   ...POSTGRES_AUTH_V1_MIGRATIONS,
   ...POSTGRES_AUTH_V2_MIGRATIONS,
+  ...POSTGRES_AUTH_V3_MIGRATIONS,
 ] as const;
 
 export const POSTGRES_AUTH_V1_CHECKSUM = createHash("sha256")
@@ -103,6 +115,9 @@ export const POSTGRES_AUTH_V1_CHECKSUM = createHash("sha256")
   .digest("hex");
 export const POSTGRES_AUTH_V2_CHECKSUM = createHash("sha256")
   .update(`2\n${POSTGRES_AUTH_V2_MIGRATIONS.join("\n")}`)
+  .digest("hex");
+export const POSTGRES_AUTH_V3_CHECKSUM = createHash("sha256")
+  .update(`3\n${POSTGRES_AUTH_V3_MIGRATIONS.join("\n")}`)
   .digest("hex");
 /** @deprecated Use the version-specific checksum. */
 export const POSTGRES_AUTH_MIGRATION_CHECKSUM = POSTGRES_AUTH_V2_CHECKSUM;
@@ -155,7 +170,9 @@ export class PostgresAuthRepository implements AuthRepository {
       const version = Number(row.version);
       const valid = version === 1
         ? row.checksum === POSTGRES_AUTH_V1_CHECKSUM || row.checksum === SQLITE_AUTH_V1_CHECKSUM
-        : version === 2 && row.checksum === POSTGRES_AUTH_V2_CHECKSUM;
+        : version === 2
+          ? row.checksum === POSTGRES_AUTH_V2_CHECKSUM
+          : version === 3 && row.checksum === POSTGRES_AUTH_V3_CHECKSUM;
       if (!valid) {
         throw new AuthSchemaVersionError("Auth database migration checksum does not match this release.");
       }
@@ -170,7 +187,28 @@ export class PostgresAuthRepository implements AuthRepository {
         },
       ]);
     }
-    if (current < 2) await this.migrateCanonicalEmailV2();
+    if (current < 2) {
+      await this.assertStrictEmailInputs(false);
+      await this.migrateCanonicalEmailV2();
+    }
+    if (current < 3) await this.migrateStrictEmailV3();
+  }
+
+  private async assertStrictEmailInputs(requireLowercase = true) {
+    const invalid = await this.query(`
+      SELECT id, email FROM into_auth_users
+      WHERE email !~ '^[!-~]+$'
+        OR (
+          ${requireLowercase ? "email <> lower(email) OR" : ""}
+          email !~ '^[^@]+@[^@]+$'
+        )
+      ORDER BY id
+    `);
+    if (invalid.length) {
+      throw new AuthEmailValidationError(
+        `Auth emails require visible ASCII and one @: ${invalid.map((row) => String(row.id)).join(", ")}.`
+      );
+    }
   }
 
   private async migrateCanonicalEmailV2() {
@@ -198,6 +236,18 @@ export class PostgresAuthRepository implements AuthRepository {
     ]);
   }
 
+  private async migrateStrictEmailV3() {
+    await this.assertStrictEmailInputs();
+    await this.transaction([
+      ...POSTGRES_AUTH_V3_MIGRATIONS.map((query) => ({ query })),
+      {
+        query: `INSERT INTO into_auth_schema_migrations (version, checksum, applied_at)
+                VALUES ($1, $2, now()) ON CONFLICT(version) DO NOTHING`,
+        parameters: [3, POSTGRES_AUTH_V3_CHECKSUM],
+      },
+    ]);
+  }
+
   async schemaVersion() {
     const rows = await this.query("SELECT MAX(version) AS version FROM into_auth_schema_migrations");
     return Number(rows[0]?.version ?? 0);
@@ -219,7 +269,11 @@ export class PostgresAuthRepository implements AuthRepository {
   }
 
   async upsertLegacyUsers(users: LegacyAuthUser[], timestamp: string) {
-    for (const user of users) {
+    const canonicalUsers = users.map((user) => ({
+      ...user,
+      email: canonicalAuthEmail(user.email),
+    }));
+    for (const user of canonicalUsers) {
       await this.query(`
         INSERT INTO into_auth_users (
           id, email, display_name, status, access_level, verified_at, version, created_at, updated_at
@@ -239,7 +293,7 @@ export class PostgresAuthRepository implements AuthRepository {
           OR into_auth_users.verified_at IS DISTINCT FROM EXCLUDED.verified_at
       `, [
         user.id,
-        canonicalAuthEmail(user.email),
+        user.email,
         user.displayName,
         user.status,
         user.verifiedAt,

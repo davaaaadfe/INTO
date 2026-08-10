@@ -165,6 +165,47 @@ test("legacy inventory upserts replayable auth users without credentials, sessio
   });
 });
 
+test("auth repositories canonicalize email before unique upsert comparisons", async () => {
+  await withRepository(async (repository) => {
+    await repository.upsertLegacyUsers([{
+      id: "case-user",
+      email: " CASE@Example.test ",
+      displayName: "Case User",
+      status: "invited",
+      accessLevel: "verified_user",
+      verifiedAt: null,
+    }], "2026-08-10T00:00:00.000Z");
+    await repository.upsertLegacyUsers([{
+      id: "case-user",
+      email: "case@example.test",
+      displayName: "Case User",
+      status: "invited",
+      accessLevel: "verified_user",
+      verifiedAt: null,
+    }], "2026-08-10T00:01:00.000Z");
+    assert.deepEqual(await repository.listUsers(), [
+      {
+        id: "case-user",
+        email: "case@example.test",
+        displayName: "Case User",
+        status: "invited",
+        accessLevel: "verified_user",
+        verifiedAt: null,
+        version: 1,
+        createdAt: "2026-08-10T00:00:00.000Z",
+        updatedAt: "2026-08-10T00:00:00.000Z",
+      },
+    ]);
+  });
+});
+
+test("SQLite enforces canonical lowercase email storage", async () => {
+  await withRepository(async (repository) => {
+    const schema = await repository.schemaSql();
+    assert.match(schema, /CHECK \(email = lower\(trim\(email\)\)\)/);
+  });
+});
+
 test("raw runtime snapshots retain multiple legacy identities without hydration coercion", async () => {
   const path = databasePath();
   const database = new DatabaseSync(path);
@@ -238,6 +279,7 @@ test("configured auth storage auto-migrates locally but never in production", as
     closeConfiguredAuthRepository();
     const local = await configuredAuthRepository();
     assert.equal(await local.schemaVersion(), 1);
+    assert.equal(typeof local.migrateLegacyUsers, "function");
 
     closeConfiguredAuthRepository();
     await rm(path, { force: true });

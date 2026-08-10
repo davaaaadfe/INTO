@@ -41,7 +41,7 @@ const migrationTable = `
 const schema = `
   CREATE TABLE IF NOT EXISTS into_auth_users (
     id TEXT PRIMARY KEY,
-    email TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    email TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK (email = lower(trim(email))),
     display_name TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('invited', 'active', 'disabled')),
     access_level TEXT NOT NULL CHECK (access_level = 'verified_user'),
@@ -108,6 +108,10 @@ export const AUTH_MIGRATION_CHECKSUM = createHash("sha256")
   .update(schema)
   .digest("hex");
 
+export function canonicalAuthEmail(email: string) {
+  return email.trim().toLowerCase();
+}
+
 const authTables = [
   "into_auth_credentials",
   "into_auth_events",
@@ -156,7 +160,8 @@ export function inventoryLegacyUsers(snapshot: unknown): LegacyUserInventory {
       unknown.push(id);
       continue;
     }
-    const email = legacyValue(row, "email")?.toLowerCase();
+    const rawEmail = legacyValue(row, "email");
+    const email = rawEmail ? canonicalAuthEmail(rawEmail) : null;
     if (!email) {
       unknown.push(id);
       continue;
@@ -225,6 +230,11 @@ export interface AuthRepository {
   schemaVersion(): Promise<number>;
   listUsers(): Promise<AuthUserRecord[]>;
   upsertLegacyUsers(users: LegacyAuthUser[], timestamp: string): Promise<void>;
+  migrateLegacyUsers(
+    snapshot: unknown,
+    requestId: string,
+    timestamp: string
+  ): Promise<AuthMigrationReport>;
 }
 
 export class SqliteAuthRepository implements AuthRepository {
@@ -326,12 +336,18 @@ export class SqliteAuthRepository implements AuthRepository {
     `);
     for (const user of users) {
       statement.run(
-        user.id, user.email, user.displayName, user.status, user.verifiedAt, timestamp, timestamp
+        user.id,
+        canonicalAuthEmail(user.email),
+        user.displayName,
+        user.status,
+        user.verifiedAt,
+        timestamp,
+        timestamp
       );
     }
   }
 
-  async migrateLegacySnapshot(snapshot: unknown, requestId: string, timestamp: string) {
+  async migrateLegacyUsers(snapshot: unknown, requestId: string, timestamp: string) {
     const report = inventoryLegacyUsers(snapshot);
     await this.upsertLegacyUsers(report.users, timestamp);
     const event = this.database.prepare(`
@@ -350,6 +366,10 @@ export class SqliteAuthRepository implements AuthRepository {
       );
     }
     return report;
+  }
+
+  async migrateLegacySnapshot(snapshot: unknown, requestId: string, timestamp: string) {
+    return this.migrateLegacyUsers(snapshot, requestId, timestamp);
   }
 
   async countRows(table: (typeof authTables)[number]) {

@@ -1,15 +1,16 @@
 import { neon } from "@neondatabase/serverless";
+import { createHash } from "node:crypto";
 import {
-  AUTH_MIGRATION_CHECKSUM,
   AUTH_SCHEMA_VERSION,
   AuthSchemaVersionError,
+  canonicalAuthEmail,
+  inventoryLegacyUsers,
   type AuthRepository,
+  type AuthMigrationReport,
   type AuthUserRecord,
   type AuthUserStatus,
   type LegacyAuthUser,
 } from "./auth-repository";
-
-export { AUTH_MIGRATION_CHECKSUM } from "./auth-repository";
 
 export const POSTGRES_AUTH_MIGRATIONS = [
   `CREATE TABLE IF NOT EXISTS into_auth_schema_migrations (
@@ -19,7 +20,7 @@ export const POSTGRES_AUTH_MIGRATIONS = [
   )`,
   `CREATE TABLE IF NOT EXISTS into_auth_users (
     id text PRIMARY KEY,
-    email text NOT NULL UNIQUE,
+    email text NOT NULL UNIQUE CHECK (email = lower(btrim(email))),
     display_name text NOT NULL,
     status text NOT NULL CHECK (status IN ('invited', 'active', 'disabled')),
     access_level text NOT NULL CHECK (access_level = 'verified_user'),
@@ -82,6 +83,10 @@ export const POSTGRES_AUTH_MIGRATIONS = [
     ON into_auth_events (target_user_id, created_at)`,
 ] as const;
 
+export const POSTGRES_AUTH_MIGRATION_CHECKSUM = createHash("sha256")
+  .update(`${AUTH_SCHEMA_VERSION}\n${POSTGRES_AUTH_MIGRATIONS.join("\n")}`)
+  .digest("hex");
+
 type PostgresRows = Array<Record<string, unknown>>;
 type PostgresQuery = (query: string, parameters?: unknown[]) => Promise<PostgresRows>;
 type PostgresStatement = { query: string; parameters?: unknown[] };
@@ -126,7 +131,10 @@ export class PostgresAuthRepository implements AuthRepository {
         `Auth database schema ${current} is newer than supported schema ${AUTH_SCHEMA_VERSION}.`
       );
     }
-    if (current === AUTH_SCHEMA_VERSION && rows[0]?.checksum !== AUTH_MIGRATION_CHECKSUM) {
+    if (
+      current === AUTH_SCHEMA_VERSION &&
+      rows[0]?.checksum !== POSTGRES_AUTH_MIGRATION_CHECKSUM
+    ) {
       throw new AuthSchemaVersionError("Auth database migration checksum does not match this release.");
     }
     if (current < AUTH_SCHEMA_VERSION) {
@@ -135,7 +143,7 @@ export class PostgresAuthRepository implements AuthRepository {
         {
           query: `INSERT INTO into_auth_schema_migrations (version, checksum, applied_at)
                   VALUES ($1, $2, now()) ON CONFLICT(version) DO NOTHING`,
-          parameters: [AUTH_SCHEMA_VERSION, AUTH_MIGRATION_CHECKSUM],
+          parameters: [AUTH_SCHEMA_VERSION, POSTGRES_AUTH_MIGRATION_CHECKSUM],
         },
       ]);
     }
@@ -182,12 +190,37 @@ export class PostgresAuthRepository implements AuthRepository {
           OR into_auth_users.verified_at IS DISTINCT FROM EXCLUDED.verified_at
       `, [
         user.id,
-        user.email,
+        canonicalAuthEmail(user.email),
         user.displayName,
         user.status,
         user.verifiedAt,
         timestamp,
       ]);
     }
+  }
+
+  async migrateLegacyUsers(
+    snapshot: unknown,
+    requestId: string,
+    timestamp: string
+  ): Promise<AuthMigrationReport> {
+    const report = inventoryLegacyUsers(snapshot);
+    await this.upsertLegacyUsers(report.users, timestamp);
+    for (const user of report.users) {
+      await this.query(`
+        INSERT INTO into_auth_events (
+          id, type, target_user_id, request_id, event_key, metadata_json, created_at
+        ) VALUES ($1, 'legacy_identity_migrated', $2, $3, $4, $5::jsonb, $6)
+        ON CONFLICT (event_key) DO NOTHING
+      `, [
+        `legacy_identity_migrated:${user.id}`,
+        user.id,
+        requestId,
+        `legacy_identity_migrated:${user.id}`,
+        JSON.stringify({ source: "raw_snapshot" }),
+        timestamp,
+      ]);
+    }
+    return report;
   }
 }

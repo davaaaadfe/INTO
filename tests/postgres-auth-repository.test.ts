@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  AUTH_MIGRATION_CHECKSUM,
   POSTGRES_AUTH_MIGRATIONS,
+  POSTGRES_AUTH_MIGRATION_CHECKSUM,
   PostgresAuthRepository,
 } from "../lib/repository/postgres-auth-repository";
 
@@ -20,6 +20,7 @@ test("PostgreSQL auth migrations define secret-safe normalized auth tables", () 
   assert.match(sql, /timestamptz/i);
   assert.match(sql, /jsonb/i);
   assert.match(sql, /token_digest text NOT NULL UNIQUE/i);
+  assert.match(sql, /CHECK \(email = lower\(btrim\(email\)\)\)/i);
   assert.doesNotMatch(sql, /raw_token|password(?:\s|,|\))/i);
 });
 
@@ -34,7 +35,7 @@ test("PostgreSQL auth migration is checksummed and fails closed for newer schema
   assert.equal(calls.some((call) => call.query.includes("into_auth_users")), true);
   assert.deepEqual(
     calls.find((call) => call.query.includes("INSERT INTO into_auth_schema_migrations"))?.parameters,
-    [1, AUTH_MIGRATION_CHECKSUM]
+    [1, POSTGRES_AUTH_MIGRATION_CHECKSUM]
   );
 
   const futureCalls: string[] = [];
@@ -44,4 +45,41 @@ test("PostgreSQL auth migration is checksummed and fails closed for newer schema
   });
   await assert.rejects(future.migrate(), /newer than supported schema/);
   assert.equal(futureCalls.some((query) => query.includes("into_auth_users")), false);
+});
+
+test("PostgreSQL rejects a current schema with a stale PostgreSQL migration checksum", async () => {
+  const repository = PostgresAuthRepository.fromQuery(async (query) =>
+    query.startsWith("SELECT version, checksum")
+      ? [{ version: 1, checksum: "sqlite-derived-checksum" }]
+      : []
+  );
+  await assert.rejects(repository.migrate(), /checksum does not match/);
+});
+
+test("PostgreSQL legacy migration upserts canonical users and append-only events", async () => {
+  const calls: Array<{ query: string; parameters?: unknown[] }> = [];
+  const repository = PostgresAuthRepository.fromQuery(async (query, parameters) => {
+    calls.push({ query, parameters });
+    return [];
+  });
+  const report = await repository.migrateLegacyUsers({ users: [
+    { id: "pg-user", email: " PG@Example.test ", role: "Reviewer" },
+    { id: "shared_user", email: "shared@internal", role: "Admin" },
+    { id: "unknown", email: "unknown@example.test", role: "Owner" },
+  ] }, "request-pg", "2026-08-10T00:00:00.000Z");
+
+  assert.deepEqual(report.unknown, ["unknown"]);
+  assert.deepEqual(report.excludedHistorical, ["shared_user"]);
+  const userWrite = calls.find((call) => call.query.includes("INSERT INTO into_auth_users"));
+  assert.deepEqual(userWrite?.parameters?.slice(0, 2), ["pg-user", "pg@example.test"]);
+  const eventWrite = calls.find((call) => call.query.includes("INSERT INTO into_auth_events"));
+  assert.match(eventWrite?.query ?? "", /ON CONFLICT \(event_key\) DO NOTHING/i);
+  assert.deepEqual(eventWrite?.parameters, [
+    "legacy_identity_migrated:pg-user",
+    "pg-user",
+    "request-pg",
+    "legacy_identity_migrated:pg-user",
+    JSON.stringify({ source: "raw_snapshot" }),
+    "2026-08-10T00:00:00.000Z",
+  ]);
 });

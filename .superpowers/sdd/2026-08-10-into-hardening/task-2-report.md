@@ -10,4 +10,4 @@ TDD evidence: the initial auth test failed because the repository module did not
 
 Concern: PostgreSQL coverage is SQL-contract/migration-seam coverage only because no live PostgreSQL service is configured. Real transactional PostgreSQL coverage remains for Tasks 6 and 22. PostgreSQL legacy normalized-user discovery is intentionally deferred to a deployment command; the pure inventory seam and SQLite raw-storage discovery are available without hydrating the runtime snapshot.
 
-Commit: 17784339a29d5ddf5f3d20ba07d946fd9b6439ef
+Implementation commit: 78c0370c2a630846647aa263e516da5049ea3fd3

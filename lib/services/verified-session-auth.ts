@@ -16,6 +16,7 @@ import {
   isIntoAccessPasswordConfigured,
   verifyIntoAccessSession,
 } from "./into-access-auth";
+import { createBoundedAuthLimiter } from "./bounded-auth-limiter";
 
 export const VERIFIED_SESSION_COOKIE_NAME = "into_verified_session";
 export const VERIFIED_SESSION_SECONDS = 12 * 60 * 60;
@@ -103,6 +104,7 @@ export type VerifiedPrincipal = Readonly<{
   verificationState: "verified";
   sessionCorrelationId: string;
   requestId: string;
+  sessionId?: string;
 }>;
 export type LegacyPrincipal = Readonly<{
   actorId: "shared_user";
@@ -127,8 +129,16 @@ export class LoginError extends Error {
 }
 
 const INVITATION_SECONDS = 24 * 60 * 60;
-const LOGIN_LOCK_ATTEMPTS = 5;
+const LOGIN_LOCK_ATTEMPTS = 4;
 const LOGIN_LOCK_MS = 15 * 60 * 1_000;
+const loginLimiter = createBoundedAuthLimiter({
+  purpose: "login",
+  windowMs: LOGIN_LOCK_MS,
+  subjectLimit: LOGIN_LOCK_ATTEMPTS,
+  aggregateLimit: 12,
+  maxSubjectScopes: 1024,
+  maxAggregateScopes: 256,
+});
 const DUMMY_LOGIN_CREDENTIAL: PasswordCredential = Object.freeze({
   algorithm: "scrypt",
   version: 1,
@@ -264,56 +274,48 @@ export async function loginVerifiedUser(
   now = Date.now(),
   context?: { requestId: string; sourceHash: string | null }
 ) {
-  let normalizedEmail: string;
-  let stored = null;
+  const boundedEmailInput = emailInput.slice(0, 320);
+  let normalizedEmail: string | null = null;
   try {
-    normalizedEmail = canonicalAuthEmail(emailInput);
-    stored = await repository.findUserCredentialByEmail(normalizedEmail);
+    if (emailInput.length <= 320) normalizedEmail = canonicalAuthEmail(boundedEmailInput);
   } catch {
-    // Invalid identifiers follow the same password-work path as unknown users.
-    normalizedEmail = emailInput.trim().toLowerCase().slice(0, 320);
+    // Invalid identifiers follow the same bounded password-work path as unknown users.
   }
-  const emailHash = createHash("sha256")
-    .update(`INTO login email:v1:${normalizedEmail}`)
-    .digest("base64url");
-  const scopeHash = createHash("sha256")
-    .update(`INTO login throttle:v1:${emailHash}:${context?.sourceHash ?? "unattributed"}`)
-    .digest("base64url");
-  const throttle = await repository.findLoginThrottle(scopeHash);
-  let activeLock = false;
-  if (throttle?.lockedAt) {
-    const lockedAt = Date.parse(throttle.lockedAt);
-    if (Number.isFinite(lockedAt) && now - lockedAt < LOGIN_LOCK_MS) {
-      activeLock = true;
-    } else {
-      await repository.resetLoginFailures(scopeHash, new Date(now).toISOString());
-    }
+  const limiterIdentity = normalizedEmail ?? `malformed:${boundedEmailInput}`;
+  if (!loginLimiter.allow(limiterIdentity, context?.sourceHash ?? null, now)) {
+    throw new LoginError(429, "Too many login attempts. Try again later.");
   }
+  const stored = normalizedEmail
+    ? await repository.findUserCredentialByEmail(normalizedEmail)
+    : null;
   const validLength = Buffer.byteLength(password, "utf8") >= 12 && Buffer.byteLength(password, "utf8") <= 1024;
   const candidate = validLength ? password : "invalid password input";
   const credential = stored?.credential ?? DUMMY_LOGIN_CREDENTIAL;
   const valid = await verifyPasswordCredential(candidate, credential);
-  if (activeLock) throw new LoginError(429, "Too many login attempts. Try again later.");
   if (!stored || !validLength || !valid) {
-    const failure = await repository.recordLoginFailure(
-      scopeHash,
+    if (stored) await repository.recordLoginFailure(
+      stored.user.id,
       new Date(now).toISOString(),
       LOGIN_LOCK_ATTEMPTS,
-      context ? {
-        requestId: context.requestId,
-        targetUserId: stored?.user.id,
-        sourceHash: context.sourceHash,
-      } : undefined
+      new Date(now + LOGIN_LOCK_MS).toISOString(),
+      context ? { requestId: context.requestId, sourceHash: context.sourceHash } : undefined
     );
-    if (failure?.lockedAt) throw new LoginError(429, "Too many login attempts. Try again later.");
     throw new LoginError(401, "Invalid email or password.");
+  }
+  if (stored.lockedAt && Date.parse(stored.lockedAt) > now) {
+    throw new LoginError(429, "Too many login attempts. Try again later.");
   }
   if (stored.user.status !== "active" || !stored.user.verifiedAt) {
     throw new LoginError(403, "Account is not active.");
   }
-  await repository.resetLoginFailures(scopeHash, new Date(now).toISOString());
+  await repository.resetLoginFailures(stored.user.id, new Date(now).toISOString());
   const session = await issueVerifiedSession(repository, stored.user.id, now);
   return { user: stored.user, session };
+}
+
+/** Test-only isolation seam; no environment value can invoke it. */
+export function resetLoginLimiterForTests() {
+  loginLimiter.reset();
 }
 
 export class RequestAuthenticationError extends Error {
@@ -462,6 +464,7 @@ export async function resolveVerifiedPrincipal(
     verificationState: "verified",
     sessionCorrelationId: correlationIdForToken(token!),
     requestId: requestIdFor(request),
+    sessionId: session.id,
   });
 }
 
@@ -507,9 +510,18 @@ function trustedOrigins(request: Request) {
   const configured = process.env.INTO_TRUSTED_ORIGINS?.split(",")
     .map((origin) => origin.trim())
     .filter(Boolean) ?? [];
+  const platform = [
+    process.env.APP_URL,
+    process.env.VERCEL_PROJECT_PRODUCTION_URL,
+    process.env.VERCEL_BRANCH_URL,
+    process.env.VERCEL_URL,
+  ].map((origin) => origin?.trim())
+    .filter((origin): origin is string => Boolean(origin))
+    .map((origin) => /^https?:\/\//i.test(origin) ? origin : `https://${origin}`);
   const url = new URL(request.url);
   const local = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
-  const source = configured.length ? configured : local || testLegacyPrincipalEnabled ? [url.origin] : [];
+  const trusted = [...configured, ...platform];
+  const source = trusted.length ? trusted : local || testLegacyPrincipalEnabled ? [url.origin] : [];
   return new Set(source.flatMap((origin) => {
     try {
       return [new URL(origin).origin];

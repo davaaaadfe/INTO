@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-export const AUTH_SCHEMA_VERSION = 6;
+export const AUTH_SCHEMA_VERSION = 7;
 
 export type AuthUserStatus = "invited" | "active" | "disabled";
 export type AuthUserRecord = {
@@ -264,6 +264,7 @@ const sqliteV6Schema = `
     updated_at TEXT NOT NULL
   );
 `;
+const sqliteV7Schema = `DROP TABLE IF EXISTS into_auth_login_throttles;`;
 
 export const SQLITE_AUTH_V1_CHECKSUM = createHash("sha256")
   .update(sqliteV1Schema)
@@ -283,6 +284,9 @@ export const SQLITE_AUTH_V5_CHECKSUM = createHash("sha256")
 export const SQLITE_AUTH_V6_CHECKSUM = createHash("sha256")
   .update(`6\n${sqliteV6Schema}`)
   .digest("hex");
+export const SQLITE_AUTH_V7_CHECKSUM = createHash("sha256")
+  .update(`7\n${sqliteV7Schema}`)
+  .digest("hex");
 /** @deprecated Use the version-specific checksum. */
 export const AUTH_MIGRATION_CHECKSUM = SQLITE_AUTH_V2_CHECKSUM;
 
@@ -299,7 +303,6 @@ const authTables = [
   "into_auth_credentials",
   "into_auth_events",
   "into_auth_invitations",
-  "into_auth_login_throttles",
   "into_auth_schema_migrations",
   "into_auth_sessions",
   "into_auth_users",
@@ -435,6 +438,7 @@ export interface AuthRepository {
   ): Promise<AuthMigrationReport>;
   createSession(session: AuthSessionRecord): Promise<void>;
   findSessionByDigest(tokenDigest: string): Promise<AuthSessionWithUser | null>;
+  findSessionById(sessionId: string): Promise<AuthSessionWithUser | null>;
   touchSession(sessionId: string, timestamp: string, before: string): Promise<boolean>;
   revokeSessionByDigest(tokenDigest: string, timestamp: string): Promise<boolean>;
   createOrReplayInvitation(input: CreateInvitationInput): Promise<{
@@ -457,19 +461,16 @@ export interface AuthRepository {
     user: AuthUserRecord | null;
   }>;
   recordLoginFailure(
-    scopeHash: string,
+    userId: string,
     timestamp: string,
     lockAfter: number,
-    context?: { requestId: string; targetUserId?: string; sourceHash?: string | null }
+    lockUntil: string,
+    context?: { requestId: string; sourceHash?: string | null }
   ): Promise<{
     failedAttempts: number;
     lockedAt: string | null;
   }>;
-  findLoginThrottle(scopeHash: string): Promise<{
-    failedAttempts: number;
-    lockedAt: string | null;
-  } | null>;
-  resetLoginFailures(scopeHash: string, timestamp: string): Promise<void>;
+  resetLoginFailures(userId: string, timestamp: string): Promise<void>;
 }
 
 export class SqliteAuthRepository implements AuthRepository {
@@ -499,6 +500,7 @@ export class SqliteAuthRepository implements AuthRepository {
       [4, SQLITE_AUTH_V4_CHECKSUM],
       [5, SQLITE_AUTH_V5_CHECKSUM],
       [6, SQLITE_AUTH_V6_CHECKSUM],
+      [7, SQLITE_AUTH_V7_CHECKSUM],
     ]);
     for (const row of rows) {
       if (checksums.get(Number(row.version)) !== row.checksum) {
@@ -526,6 +528,7 @@ export class SqliteAuthRepository implements AuthRepository {
     if (current < 4) this.migrateSessionVersionV4();
     if (current < 5) this.migrateInvitationFingerprintV5();
     if (current < 6) this.migrateLoginThrottleV6();
+    if (current < 7) this.removeLoginThrottleV7();
   }
 
   private assertStrictEmailInputs(requireLowercase = true) {
@@ -630,6 +633,20 @@ export class SqliteAuthRepository implements AuthRepository {
       this.database.prepare(
         "INSERT INTO into_auth_schema_migrations (version, checksum, applied_at) VALUES (?, ?, ?)"
       ).run(6, SQLITE_AUTH_V6_CHECKSUM, new Date().toISOString());
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private removeLoginThrottleV7() {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.exec(sqliteV7Schema);
+      this.database.prepare(
+        "INSERT INTO into_auth_schema_migrations (version, checksum, applied_at) VALUES (?, ?, ?)"
+      ).run(7, SQLITE_AUTH_V7_CHECKSUM, new Date().toISOString());
       this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -757,6 +774,16 @@ export class SqliteAuthRepository implements AuthRepository {
       FROM into_auth_sessions s JOIN into_auth_users u ON u.id = s.user_id
       WHERE s.token_digest = ? LIMIT 1
     `).get(tokenDigest) as Record<string, unknown> | undefined;
+    return row ? sessionWithUserFromRow(row) : null;
+  }
+
+  async findSessionById(sessionId: string): Promise<AuthSessionWithUser | null> {
+    const row = this.database.prepare(`
+      SELECT s.*, u.email, u.display_name, u.status, u.access_level, u.verified_at,
+        u.version, u.created_at, u.updated_at
+      FROM into_auth_sessions s JOIN into_auth_users u ON u.id = s.user_id
+      WHERE s.id = ? LIMIT 1
+    `).get(sessionId) as Record<string, unknown> | undefined;
     return row ? sessionWithUserFromRow(row) : null;
   }
 
@@ -987,36 +1014,36 @@ export class SqliteAuthRepository implements AuthRepository {
   }
 
   async recordLoginFailure(
-    scopeHash: string,
+    userId: string,
     timestamp: string,
     lockAfter: number,
-    context?: { requestId: string; targetUserId?: string; sourceHash?: string | null }
+    lockUntil: string,
+    context?: { requestId: string; sourceHash?: string | null }
   ) {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       this.database.prepare(`
-        INSERT OR IGNORE INTO into_auth_login_throttles (
-          scope_hash, failed_attempts, locked_at, updated_at
-        ) VALUES (?, 0, NULL, ?)
-      `).run(scopeHash, timestamp);
-      this.database.prepare(`
-        UPDATE into_auth_login_throttles SET
-          failed_attempts = failed_attempts + 1,
+        UPDATE into_auth_credentials SET
+          failed_attempts = min(failed_attempts + 1, ?),
           locked_at = CASE WHEN failed_attempts + 1 >= ? THEN ? ELSE locked_at END,
           updated_at = ?
-        WHERE scope_hash = ?
-      `).run(lockAfter, timestamp, timestamp, scopeHash);
+        WHERE user_id = ?
+      `).run(lockAfter, lockAfter, lockUntil, timestamp, userId);
       const row = this.database.prepare(
-        "SELECT failed_attempts, locked_at FROM into_auth_login_throttles WHERE scope_hash = ?"
-      ).get(scopeHash) as { failed_attempts: number; locked_at: string | null };
+        "SELECT failed_attempts, locked_at FROM into_auth_credentials WHERE user_id = ?"
+      ).get(userId) as { failed_attempts: number; locked_at: string | null };
       if (context) {
         this.database.prepare(`
-          INSERT OR IGNORE INTO into_auth_events (
+          INSERT INTO into_auth_events (
             id, type, target_user_id, request_id, event_key, metadata_json, created_at
           ) VALUES (?, 'login_failed', ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            request_id = excluded.request_id,
+            metadata_json = excluded.metadata_json,
+            created_at = excluded.created_at
         `).run(
-          `login_failed:${context.requestId}`, context.targetUserId ?? null, context.requestId,
-          `login_failed:${context.requestId}`,
+          `login_failed:${userId}`, userId, context.requestId,
+          `login_failed:${userId}`,
           JSON.stringify(context.sourceHash ? { sourceHash: context.sourceHash } : {}), timestamp
         );
       }
@@ -1031,22 +1058,12 @@ export class SqliteAuthRepository implements AuthRepository {
     }
   }
 
-  async findLoginThrottle(scopeHash: string) {
-    const row = this.database.prepare(`
-      SELECT failed_attempts, locked_at FROM into_auth_login_throttles WHERE scope_hash = ?
-    `).get(scopeHash) as { failed_attempts: number; locked_at: string | null } | undefined;
-    return row ? {
-      failedAttempts: Number(row.failed_attempts),
-      lockedAt: row.locked_at ? String(row.locked_at) : null,
-    } : null;
-  }
-
-  async resetLoginFailures(scopeHash: string, timestamp: string) {
+  async resetLoginFailures(userId: string, timestamp: string) {
     this.database.prepare(`
-      UPDATE into_auth_login_throttles
+      UPDATE into_auth_credentials
       SET failed_attempts = 0, locked_at = NULL, updated_at = ?
-      WHERE scope_hash = ?
-    `).run(timestamp, scopeHash);
+      WHERE user_id = ?
+    `).run(timestamp, userId);
   }
 
   async countRows(table: (typeof authTables)[number]) {

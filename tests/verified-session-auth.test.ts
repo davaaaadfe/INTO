@@ -170,6 +170,7 @@ test("verified sessions persist only a digest and resolve an immutable principal
       verificationState: "verified",
       sessionCorrelationId: issued.correlationId,
       requestId: "request-1",
+      sessionId: issued.sessionId,
     });
   } finally {
     repository.close();

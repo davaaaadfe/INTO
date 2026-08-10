@@ -9,6 +9,7 @@ import { createMockExactConnection } from "../../../../lib/services/exact-online
 import {
   exchangeExactAuthorizationCode,
   isRealExactMode,
+  reauthorizeExactOAuthState,
   verifyExactOAuthState,
 } from "../../../../lib/services/exact-api-client";
 import { logger } from "../../../../lib/utils/logger";
@@ -33,6 +34,7 @@ export async function GET(request: Request) {
         throw new Error("Exact OAuth callback is missing code or state.");
       }
 
+      const principal = await reauthorizeExactOAuthState(state);
       const verifiedState = await verifyExactOAuthState(state);
       return withPersistentStore(async () => {
         const connection = setExactConnection(
@@ -47,7 +49,7 @@ export async function GET(request: Request) {
         });
 
         return Response.redirect(new URL("/?exact=connected", request.url));
-      }, request, verifiedState.principal);
+      }, request, principal);
     } catch (callbackError) {
       const message =
         callbackError instanceof Error

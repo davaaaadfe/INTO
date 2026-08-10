@@ -102,16 +102,19 @@ test("invitation, verification, session, users, status, and logout handlers are 
     mode: process.env.AUTH_MODE,
     password: process.env.INTO_ACCESS_PASSWORD,
     secret: process.env.INTO_INVITATION_SECRET,
+    sourceHeader: process.env.INTO_TRUSTED_SOURCE_HEADER,
   };
   environment.AUTH_MODE = "dual";
   environment.INTO_ACCESS_PASSWORD = "legacy test password";
   environment.INTO_INVITATION_SECRET = "test-only-invitation-secret-at-least-32-bytes";
+  environment.INTO_TRUSTED_SOURCE_HEADER = "x-test-source";
   try {
     await repository.migrate();
     setConfiguredAuthRepositoryFactoryForTest(() => repository);
     closeConfiguredAuthRepository();
     const invitationRoute = await import("../app/api/users/invitations/route");
     const verifyRoute = await import("../app/api/access/verify/route");
+    assert.deepEqual(Object.keys(verifyRoute).sort(), ["POST"]);
     const sessionRoute = await import("../app/api/access/session/route");
     const usersRoute = await import("../app/api/users/route");
     const statusRoute = await import("../app/api/users/[id]/route");
@@ -262,6 +265,24 @@ test("invitation, verification, session, users, status, and logout handlers are 
     }));
     assert.equal(unrelatedVerification.status, 200);
 
+    let aggregateLimited!: Response;
+    for (let attempt = 0; attempt < 51; attempt += 1) {
+      aggregateLimited = await verifyRoute.POST(new Request("https://into.example.test/api/access/verify", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "https://into.example.test",
+          "x-test-source": "aggregate-verification-source",
+        },
+        body: JSON.stringify({
+          token: `v1.${attempt.toString(36).padStart(43, "B")}`,
+          displayName: "Aggregate abuse",
+          password: "short",
+        }),
+      }));
+    }
+    assert.equal(aggregateLimited.status, 429);
+
     const closedBootstrapSession = await sessionRoute.GET(new Request("https://into.example.test/api/access/session", {
       headers: { cookie: `into_access_session=${legacyCookie}` },
     }));
@@ -282,7 +303,47 @@ test("invitation, verification, session, users, status, and logout handlers are 
     if (previous.mode === undefined) delete environment.AUTH_MODE; else environment.AUTH_MODE = previous.mode;
     if (previous.password === undefined) delete environment.INTO_ACCESS_PASSWORD; else environment.INTO_ACCESS_PASSWORD = previous.password;
     if (previous.secret === undefined) delete environment.INTO_INVITATION_SECRET; else environment.INTO_INVITATION_SECRET = previous.secret;
+    if (previous.sourceHeader === undefined) delete environment.INTO_TRUSTED_SOURCE_HEADER; else environment.INTO_TRUSTED_SOURCE_HEADER = previous.sourceHeader;
     try { repository.close(); } catch { /* configured repository already closed it */ }
     await rm(path, { force: true });
+  }
+});
+
+test("logout keeps legacy defaults backward compatible and trusts only configured server origins", async () => {
+  const environment = process.env as Record<string, string | undefined>;
+  const previous = {
+    mode: environment.AUTH_MODE,
+    appUrl: environment.APP_URL,
+    origins: environment.INTO_TRUSTED_ORIGINS,
+  };
+  const logoutRoute = await import("../app/api/access/logout/route");
+  try {
+    environment.AUTH_MODE = "legacy_password";
+    delete environment.APP_URL;
+    delete environment.INTO_TRUSTED_ORIGINS;
+    const legacy = await logoutRoute.POST(new Request("https://deployment.example.test/api/access/logout", {
+      method: "POST",
+      headers: { cookie: "into_access_session=stale" },
+    }));
+    assert.equal(legacy.status, 200);
+    assert.match(legacy.headers.get("set-cookie") ?? "", /into_access_session=;/);
+
+    environment.AUTH_MODE = "dual";
+    environment.APP_URL = "https://trusted.example.test";
+    const trusted = await logoutRoute.POST(new Request("https://deployment.example.test/api/access/logout", {
+      method: "POST",
+      headers: { origin: "https://trusted.example.test" },
+    }));
+    assert.equal(trusted.status, 200);
+
+    const untrusted = await logoutRoute.POST(new Request("https://deployment.example.test/api/access/logout", {
+      method: "POST",
+      headers: { origin: "https://attacker.example.test" },
+    }));
+    assert.equal(untrusted.status, 403);
+  } finally {
+    if (previous.mode === undefined) delete environment.AUTH_MODE; else environment.AUTH_MODE = previous.mode;
+    if (previous.appUrl === undefined) delete environment.APP_URL; else environment.APP_URL = previous.appUrl;
+    if (previous.origins === undefined) delete environment.INTO_TRUSTED_ORIGINS; else environment.INTO_TRUSTED_ORIGINS = previous.origins;
   }
 });

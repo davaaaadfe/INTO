@@ -138,6 +138,9 @@ export const POSTGRES_AUTH_V6_MIGRATIONS = [
     updated_at timestamptz NOT NULL
   )`,
 ] as const;
+export const POSTGRES_AUTH_V7_MIGRATIONS = [
+  `DROP TABLE IF EXISTS into_auth_login_throttles`,
+] as const;
 
 export const POSTGRES_AUTH_MIGRATIONS = [
   ...POSTGRES_AUTH_V1_MIGRATIONS,
@@ -146,6 +149,7 @@ export const POSTGRES_AUTH_MIGRATIONS = [
   ...POSTGRES_AUTH_V4_MIGRATIONS,
   ...POSTGRES_AUTH_V5_MIGRATIONS,
   ...POSTGRES_AUTH_V6_MIGRATIONS,
+  ...POSTGRES_AUTH_V7_MIGRATIONS,
 ] as const;
 
 export const POSTGRES_AUTH_V1_CHECKSUM = createHash("sha256")
@@ -165,6 +169,9 @@ export const POSTGRES_AUTH_V5_CHECKSUM = createHash("sha256")
   .digest("hex");
 export const POSTGRES_AUTH_V6_CHECKSUM = createHash("sha256")
   .update(`6\n${POSTGRES_AUTH_V6_MIGRATIONS.join("\n")}`)
+  .digest("hex");
+export const POSTGRES_AUTH_V7_CHECKSUM = createHash("sha256")
+  .update(`7\n${POSTGRES_AUTH_V7_MIGRATIONS.join("\n")}`)
   .digest("hex");
 /** @deprecated Use the version-specific checksum. */
 export const POSTGRES_AUTH_MIGRATION_CHECKSUM = POSTGRES_AUTH_V2_CHECKSUM;
@@ -225,7 +232,9 @@ export class PostgresAuthRepository implements AuthRepository {
               ? row.checksum === POSTGRES_AUTH_V4_CHECKSUM
               : version === 5
                 ? row.checksum === POSTGRES_AUTH_V5_CHECKSUM
-                : version === 6 && row.checksum === POSTGRES_AUTH_V6_CHECKSUM;
+                : version === 6
+                  ? row.checksum === POSTGRES_AUTH_V6_CHECKSUM
+                  : version === 7 && row.checksum === POSTGRES_AUTH_V7_CHECKSUM;
       if (!valid) {
         throw new AuthSchemaVersionError("Auth database migration checksum does not match this release.");
       }
@@ -248,6 +257,7 @@ export class PostgresAuthRepository implements AuthRepository {
     if (current < 4) await this.migrateSessionVersionV4();
     if (current < 5) await this.migrateInvitationFingerprintV5();
     if (current < 6) await this.migrateLoginThrottleV6();
+    if (current < 7) await this.removeLoginThrottleV7();
   }
 
   private async assertStrictEmailInputs(requireLowercase = true) {
@@ -333,6 +343,17 @@ export class PostgresAuthRepository implements AuthRepository {
         query: `INSERT INTO into_auth_schema_migrations (version, checksum, applied_at)
                 VALUES ($1, $2, now()) ON CONFLICT(version) DO NOTHING`,
         parameters: [6, POSTGRES_AUTH_V6_CHECKSUM],
+      },
+    ]);
+  }
+
+  private async removeLoginThrottleV7() {
+    await this.transaction([
+      ...POSTGRES_AUTH_V7_MIGRATIONS.map((query) => ({ query })),
+      {
+        query: `INSERT INTO into_auth_schema_migrations (version, checksum, applied_at)
+                VALUES ($1, $2, now()) ON CONFLICT(version) DO NOTHING`,
+        parameters: [7, POSTGRES_AUTH_V7_CHECKSUM],
       },
     ]);
   }
@@ -437,6 +458,16 @@ export class PostgresAuthRepository implements AuthRepository {
     `, [tokenDigest]);
     const row = rows[0];
     return row ? sessionWithUserFromRow(row) : null;
+  }
+
+  async findSessionById(sessionId: string): Promise<AuthSessionWithUser | null> {
+    const rows = await this.query(`
+      SELECT s.*, u.email, u.display_name, u.status, u.access_level, u.verified_at,
+        u.version, u.created_at, u.updated_at
+      FROM into_auth_sessions s JOIN into_auth_users u ON u.id = s.user_id
+      WHERE s.id = $1 LIMIT 1
+    `, [sessionId]);
+    return rows[0] ? sessionWithUserFromRow(rows[0]) : null;
   }
 
   async touchSession(sessionId: string, timestamp: string, before: string) {
@@ -652,35 +683,35 @@ export class PostgresAuthRepository implements AuthRepository {
   }
 
   async recordLoginFailure(
-    scopeHash: string,
+    userId: string,
     timestamp: string,
     lockAfter: number,
-    context?: { requestId: string; targetUserId?: string; sourceHash?: string | null }
+    lockUntil: string,
+    context?: { requestId: string; sourceHash?: string | null }
   ) {
     const rows = await this.query(`
-      WITH throttle_update AS (
-        INSERT INTO into_auth_login_throttles (
-          scope_hash, failed_attempts, locked_at, updated_at
-        ) VALUES ($1, 1, CASE WHEN $3 <= 1 THEN $2::timestamptz ELSE NULL END, $2)
-        ON CONFLICT (scope_hash) DO UPDATE SET
-          failed_attempts = into_auth_login_throttles.failed_attempts + 1,
-          locked_at = CASE
-            WHEN into_auth_login_throttles.failed_attempts + 1 >= $3 THEN $2::timestamptz
-            ELSE into_auth_login_throttles.locked_at END,
+      WITH credential_update AS (
+        UPDATE into_auth_credentials SET
+          failed_attempts = LEAST(failed_attempts + 1, $3),
+          locked_at = CASE WHEN failed_attempts + 1 >= $3 THEN $4::timestamptz ELSE locked_at END,
           updated_at = $2
+        WHERE user_id = $1
         RETURNING failed_attempts, locked_at
       ), event_insert AS (
         INSERT INTO into_auth_events (
           id, type, target_user_id, request_id, event_key, metadata_json, created_at
-        ) SELECT 'login_failed:' || $4, 'login_failed', $5, $4,
-          'login_failed:' || $4,
+        ) SELECT 'login_failed:' || $1, 'login_failed', $1, $5,
+          'login_failed:' || $1,
           CASE WHEN $6::text IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('sourceHash', $6::text) END,
-          $2 FROM throttle_update WHERE $4 IS NOT NULL
-        ON CONFLICT (event_key) DO NOTHING
-      ) SELECT * FROM throttle_update
+          $2 FROM credential_update WHERE $5 IS NOT NULL
+        ON CONFLICT (id) DO UPDATE SET
+          request_id = excluded.request_id,
+          metadata_json = excluded.metadata_json,
+          created_at = excluded.created_at
+      ) SELECT * FROM credential_update
     `, [
-      scopeHash, timestamp, lockAfter, context?.requestId ?? null,
-      context?.targetUserId ?? null, context?.sourceHash ?? null,
+      userId, timestamp, lockAfter, lockUntil,
+      context?.requestId ?? null, context?.sourceHash ?? null,
     ]);
     return {
       failedAttempts: Number(rows[0]?.failed_attempts ?? 0),
@@ -688,21 +719,11 @@ export class PostgresAuthRepository implements AuthRepository {
     };
   }
 
-  async findLoginThrottle(scopeHash: string) {
-    const rows = await this.query(`
-      SELECT failed_attempts, locked_at FROM into_auth_login_throttles WHERE scope_hash = $1
-    `, [scopeHash]);
-    return rows[0] ? {
-      failedAttempts: Number(rows[0].failed_attempts),
-      lockedAt: rows[0].locked_at ? iso(rows[0].locked_at) : null,
-    } : null;
-  }
-
-  async resetLoginFailures(scopeHash: string, timestamp: string) {
+  async resetLoginFailures(userId: string, timestamp: string) {
     await this.query(`
-      UPDATE into_auth_login_throttles SET failed_attempts = 0, locked_at = NULL, updated_at = $2
-      WHERE scope_hash = $1
-    `, [scopeHash, timestamp]);
+      UPDATE into_auth_credentials SET failed_attempts = 0, locked_at = NULL, updated_at = $2
+      WHERE user_id = $1
+    `, [userId, timestamp]);
   }
 }
 

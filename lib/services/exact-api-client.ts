@@ -16,8 +16,14 @@ import {
   isIntoPurchaseVatCode,
 } from "../domain/invoice";
 import { Buffer } from "node:buffer";
-import { timingSafeEqual } from "node:crypto";
-import type { RequestPrincipal } from "./verified-session-auth";
+import { createHash, timingSafeEqual } from "node:crypto";
+import {
+  parseAuthMode,
+  type RequestPrincipal,
+  type VerifiedPrincipal,
+} from "./verified-session-auth";
+import { configuredAuthRepository } from "../repository/configured-auth-repository";
+import { databasePersistenceIdentity } from "../repository/sqlite-store";
 import { createId } from "../utils/id";
 import { getStoredInvoiceFile } from "./storage-service";
 import {
@@ -51,8 +57,23 @@ type ExactStatePayload = {
   userId: string;
   nonce: string;
   issuedAt: number;
-  principal: RequestPrincipal;
+  auth: ExactAuthReference;
 };
+
+type ExactAuthReference =
+  | {
+      kind: "verified";
+      userId: string;
+      sessionId: string;
+      sessionCorrelationId: string;
+      requestId: string;
+      repositoryIdentityHash: string;
+    }
+  | {
+      kind: "legacy";
+      sessionCorrelationId: string;
+      requestId: string;
+    };
 
 type ExactBookingResult = {
   exactBookingId: string;
@@ -170,11 +191,30 @@ function exactConfig() {
 }
 
 export async function createExactOAuthState(userId: string, principal: RequestPrincipal) {
+  const auth: ExactAuthReference = principal.verificationState === "verified"
+    ? (() => {
+        if (!principal.sessionId) throw new Error("Verified Exact OAuth requires a persisted session.");
+        return {
+          kind: "verified" as const,
+          userId: principal.actorId,
+          sessionId: principal.sessionId,
+          sessionCorrelationId: principal.sessionCorrelationId,
+          requestId: principal.requestId,
+          repositoryIdentityHash: createHash("sha256")
+            .update(databasePersistenceIdentity())
+            .digest("hex"),
+        };
+      })()
+    : {
+        kind: "legacy",
+        sessionCorrelationId: principal.sessionCorrelationId,
+        requestId: principal.requestId,
+      };
   const payload = encodeExactStatePayload({
     userId,
     nonce: createId("exact_state"),
     issuedAt: Date.now(),
-    principal,
+    auth,
   } satisfies ExactStatePayload);
   const signature = await signExactState(payload);
 
@@ -200,19 +240,60 @@ export async function verifyExactOAuthState(state: string) {
   if (!Number.isFinite(decoded.issuedAt) || age < -60_000 || age > 15 * 60 * 1000) {
     throw new Error("Exact OAuth state has expired. Start the connection again.");
   }
-  const principal = decoded.principal;
-  const validPrincipal = principal &&
-    typeof principal.actorId === "string" && principal.actorId.length > 0 &&
-    typeof principal.actorName === "string" && principal.actorName.length > 0 &&
-    typeof principal.requestId === "string" && principal.requestId.length > 0 &&
-    typeof principal.sessionCorrelationId === "string" && principal.sessionCorrelationId.length > 0 &&
-    ((principal.accessLevel === "verified_user" && principal.verificationState === "verified") ||
-      (principal.accessLevel === "legacy_shared" && principal.verificationState === "legacy"));
-  if (!decoded.userId || !decoded.nonce || !validPrincipal) {
+  const auth = decoded.auth;
+  const validAuth = auth && typeof auth.requestId === "string" && auth.requestId.length > 0 &&
+    typeof auth.sessionCorrelationId === "string" && auth.sessionCorrelationId.length > 0 &&
+    (auth.kind === "legacy" || (
+      auth.kind === "verified" &&
+      typeof auth.userId === "string" && auth.userId.length > 0 &&
+      typeof auth.sessionId === "string" && auth.sessionId.length > 0 &&
+      /^[a-f0-9]{64}$/.test(auth.repositoryIdentityHash)
+    ));
+  if (!decoded.userId || !decoded.nonce || !validAuth) {
     throw new Error("Exact OAuth state is missing or invalid.");
   }
 
   return decoded;
+}
+
+export async function reauthorizeExactOAuthState(state: string, now = Date.now()): Promise<RequestPrincipal> {
+  const decoded = await verifyExactOAuthState(state);
+  const mode = parseAuthMode();
+  if (decoded.auth.kind === "legacy") {
+    if (mode === "verified_user") throw new Error("Exact OAuth state is no longer authorized.");
+    return Object.freeze({
+      actorId: "shared_user",
+      actorName: "Shared access",
+      accessLevel: "legacy_shared",
+      verificationState: "legacy",
+      sessionCorrelationId: decoded.auth.sessionCorrelationId,
+      requestId: decoded.auth.requestId,
+    });
+  }
+  if (mode === "legacy_password") throw new Error("Exact OAuth state is no longer authorized.");
+  const identityHash = createHash("sha256").update(databasePersistenceIdentity()).digest("hex");
+  if (identityHash !== decoded.auth.repositoryIdentityHash) {
+    throw new Error("Exact OAuth state is no longer authorized.");
+  }
+  const session = await (await configuredAuthRepository()).findSessionById(decoded.auth.sessionId);
+  const correlationHash = createHash("sha256").update(decoded.auth.sessionCorrelationId).digest("base64url");
+  if (
+    !session || session.userId !== decoded.auth.userId || session.tokenVersion !== 1 ||
+    session.revokedAt || Date.parse(session.expiresAt) <= now ||
+    session.user.status !== "active" || !session.user.verifiedAt ||
+    session.correlationIdHash !== correlationHash
+  ) {
+    throw new Error("Exact OAuth state is no longer authorized.");
+  }
+  return Object.freeze({
+    actorId: session.user.id,
+    actorName: session.user.displayName,
+    accessLevel: "verified_user",
+    verificationState: "verified",
+    sessionCorrelationId: decoded.auth.sessionCorrelationId,
+    requestId: decoded.auth.requestId,
+    sessionId: session.id,
+  } satisfies VerifiedPrincipal);
 }
 
 export async function createRealExactAuthorizationUrl(userId: string, principal: RequestPrincipal) {

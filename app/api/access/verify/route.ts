@@ -12,27 +12,25 @@ import {
   VERIFIED_SESSION_SECONDS,
   verifyUserInvitation,
 } from "../../../../lib/services/verified-session-auth";
+import { createBoundedAuthLimiter } from "../../../../lib/services/bounded-auth-limiter";
 
 // ponytail: process-local limiter; replace with shared storage before multi-instance enforcement is required.
-const verificationAttempts = new Map<string, { count: number; windowStartedAt: number }>();
 const verificationWindowMs = 60_000;
 const verificationLimit = 10;
+const verificationLimiter = createBoundedAuthLimiter({
+  purpose: "verification",
+  windowMs: verificationWindowMs,
+  subjectLimit: verificationLimit,
+  aggregateLimit: 50,
+  maxSubjectScopes: 1024,
+  maxAggregateScopes: 256,
+});
 
 function verificationAllowed(request: Request, token: unknown, now = Date.now()) {
   const tokenFingerprint = createHash("sha256")
     .update(`INTO verification token:v1:${typeof token === "string" ? token : "malformed"}`)
     .digest("base64url");
-  const key = createHash("sha256")
-    .update(`INTO verification limit:v1:${tokenFingerprint}:${trustedRequestSourceHash(request) ?? "unattributed"}`)
-    .digest("base64url");
-  const current = verificationAttempts.get(key);
-  if (!current || now - current.windowStartedAt >= verificationWindowMs) {
-    verificationAttempts.set(key, { count: 1, windowStartedAt: now });
-    return true;
-  }
-  if (current.count >= verificationLimit) return false;
-  current.count += 1;
-  return true;
+  return verificationLimiter.allow(tokenFingerprint, trustedRequestSourceHash(request), now);
 }
 
 export async function POST(request: Request) {

@@ -279,7 +279,7 @@ test("verified-user auth service derives invitation tokens and enforces generic 
   }
 });
 
-test("known and unknown login failures do one password verification and share persisted throttle behavior", async () => {
+test("known and unknown login failures share bounded memory limits without durable unknown identity state", async () => {
   const path = resolve("data/tmp-tests", `verified-throttle-${crypto.randomUUID()}.sqlite`);
   const repository = new SqliteAuthRepository(path);
   const previousSecret = process.env.INTO_INVITATION_SECRET;
@@ -300,8 +300,12 @@ test("known and unknown login failures do one password verification and share pe
 
     let passwordVerifications = 0;
     service.setPasswordVerificationObserverForTests(() => { passwordVerifications += 1; });
-    for (const email of ["known@example.test", "missing@example.test"]) {
+    for (const [email, sourceHash] of [
+      ["known@example.test", "known-source"],
+      ["missing@example.test", "unknown-source"],
+    ] as const) {
       const statuses: number[] = [];
+      const workFactors: number[] = [];
       for (let attempt = 1; attempt <= 6; attempt += 1) {
         passwordVerifications = 0;
         await service.loginVerifiedUser(
@@ -309,21 +313,173 @@ test("known and unknown login failures do one password verification and share pe
           email,
           "wrong password",
           Date.UTC(2026, 7, 10, 1, attempt),
-          { requestId: `${email}:${attempt}`, sourceHash: null }
+          { requestId: `${email}:${attempt}`, sourceHash }
         ).catch((error: InstanceType<typeof service.LoginError>) => statuses.push(error.status));
-        assert.equal(passwordVerifications, 1);
+        workFactors.push(passwordVerifications);
       }
       assert.deepEqual(statuses, [401, 401, 401, 401, 429, 429]);
+      assert.deepEqual(workFactors, [1, 1, 1, 1, 0, 0]);
     }
 
+    const aggregateStatuses: number[] = [];
+    const aggregateWork: number[] = [];
+    for (let attempt = 1; attempt <= 13; attempt += 1) {
+      passwordVerifications = 0;
+      await service.loginVerifiedUser(
+        repository,
+        `unique-${attempt}@example.test`,
+        "wrong password",
+        Date.UTC(2026, 7, 10, 2, attempt),
+        { requestId: `aggregate:${attempt}`, sourceHash: "aggregate-source" }
+      ).catch((error: InstanceType<typeof service.LoginError>) => aggregateStatuses.push(error.status));
+      aggregateWork.push(passwordVerifications);
+    }
+    assert.deepEqual(aggregateStatuses, [...Array(12).fill(401), 429]);
+    assert.deepEqual(aggregateWork, [...Array(12).fill(1), 0]);
+
     const database = new DatabaseSync(path, { readOnly: true });
-    const throttles = JSON.stringify(database.prepare("SELECT * FROM into_auth_login_throttles").all());
+    const tables = database.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
+    ).all() as Array<{ name: string }>;
+    const unknownEvents = database.prepare(
+      "SELECT COUNT(*) AS count FROM into_auth_events WHERE type = 'login_failed' AND target_user_id IS NULL"
+    ).get() as { count: number };
+    const knownEvents = database.prepare(
+      "SELECT COUNT(*) AS count FROM into_auth_events WHERE type = 'login_failed' AND target_user_id IS NOT NULL"
+    ).get() as { count: number };
+    const knownCredential = database.prepare(
+      "SELECT failed_attempts FROM into_auth_credentials WHERE user_id = ?"
+    ).get((await repository.listUsers()).find((user) => user.email === "known@example.test")!.id) as {
+      failed_attempts: number;
+    };
     database.close();
-    assert.equal(throttles.includes("known@example.test"), false);
-    assert.equal(throttles.includes("missing@example.test"), false);
-    assert.equal(throttles.includes("https://into.example.test"), false);
+    assert.equal(tables.some((table) => table.name === "into_auth_login_throttles"), false);
+    assert.equal(unknownEvents.count, 0);
+    assert.equal(knownEvents.count, 1);
+    assert.equal(knownCredential.failed_attempts, 4);
   } finally {
     const service = await import("../lib/services/verified-session-auth");
+    service.setPasswordVerificationObserverForTests(undefined);
+    if (previousSecret === undefined) delete process.env.INTO_INVITATION_SECRET;
+    else process.env.INTO_INVITATION_SECRET = previousSecret;
+    repository.close();
+    await rm(path, { force: true });
+  }
+});
+
+test("malformed login identities never reach repository canonicalization and match unknown work and status", async () => {
+  const path = resolve("data/tmp-tests", `verified-malformed-${crypto.randomUUID()}.sqlite`);
+  const repository = new SqliteAuthRepository(path);
+  const service = await import("../lib/services/verified-session-auth");
+  let lookups = 0;
+  const trap = new Proxy(repository, {
+    get(target, property, receiver) {
+      if (property === "findUserCredentialByEmail") {
+        return async () => {
+          lookups += 1;
+          throw new Error("repository canonicalizer must not receive malformed input");
+        };
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  let work = 0;
+  service.setPasswordVerificationObserverForTests(() => { work += 1; });
+  try {
+    await repository.migrate();
+    service.resetLoginLimiterForTests();
+    const statuses: number[] = [];
+    const workFactors: number[] = [];
+    for (let attempt = 1; attempt <= 6; attempt += 1) {
+      work = 0;
+      await service.loginVerifiedUser(trap, "", "wrong password", Date.UTC(2026, 7, 10, 3, attempt), {
+        requestId: `malformed:${attempt}`,
+        sourceHash: "malformed-source",
+      }).catch((error: InstanceType<typeof service.LoginError>) => statuses.push(error.status));
+      workFactors.push(work);
+    }
+    assert.deepEqual(statuses, [401, 401, 401, 401, 429, 429]);
+    assert.deepEqual(workFactors, [1, 1, 1, 1, 0, 0]);
+    assert.equal(lookups, 0);
+
+    service.resetLoginLimiterForTests();
+    work = 0;
+    await assert.rejects(
+      service.loginVerifiedUser(trap, " X".repeat(100_000), "wrong password", Date.UTC(2026, 7, 10, 4), {
+        requestId: "oversized-malformed",
+        sourceHash: "oversized-source",
+      }),
+      (error: InstanceType<typeof service.LoginError>) => error.status === 401
+    );
+    assert.equal(work, 1);
+    assert.equal(lookups, 0);
+  } finally {
+    service.setPasswordVerificationObserverForTests(undefined);
+    repository.close();
+    await rm(path, { force: true });
+  }
+});
+
+test("persisted credential locks survive repository restart without enumerating wrong passwords", async () => {
+  const path = resolve("data/tmp-tests", `verified-lock-restart-${crypto.randomUUID()}.sqlite`);
+  let repository = new SqliteAuthRepository(path);
+  const previousSecret = process.env.INTO_INVITATION_SECRET;
+  process.env.INTO_INVITATION_SECRET = "test-only-invitation-secret-at-least-32-bytes";
+  const service = await import("../lib/services/verified-session-auth");
+  let work = 0;
+  service.setPasswordVerificationObserverForTests(() => { work += 1; });
+  try {
+    await repository.migrate();
+    const invitation = await service.createUserInvitation(repository, {
+      actorId: "inviter", actorName: "Inviter", accessLevel: "verified_user",
+      verificationState: "verified", sessionCorrelationId: "session", requestId: "invite-lock",
+    }, {
+      email: "locked@example.test", name: "Locked", requestKey: "locked-invite",
+    }, "https://into.example.test", Date.UTC(2026, 7, 10));
+    await service.verifyUserInvitation(repository, {
+      token: new URL(invitation.verificationUrl).searchParams.get("token")!,
+      displayName: "Locked", password: "correct horse battery staple", requestId: "verify-lock",
+    }, Date.UTC(2026, 7, 10, 0, 1));
+    service.resetLoginLimiterForTests();
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      await assert.rejects(service.loginVerifiedUser(
+        repository, "locked@example.test", "wrong password", Date.UTC(2026, 7, 10, 1, attempt),
+        { requestId: `lock:${attempt}`, sourceHash: "lock-source" }
+      ), (error: InstanceType<typeof service.LoginError>) => error.status === 401);
+    }
+
+    repository.close();
+    repository = new SqliteAuthRepository(path);
+    service.resetLoginLimiterForTests();
+    work = 0;
+    await assert.rejects(service.loginVerifiedUser(
+      repository, "locked@example.test", "correct horse battery staple", Date.UTC(2026, 7, 10, 1, 10),
+      { requestId: "locked-correct", sourceHash: "restart-source" }
+    ), (error: InstanceType<typeof service.LoginError>) => error.status === 429);
+    assert.equal(work, 1);
+
+    service.resetLoginLimiterForTests();
+    work = 0;
+    await assert.rejects(service.loginVerifiedUser(
+      repository, "locked@example.test", "wrong password", Date.UTC(2026, 7, 10, 1, 11),
+      { requestId: "locked-wrong", sourceHash: "restart-source" }
+    ), (error: InstanceType<typeof service.LoginError>) => error.status === 401);
+    assert.equal(work, 1);
+
+    service.resetLoginLimiterForTests();
+    work = 0;
+    const login = await service.loginVerifiedUser(
+      repository, "locked@example.test", "correct horse battery staple", Date.UTC(2026, 7, 10, 1, 27),
+      { requestId: "expired-correct", sourceHash: "restart-source" }
+    );
+    assert.equal(login.user.email, "locked@example.test");
+    assert.equal(work, 1);
+    const credential = await repository.findUserCredentialByEmail("locked@example.test");
+    assert.deepEqual({ failedAttempts: credential?.failedAttempts, lockedAt: credential?.lockedAt }, {
+      failedAttempts: 0,
+      lockedAt: null,
+    });
+  } finally {
     service.setPasswordVerificationObserverForTests(undefined);
     if (previousSecret === undefined) delete process.env.INTO_INVITATION_SECRET;
     else process.env.INTO_INVITATION_SECRET = previousSecret;

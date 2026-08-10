@@ -64,5 +64,5 @@ export async function POST(request: Request, context: RouteContext) {
         { status: message.includes("not allowed") ? 403 : 500 }
       );
     }
-  });
+  }, request);
 }

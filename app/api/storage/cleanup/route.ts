@@ -5,7 +5,7 @@ import {
 } from "../../../../lib/repository/invoice-store";
 import { withPersistentStore } from "../../../../lib/repository/persistent-request";
 
-export async function POST() {
+export async function POST(request: Request) {
   return withPersistentStore(async () => {
     try {
       requireSystemOwner();
@@ -16,5 +16,5 @@ export async function POST() {
 
     const cleanup = await cleanupTemporaryInvoiceFiles();
     return Response.json({ cleanup, invoices: listInvoices() });
-  });
+  }, request);
 }

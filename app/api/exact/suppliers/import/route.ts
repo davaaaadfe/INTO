@@ -64,5 +64,5 @@ export async function POST(request: Request) {
         { status: message.includes("not allowed") ? 403 : 400 }
       );
     }
-  });
+  }, request);
 }

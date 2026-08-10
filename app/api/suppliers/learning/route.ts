@@ -5,7 +5,7 @@ import {
 import { withPersistentStore } from "../../../../lib/repository/persistent-request";
 import { learningFeatureFlags } from "../../../../lib/services/learning-feature-flags";
 
-export async function GET() {
+export async function GET(request?: Request) {
   return withPersistentStore(async () => {
     try {
       requirePermission("view");
@@ -21,5 +21,5 @@ export async function GET() {
       enabled,
       suppliers: enabled ? listSupplierLearningSummaries() : [],
     });
-  });
+  }, request);
 }

@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-export const AUTH_SCHEMA_VERSION = 3;
+export const AUTH_SCHEMA_VERSION = 4;
 
 export type AuthUserStatus = "invited" | "active" | "disabled";
 export type AuthUserRecord = {
@@ -26,6 +26,20 @@ export type LegacyUserInventory = {
 };
 
 export type AuthMigrationReport = LegacyUserInventory;
+
+export type AuthSessionRecord = {
+  id: string;
+  userId: string;
+  tokenDigest: string;
+  correlationIdHash: string;
+  tokenVersion: number;
+  issuedAt: string;
+  expiresAt: string;
+  revokedAt: string | null;
+  lastSeenAt: string | null;
+};
+
+export type AuthSessionWithUser = AuthSessionRecord & { user: AuthUserRecord };
 
 export class AuthSchemaVersionError extends Error {}
 export class AuthEmailNormalizationConflictError extends Error {}
@@ -154,6 +168,21 @@ const sqliteV3Schema = `
   ALTER TABLE into_auth_users_next RENAME TO into_auth_users;
 `;
 
+const sqliteV4Schema = `
+  CREATE TABLE IF NOT EXISTS into_auth_sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES into_auth_users(id),
+    token_digest TEXT NOT NULL UNIQUE,
+    correlation_id_hash TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    revoked_at TEXT,
+    last_seen_at TEXT
+  );
+  ALTER TABLE into_auth_sessions
+    ADD COLUMN token_version INTEGER NOT NULL DEFAULT 1 CHECK (token_version = 1);
+`;
+
 export const SQLITE_AUTH_V1_CHECKSUM = createHash("sha256")
   .update(sqliteV1Schema)
   .digest("hex");
@@ -162,6 +191,9 @@ export const SQLITE_AUTH_V2_CHECKSUM = createHash("sha256")
   .digest("hex");
 export const SQLITE_AUTH_V3_CHECKSUM = createHash("sha256")
   .update(`3\n${sqliteV3Schema}`)
+  .digest("hex");
+export const SQLITE_AUTH_V4_CHECKSUM = createHash("sha256")
+  .update(`4\n${sqliteV4Schema}`)
   .digest("hex");
 /** @deprecated Use the version-specific checksum. */
 export const AUTH_MIGRATION_CHECKSUM = SQLITE_AUTH_V2_CHECKSUM;
@@ -312,6 +344,10 @@ export interface AuthRepository {
     requestId: string,
     timestamp: string
   ): Promise<AuthMigrationReport>;
+  createSession(session: AuthSessionRecord): Promise<void>;
+  findSessionByDigest(tokenDigest: string): Promise<AuthSessionWithUser | null>;
+  touchSession(sessionId: string, timestamp: string, before: string): Promise<boolean>;
+  revokeSessionByDigest(tokenDigest: string, timestamp: string): Promise<boolean>;
 }
 
 export class SqliteAuthRepository implements AuthRepository {
@@ -338,6 +374,7 @@ export class SqliteAuthRepository implements AuthRepository {
       [1, SQLITE_AUTH_V1_CHECKSUM],
       [2, SQLITE_AUTH_V2_CHECKSUM],
       [3, SQLITE_AUTH_V3_CHECKSUM],
+      [4, SQLITE_AUTH_V4_CHECKSUM],
     ]);
     for (const row of rows) {
       if (checksums.get(Number(row.version)) !== row.checksum) {
@@ -362,6 +399,7 @@ export class SqliteAuthRepository implements AuthRepository {
       this.migrateCanonicalEmailV2();
     }
     if (current < 3) this.migrateStrictEmailV3();
+    if (current < 4) this.migrateSessionVersionV4();
   }
 
   private assertStrictEmailInputs(requireLowercase = true) {
@@ -428,6 +466,20 @@ export class SqliteAuthRepository implements AuthRepository {
       throw error;
     } finally {
       this.database.exec("PRAGMA foreign_keys = ON");
+    }
+  }
+
+  private migrateSessionVersionV4() {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.exec(sqliteV4Schema);
+      this.database.prepare(
+        "INSERT INTO into_auth_schema_migrations (version, checksum, applied_at) VALUES (?, ?, ?)"
+      ).run(4, SQLITE_AUTH_V4_CHECKSUM, new Date().toISOString());
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
     }
   }
 
@@ -532,6 +584,45 @@ export class SqliteAuthRepository implements AuthRepository {
     return this.migrateLegacyUsers(snapshot, requestId, timestamp);
   }
 
+  async createSession(session: AuthSessionRecord) {
+    this.database.prepare(`
+      INSERT INTO into_auth_sessions (
+        id, user_id, token_digest, correlation_id_hash, token_version,
+        issued_at, expires_at, revoked_at, last_seen_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      session.id, session.userId, session.tokenDigest, session.correlationIdHash,
+      session.tokenVersion, session.issuedAt, session.expiresAt, session.revokedAt, session.lastSeenAt
+    );
+  }
+
+  async findSessionByDigest(tokenDigest: string): Promise<AuthSessionWithUser | null> {
+    const row = this.database.prepare(`
+      SELECT s.*, u.email, u.display_name, u.status, u.access_level, u.verified_at,
+        u.version, u.created_at, u.updated_at
+      FROM into_auth_sessions s JOIN into_auth_users u ON u.id = s.user_id
+      WHERE s.token_digest = ? LIMIT 1
+    `).get(tokenDigest) as Record<string, unknown> | undefined;
+    return row ? sessionWithUserFromRow(row) : null;
+  }
+
+  async touchSession(sessionId: string, timestamp: string, before: string) {
+    const result = this.database.prepare(`
+      UPDATE into_auth_sessions SET last_seen_at = ?
+      WHERE id = ? AND revoked_at IS NULL
+        AND (last_seen_at IS NULL OR last_seen_at < ?)
+    `).run(timestamp, sessionId, before);
+    return result.changes === 1;
+  }
+
+  async revokeSessionByDigest(tokenDigest: string, timestamp: string) {
+    const result = this.database.prepare(`
+      UPDATE into_auth_sessions SET revoked_at = ?
+      WHERE token_digest = ? AND revoked_at IS NULL
+    `).run(timestamp, tokenDigest);
+    return result.changes === 1;
+  }
+
   async countRows(table: (typeof authTables)[number]) {
     if (!authTables.includes(table)) throw new Error("Unsupported auth table.");
     const row = this.database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number };
@@ -541,4 +632,24 @@ export class SqliteAuthRepository implements AuthRepository {
   close() {
     this.database.close();
   }
+}
+
+function sessionWithUserFromRow(row: Record<string, unknown>): AuthSessionWithUser {
+  return {
+    id: String(row.id),
+    userId: String(row.user_id),
+    tokenDigest: String(row.token_digest),
+    correlationIdHash: String(row.correlation_id_hash),
+    tokenVersion: Number(row.token_version),
+    issuedAt: String(row.issued_at),
+    expiresAt: String(row.expires_at),
+    revokedAt: row.revoked_at ? String(row.revoked_at) : null,
+    lastSeenAt: row.last_seen_at ? String(row.last_seen_at) : null,
+    user: {
+      id: String(row.user_id), email: String(row.email), displayName: String(row.display_name),
+      status: row.status as AuthUserStatus, accessLevel: "verified_user",
+      verifiedAt: row.verified_at ? String(row.verified_at) : null,
+      version: Number(row.version), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+    },
+  };
 }

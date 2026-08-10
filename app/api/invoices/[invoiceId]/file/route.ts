@@ -77,7 +77,7 @@ async function invoiceFileResponse(
     ) as ArrayBuffer;
 
     return new Response(body, { headers });
-  });
+  }, request);
 }
 
 export async function HEAD(request: Request, context: RouteContext) {

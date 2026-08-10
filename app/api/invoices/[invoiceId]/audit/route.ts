@@ -14,7 +14,7 @@ async function invoiceIdFromContext(context: RouteContext) {
   return params.invoiceId;
 }
 
-export async function GET(_request: Request, context: RouteContext) {
+export async function GET(request: Request, context: RouteContext) {
   return withPersistentStore(async () => {
     try {
       requirePermission("view");
@@ -35,5 +35,5 @@ export async function GET(_request: Request, context: RouteContext) {
         error instanceof Error ? error.message : "Audit trail failed.";
       return Response.json({ error: message }, { status: 403 });
     }
-  });
+  }, request);
 }

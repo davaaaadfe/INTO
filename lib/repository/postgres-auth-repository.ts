@@ -8,6 +8,8 @@ import {
   canonicalAuthEmail,
   inventoryLegacyUsers,
   SQLITE_AUTH_V1_CHECKSUM,
+  type AuthSessionRecord,
+  type AuthSessionWithUser,
   type AuthRepository,
   type AuthMigrationReport,
   type AuthUserRecord,
@@ -104,10 +106,26 @@ export const POSTGRES_AUTH_V3_MIGRATIONS = [
    )`,
 ] as const;
 
+export const POSTGRES_AUTH_V4_MIGRATIONS = [
+  `CREATE TABLE IF NOT EXISTS into_auth_sessions (
+    id text PRIMARY KEY,
+    user_id text NOT NULL REFERENCES into_auth_users(id),
+    token_digest text NOT NULL UNIQUE,
+    correlation_id_hash text NOT NULL,
+    issued_at timestamptz NOT NULL,
+    expires_at timestamptz NOT NULL,
+    revoked_at timestamptz,
+    last_seen_at timestamptz
+  )`,
+  `ALTER TABLE into_auth_sessions
+   ADD COLUMN token_version integer NOT NULL DEFAULT 1 CHECK (token_version = 1)`,
+] as const;
+
 export const POSTGRES_AUTH_MIGRATIONS = [
   ...POSTGRES_AUTH_V1_MIGRATIONS,
   ...POSTGRES_AUTH_V2_MIGRATIONS,
   ...POSTGRES_AUTH_V3_MIGRATIONS,
+  ...POSTGRES_AUTH_V4_MIGRATIONS,
 ] as const;
 
 export const POSTGRES_AUTH_V1_CHECKSUM = createHash("sha256")
@@ -118,6 +136,9 @@ export const POSTGRES_AUTH_V2_CHECKSUM = createHash("sha256")
   .digest("hex");
 export const POSTGRES_AUTH_V3_CHECKSUM = createHash("sha256")
   .update(`3\n${POSTGRES_AUTH_V3_MIGRATIONS.join("\n")}`)
+  .digest("hex");
+export const POSTGRES_AUTH_V4_CHECKSUM = createHash("sha256")
+  .update(`4\n${POSTGRES_AUTH_V4_MIGRATIONS.join("\n")}`)
   .digest("hex");
 /** @deprecated Use the version-specific checksum. */
 export const POSTGRES_AUTH_MIGRATION_CHECKSUM = POSTGRES_AUTH_V2_CHECKSUM;
@@ -172,7 +193,9 @@ export class PostgresAuthRepository implements AuthRepository {
         ? row.checksum === POSTGRES_AUTH_V1_CHECKSUM || row.checksum === SQLITE_AUTH_V1_CHECKSUM
         : version === 2
           ? row.checksum === POSTGRES_AUTH_V2_CHECKSUM
-          : version === 3 && row.checksum === POSTGRES_AUTH_V3_CHECKSUM;
+          : version === 3
+            ? row.checksum === POSTGRES_AUTH_V3_CHECKSUM
+            : version === 4 && row.checksum === POSTGRES_AUTH_V4_CHECKSUM;
       if (!valid) {
         throw new AuthSchemaVersionError("Auth database migration checksum does not match this release.");
       }
@@ -192,6 +215,7 @@ export class PostgresAuthRepository implements AuthRepository {
       await this.migrateCanonicalEmailV2();
     }
     if (current < 3) await this.migrateStrictEmailV3();
+    if (current < 4) await this.migrateSessionVersionV4();
   }
 
   private async assertStrictEmailInputs(requireLowercase = true) {
@@ -244,6 +268,17 @@ export class PostgresAuthRepository implements AuthRepository {
         query: `INSERT INTO into_auth_schema_migrations (version, checksum, applied_at)
                 VALUES ($1, $2, now()) ON CONFLICT(version) DO NOTHING`,
         parameters: [3, POSTGRES_AUTH_V3_CHECKSUM],
+      },
+    ]);
+  }
+
+  private async migrateSessionVersionV4() {
+    await this.transaction([
+      ...POSTGRES_AUTH_V4_MIGRATIONS.map((query) => ({ query })),
+      {
+        query: `INSERT INTO into_auth_schema_migrations (version, checksum, applied_at)
+                VALUES ($1, $2, now()) ON CONFLICT(version) DO NOTHING`,
+        parameters: [4, POSTGRES_AUTH_V4_CHECKSUM],
       },
     ]);
   }
@@ -326,4 +361,62 @@ export class PostgresAuthRepository implements AuthRepository {
     }
     return report;
   }
+
+  async createSession(session: AuthSessionRecord) {
+    await this.query(`
+      INSERT INTO into_auth_sessions (
+        id, user_id, token_digest, correlation_id_hash, token_version,
+        issued_at, expires_at, revoked_at, last_seen_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    `, [
+      session.id, session.userId, session.tokenDigest, session.correlationIdHash,
+      session.tokenVersion, session.issuedAt, session.expiresAt, session.revokedAt, session.lastSeenAt,
+    ]);
+  }
+
+  async findSessionByDigest(tokenDigest: string): Promise<AuthSessionWithUser | null> {
+    const rows = await this.query(`
+      SELECT s.*, u.email, u.display_name, u.status, u.access_level, u.verified_at,
+        u.version, u.created_at, u.updated_at
+      FROM into_auth_sessions s JOIN into_auth_users u ON u.id = s.user_id
+      WHERE s.token_digest = $1 LIMIT 1
+    `, [tokenDigest]);
+    const row = rows[0];
+    return row ? sessionWithUserFromRow(row) : null;
+  }
+
+  async touchSession(sessionId: string, timestamp: string, before: string) {
+    const rows = await this.query(`
+      UPDATE into_auth_sessions SET last_seen_at = $1
+      WHERE id = $2 AND revoked_at IS NULL
+        AND (last_seen_at IS NULL OR last_seen_at < $3)
+      RETURNING id
+    `, [timestamp, sessionId, before]);
+    return rows.length === 1;
+  }
+
+  async revokeSessionByDigest(tokenDigest: string, timestamp: string) {
+    const rows = await this.query(`
+      UPDATE into_auth_sessions SET revoked_at = $1
+      WHERE token_digest = $2 AND revoked_at IS NULL
+      RETURNING id
+    `, [timestamp, tokenDigest]);
+    return rows.length === 1;
+  }
+}
+
+function sessionWithUserFromRow(row: Record<string, unknown>): AuthSessionWithUser {
+  return {
+    id: String(row.id), userId: String(row.user_id), tokenDigest: String(row.token_digest),
+    correlationIdHash: String(row.correlation_id_hash), tokenVersion: Number(row.token_version),
+    issuedAt: iso(row.issued_at), expiresAt: iso(row.expires_at),
+    revokedAt: row.revoked_at ? iso(row.revoked_at) : null,
+    lastSeenAt: row.last_seen_at ? iso(row.last_seen_at) : null,
+    user: {
+      id: String(row.user_id), email: String(row.email), displayName: String(row.display_name),
+      status: row.status as AuthUserStatus, accessLevel: "verified_user",
+      verifiedAt: row.verified_at ? iso(row.verified_at) : null,
+      version: Number(row.version), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at),
+    },
+  };
 }

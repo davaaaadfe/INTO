@@ -25,7 +25,7 @@ async function invoiceIdFromContext(context: RouteContext) {
   return params.invoiceId;
 }
 
-export async function POST(_request: Request, context: RouteContext) {
+export async function POST(request: Request, context: RouteContext) {
   return withPersistentStore(async () => {
     const invoiceId = await invoiceIdFromContext(context);
     const invoice = getInvoice(invoiceId);
@@ -94,5 +94,5 @@ export async function POST(_request: Request, context: RouteContext) {
         { status: 409 }
       );
     }
-  });
+  }, request);
 }

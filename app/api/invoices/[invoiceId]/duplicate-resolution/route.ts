@@ -124,5 +124,5 @@ export async function POST(request: Request, context: RouteContext) {
       logger.error("invoice.duplicate_decision_failed", { invoiceId, message });
       return Response.json({ error: message }, { status: 500 });
     }
-  });
+  }, request);
 }

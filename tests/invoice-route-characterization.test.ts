@@ -43,7 +43,7 @@ test("undesirable: a stale ordinary invoice PATCH is accepted without an expecte
   assert.equal(payload.invoice?.extractedData.expenseDescription, "Stale route edit");
 });
 
-test("undesirable: direct invoice handler invocation bypasses proxy session authorization", async () => {
+test("direct invoice handler invocation requires a valid server-side session", async () => {
   const previousPassword = process.env.INTO_ACCESS_PASSWORD;
   process.env.INTO_ACCESS_PASSWORD = "direct-route-characterization-password";
   const invoice = createRouteInvoice("direct-route-auth-bypass.pdf");
@@ -59,11 +59,8 @@ test("undesirable: direct invoice handler invocation bypasses proxy session auth
       { params: { invoiceId: invoice.id } }
     );
 
-    assert.equal(direct.status, 200);
-    assert.equal(
-      getInvoice(invoice.id)?.extractedData.expenseDescription,
-      "Direct route edit"
-    );
+    assert.equal(direct.status, 401);
+    assert.equal(getInvoice(invoice.id)?.extractedData.expenseDescription, "");
   } finally {
     if (previousPassword === undefined) delete process.env.INTO_ACCESS_PASSWORD;
     else process.env.INTO_ACCESS_PASSWORD = previousPassword;

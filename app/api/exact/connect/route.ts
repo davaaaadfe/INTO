@@ -19,7 +19,7 @@ import {
 import { createId } from "../../../../lib/utils/id";
 import { logger } from "../../../../lib/utils/logger";
 
-export async function GET() {
+export async function GET(request?: Request) {
   return withPersistentStore(async () => {
     try {
       requireSystemOwner();
@@ -52,10 +52,10 @@ export async function GET() {
         { status: message.includes("not allowed") ? 403 : 409 }
       );
     }
-  });
+  }, request);
 }
 
-export async function POST() {
+export async function POST(request?: Request) {
   return withPersistentStore(async () => {
     try {
       requireSystemOwner();
@@ -100,5 +100,5 @@ export async function POST() {
         { status: message.includes("not allowed") ? 403 : 409 }
       );
     }
-  });
+  }, request);
 }

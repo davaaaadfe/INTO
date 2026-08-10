@@ -62,5 +62,5 @@ export async function GET(request: Request) {
         error instanceof Error ? error.message : "Archive search failed.";
       return Response.json({ error: message }, { status: 403 });
     }
-  });
+  }, request);
 }

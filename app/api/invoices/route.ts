@@ -21,8 +21,8 @@ import type {
 } from "../../../lib/domain/invoice";
 import { withPersistentStore } from "../../../lib/repository/persistent-request";
 
-export async function GET() {
-  return withPersistentStore(() => Response.json({ invoices: listInvoices() }));
+export async function GET(request?: Request) {
+  return withPersistentStore(() => Response.json({ invoices: listInvoices() }), request);
 }
 
 export async function POST(request: Request) {
@@ -153,5 +153,5 @@ export async function POST(request: Request) {
         { status: message.includes("not allowed") ? 403 : 500 }
       );
     }
-  });
+  }, request);
 }

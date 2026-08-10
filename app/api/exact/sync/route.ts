@@ -7,7 +7,7 @@ import {
 import { withPersistentStore } from "../../../../lib/repository/persistent-request";
 import { logger } from "../../../../lib/utils/logger";
 
-export async function POST() {
+export async function POST(request: Request) {
   return withPersistentStore(async () => {
     try {
       requireSystemOwner();
@@ -41,5 +41,5 @@ export async function POST() {
         { status: message.includes("not allowed") ? 403 : 409 }
       );
     }
-  });
+  }, request);
 }

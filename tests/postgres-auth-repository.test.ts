@@ -5,6 +5,7 @@ import {
   POSTGRES_AUTH_V1_CHECKSUM,
   POSTGRES_AUTH_V2_CHECKSUM,
   POSTGRES_AUTH_V3_CHECKSUM,
+  POSTGRES_AUTH_V4_CHECKSUM,
   PostgresAuthRepository,
 } from "../lib/repository/postgres-auth-repository";
 import {
@@ -70,11 +71,13 @@ test("PostgreSQL upgrades compatible v1 ledger entries through a collision check
     async (statements) => { transactions.push(statements); }
   );
   await repository.migrate();
-  assert.equal(transactions.length, 2);
+  assert.equal(transactions.length, 3);
   assert.match(transactions[0]?.[0]?.query ?? "", /UPDATE into_auth_users SET email = lower\(btrim\(email\)\)/i);
   assert.match(transactions[0]?.[1]?.query ?? "", /ADD CONSTRAINT into_auth_users_email_canonical_check/i);
   assert.deepEqual(transactions[0]?.[2]?.parameters, [2, POSTGRES_AUTH_V2_CHECKSUM]);
   assert.deepEqual(transactions[1]?.[1]?.parameters, [3, POSTGRES_AUTH_V3_CHECKSUM]);
+  assert.match(transactions[2]?.[1]?.query ?? "", /ADD COLUMN token_version/i);
+  assert.deepEqual(transactions[2]?.[2]?.parameters, [4, POSTGRES_AUTH_V4_CHECKSUM]);
 });
 
 test("PostgreSQL v1 unsupported email input fails before v2 or v3 changes", async () => {

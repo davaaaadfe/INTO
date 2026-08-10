@@ -20,7 +20,7 @@ async function invoiceIdFromContext(context: RouteContext) {
   return params.invoiceId;
 }
 
-export async function GET(_request: Request, context: RouteContext) {
+export async function GET(request: Request, context: RouteContext) {
   return withPersistentStore(async () => {
     try {
       requirePermission("view");
@@ -36,7 +36,7 @@ export async function GET(_request: Request, context: RouteContext) {
     }
 
     return Response.json({ invoice });
-  });
+  }, request);
 }
 
 export async function PATCH(request: Request, context: RouteContext) {
@@ -97,5 +97,5 @@ export async function PATCH(request: Request, context: RouteContext) {
         { status: message.includes("not allowed") ? 403 : 500 }
       );
     }
-  });
+  }, request);
 }

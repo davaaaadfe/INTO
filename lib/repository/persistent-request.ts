@@ -5,6 +5,7 @@ import {
 } from "./invoice-store";
 import { randomUUID } from "node:crypto";
 import { sessionCorrelationIdFromRequest } from "../services/into-access-auth";
+import { withVerifiedPersistentRequest } from "../services/verified-session-auth";
 import { logger } from "../utils/logger";
 
 const runtime = globalThis as typeof globalThis & {
@@ -15,19 +16,21 @@ export async function withPersistentStore<T>(
   handler: () => Promise<T> | T,
   request?: Request
 ): Promise<T | Response> {
+  const context = {
+    requestId: request?.headers.get("idempotency-key")?.trim() || randomUUID(),
+    sessionCorrelationId: request
+      ? sessionCorrelationIdFromRequest(request) || "session_unavailable"
+      : "session_unavailable",
+  };
+  if (request) {
+    return withVerifiedPersistentRequest(request, () => withPersistentStore(handler));
+  }
   const previous = runtime.__INTO_PERSISTENT_REQUEST_TAIL ?? Promise.resolve();
   let release!: () => void;
   runtime.__INTO_PERSISTENT_REQUEST_TAIL = new Promise<void>((resolve) => {
     release = resolve;
   });
   await previous;
-  const context = {
-    requestId:
-      request?.headers.get("idempotency-key")?.trim() || randomUUID(),
-    sessionCorrelationId: request
-      ? sessionCorrelationIdFromRequest(request) || "session_unavailable"
-      : "session_unavailable",
-  };
   setLearningPersistenceContext(context);
   try {
     await hydrateStoreForPersistentRequest();

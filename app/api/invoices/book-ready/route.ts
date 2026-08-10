@@ -15,7 +15,7 @@ import { bookInvoiceInExact } from "../../../../lib/services/exact-online-servic
 import { assertInvoiceBookingAllowed } from "../../../../lib/domain/invoice";
 import { logger } from "../../../../lib/utils/logger";
 
-export async function POST() {
+export async function POST(request?: Request) {
   return withPersistentStore(async () => {
     const results: unknown[] = [];
     let connection;
@@ -89,5 +89,5 @@ export async function POST() {
     }
 
     return Response.json({ invoices: listInvoices(), results });
-  });
+  }, request);
 }

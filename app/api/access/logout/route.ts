@@ -2,12 +2,22 @@ import { NextResponse } from "next/server";
 import { INTO_ACCESS_COOKIE_NAME } from "../../../../lib/services/into-access-auth";
 import { configuredAuthRepository } from "../../../../lib/repository/configured-auth-repository";
 import {
+  RequestAuthenticationError,
+  requireSameOrigin,
   revokeVerifiedSession,
   VERIFIED_SESSION_COOKIE_NAME,
   verifiedSessionTokenFromRequest,
 } from "../../../../lib/services/verified-session-auth";
 
 export async function POST(request: Request) {
+  try {
+    requireSameOrigin(request);
+  } catch (error) {
+    if (error instanceof RequestAuthenticationError) {
+      return NextResponse.json({ error: "Access denied." }, { status: 403 });
+    }
+    throw error;
+  }
   try {
     await revokeVerifiedSession(
       await configuredAuthRepository(),

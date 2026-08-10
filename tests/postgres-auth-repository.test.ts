@@ -7,6 +7,7 @@ import {
   POSTGRES_AUTH_V3_CHECKSUM,
   POSTGRES_AUTH_V4_CHECKSUM,
   POSTGRES_AUTH_V5_CHECKSUM,
+  POSTGRES_AUTH_V6_CHECKSUM,
   PostgresAuthRepository,
 } from "../lib/repository/postgres-auth-repository";
 import {
@@ -20,6 +21,7 @@ test("PostgreSQL auth migrations define secret-safe normalized auth tables", () 
     "into_auth_users",
     "into_auth_credentials",
     "into_auth_invitations",
+    "into_auth_login_throttles",
     "into_auth_sessions",
     "into_auth_events",
   ]) {
@@ -78,9 +80,12 @@ test("PostgreSQL auth commands use atomic CTE chains for invitations, verificati
   });
   const sql = calls.map((call) => call.query).join("\n");
   assert.match(sql, /WITH existing_invitation AS/i);
+  assert.match(sql, /ON CONFLICT \(idempotency_key\) DO (?:NOTHING|UPDATE)/i);
+  assert.match(sql, /invitation_result AS[\s\S]*request_fingerprint/i);
   assert.match(sql, /candidate_invitation AS[\s\S]*FOR UPDATE/i);
   assert.match(sql, /credential_insert AS[\s\S]*session_insert AS[\s\S]*event_insert AS/i);
-  assert.match(sql, /target_user AS[\s\S]*active_others AS[\s\S]*user_update AS/i);
+  assert.match(sql, /locked_active_users AS MATERIALIZED[\s\S]*status = 'active'[\s\S]*ORDER BY u\.id[\s\S]*FOR UPDATE OF u/i);
+  assert.match(sql, /target_user AS[\s\S]*active_others AS[\s\S]*FROM locked_active_users[\s\S]*user_update AS/i);
   assert.equal(sql.includes("raw_token"), false);
 });
 
@@ -124,7 +129,7 @@ test("PostgreSQL upgrades compatible v1 ledger entries through a collision check
     async (statements) => { transactions.push(statements); }
   );
   await repository.migrate();
-  assert.equal(transactions.length, 4);
+  assert.equal(transactions.length, 5);
   assert.match(transactions[0]?.[0]?.query ?? "", /UPDATE into_auth_users SET email = lower\(btrim\(email\)\)/i);
   assert.match(transactions[0]?.[1]?.query ?? "", /ADD CONSTRAINT into_auth_users_email_canonical_check/i);
   assert.deepEqual(transactions[0]?.[2]?.parameters, [2, POSTGRES_AUTH_V2_CHECKSUM]);
@@ -133,6 +138,8 @@ test("PostgreSQL upgrades compatible v1 ledger entries through a collision check
   assert.deepEqual(transactions[2]?.[2]?.parameters, [4, POSTGRES_AUTH_V4_CHECKSUM]);
   assert.match(transactions[3]?.[0]?.query ?? "", /request_fingerprint/i);
   assert.deepEqual(transactions[3]?.[1]?.parameters, [5, POSTGRES_AUTH_V5_CHECKSUM]);
+  assert.match(transactions[4]?.[0]?.query ?? "", /into_auth_login_throttles/i);
+  assert.deepEqual(transactions[4]?.[1]?.parameters, [6, POSTGRES_AUTH_V6_CHECKSUM]);
 });
 
 test("PostgreSQL v1 unsupported email input fails before v2 or v3 changes", async () => {

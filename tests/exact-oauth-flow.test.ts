@@ -8,12 +8,14 @@ import {
   getCompanyConnectionUserId,
   getExactConnection,
   getExactMasterData,
+  listAuditEvents,
   refreshExactConnectionForUser,
   setExactConnection,
 } from "../lib/repository/invoice-store";
 import {
   createRealExactAuthorizationUrl,
   exactIntegrationMode,
+  verifyExactOAuthState,
 } from "../lib/services/exact-api-client";
 import { decryptExactSecret } from "../lib/services/exact-token-crypto";
 
@@ -199,10 +201,31 @@ test("uses Vercel Exact credentials for OAuth, encrypted tokens, refresh, and ma
         );
         assert.doesNotMatch(authorization.authorizationUrl, /exact-client-secret/);
 
+        const initiatingPrincipal = {
+          actorId: "verified-exact-actor",
+          actorName: "Verified Exact Actor",
+          accessLevel: "verified_user",
+          verificationState: "verified",
+          sessionCorrelationId: "verified-exact-session",
+          requestId: "verified-exact-request",
+        } as const;
+        const callbackAuthorization = await createRealExactAuthorizationUrl(
+          getCompanyConnectionUserId(),
+          initiatingPrincipal
+        );
+        assert.deepEqual(
+          (await verifyExactOAuthState(callbackAuthorization.state)).principal,
+          initiatingPrincipal
+        );
+        await assert.rejects(
+          verifyExactOAuthState(`${callbackAuthorization.state.slice(0, -1)}x`),
+          /signature is invalid/
+        );
+
         const callbackResponse = await exactCallback(
           new Request(
             `https://into.example.com/api/exact/callback?code=authorization-code&state=${encodeURIComponent(
-              authorization.state
+              callbackAuthorization.state
             )}`
           )
         );
@@ -236,6 +259,16 @@ test("uses Vercel Exact credentials for OAuth, encrypted tokens, refresh, and ma
         assert.equal(masterData.costCenters.length, 1);
         assert.equal(masterData.costUnits.length, 1);
         assert.equal(masterData.historicalPurchaseBookings.length, 1);
+        const callbackEvents = listAuditEvents().filter((event) =>
+          event.type === "connection_connected" || event.type === "sync_operation"
+        );
+        assert.equal(callbackEvents.length >= 2, true);
+        assert.equal(callbackEvents.every((event) => event.userId === initiatingPrincipal.actorId), true);
+        assert.equal(callbackEvents.every((event) => event.userName === initiatingPrincipal.actorName), true);
+        assert.equal(callbackEvents.every((event) => event.metadata?.requestId === initiatingPrincipal.requestId), true);
+        assert.equal(callbackEvents.every((event) =>
+          event.metadata?.sessionCorrelationId === initiatingPrincipal.sessionCorrelationId
+        ), true);
         assert.deepEqual(masterData.historicalPurchaseBookings[0], {
           id: "history-line-id",
           entryId: "history-entry-id",
@@ -310,7 +343,14 @@ test("rejects an email address used as the Exact OAuth Client ID", async () => {
     },
     async () => {
       await assert.rejects(
-        createRealExactAuthorizationUrl(getCompanyConnectionUserId()),
+        createRealExactAuthorizationUrl(getCompanyConnectionUserId(), {
+          actorId: "shared_user",
+          actorName: "Shared access",
+          accessLevel: "legacy_shared",
+          verificationState: "legacy",
+          sessionCorrelationId: "legacy-test-session",
+          requestId: "legacy-test-request",
+        } as const),
         /OAuth app Client ID, not an email address/
       );
     }

@@ -260,7 +260,7 @@ test("verified-user auth service derives invitation tokens and enforces generic 
       "person@example.test",
       "wrong password",
       Date.UTC(2026, 7, 10, 1, 31),
-      { requestId: "login-failure-request", requestSource: "https://into.example.test" }
+      { requestId: "login-failure-request", sourceHash: "trusted-source-hash" }
     ).catch(() => undefined);
     const database = new DatabaseSync(path, { readOnly: true });
     const failureEvent = database.prepare(
@@ -269,12 +269,86 @@ test("verified-user auth service derives invitation tokens and enforces generic 
     database.close();
     assert.equal(failureEvent?.request_id, "login-failure-request");
     assert.match(failureEvent?.metadata_json ?? "", /sourceHash/);
+    assert.match(failureEvent?.metadata_json ?? "", /trusted-source-hash/);
     assert.equal(failureEvent?.metadata_json.includes("https://into.example.test"), false);
   } finally {
     if (previousSecret === undefined) delete process.env.INTO_INVITATION_SECRET;
     else process.env.INTO_INVITATION_SECRET = previousSecret;
     repository.close();
     await rm(path, { force: true });
+  }
+});
+
+test("known and unknown login failures do one password verification and share persisted throttle behavior", async () => {
+  const path = resolve("data/tmp-tests", `verified-throttle-${crypto.randomUUID()}.sqlite`);
+  const repository = new SqliteAuthRepository(path);
+  const previousSecret = process.env.INTO_INVITATION_SECRET;
+  process.env.INTO_INVITATION_SECRET = "test-only-invitation-secret-at-least-32-bytes";
+  try {
+    await repository.migrate();
+    const service = await import("../lib/services/verified-session-auth");
+    const invitation = await service.createUserInvitation(repository, {
+      actorId: "inviter", actorName: "Inviter", accessLevel: "verified_user",
+      verificationState: "verified", sessionCorrelationId: "session", requestId: "invite",
+    }, {
+      email: "known@example.test", name: "Known", requestKey: "known-invite",
+    }, "https://into.example.test", Date.UTC(2026, 7, 10));
+    await service.verifyUserInvitation(repository, {
+      token: new URL(invitation.verificationUrl).searchParams.get("token")!,
+      displayName: "Known", password: "correct horse battery staple", requestId: "verify",
+    }, Date.UTC(2026, 7, 10, 0, 1));
+
+    let passwordVerifications = 0;
+    service.setPasswordVerificationObserverForTests(() => { passwordVerifications += 1; });
+    for (const email of ["known@example.test", "missing@example.test"]) {
+      const statuses: number[] = [];
+      for (let attempt = 1; attempt <= 6; attempt += 1) {
+        passwordVerifications = 0;
+        await service.loginVerifiedUser(
+          repository,
+          email,
+          "wrong password",
+          Date.UTC(2026, 7, 10, 1, attempt),
+          { requestId: `${email}:${attempt}`, sourceHash: null }
+        ).catch((error: InstanceType<typeof service.LoginError>) => statuses.push(error.status));
+        assert.equal(passwordVerifications, 1);
+      }
+      assert.deepEqual(statuses, [401, 401, 401, 401, 429, 429]);
+    }
+
+    const database = new DatabaseSync(path, { readOnly: true });
+    const throttles = JSON.stringify(database.prepare("SELECT * FROM into_auth_login_throttles").all());
+    database.close();
+    assert.equal(throttles.includes("known@example.test"), false);
+    assert.equal(throttles.includes("missing@example.test"), false);
+    assert.equal(throttles.includes("https://into.example.test"), false);
+  } finally {
+    const service = await import("../lib/services/verified-session-auth");
+    service.setPasswordVerificationObserverForTests(undefined);
+    if (previousSecret === undefined) delete process.env.INTO_INVITATION_SECRET;
+    else process.env.INTO_INVITATION_SECRET = previousSecret;
+    repository.close();
+    await rm(path, { force: true });
+  }
+});
+
+test("login source hashing ignores forwarded headers unless the exact header is configured", async () => {
+  const service = await import("../lib/services/verified-session-auth");
+  const environment = process.env as Record<string, string | undefined>;
+  const previous = environment.INTO_TRUSTED_SOURCE_HEADER;
+  try {
+    delete environment.INTO_TRUSTED_SOURCE_HEADER;
+    const request = new Request("https://into.example.test/api/access/login", {
+      headers: { "x-forwarded-for": "203.0.113.7", "x-real-ip": "203.0.113.8" },
+    });
+    assert.equal(service.trustedRequestSourceHash(request), null);
+    environment.INTO_TRUSTED_SOURCE_HEADER = "x-real-ip";
+    const hash = service.trustedRequestSourceHash(request);
+    assert.match(hash ?? "", /^[A-Za-z0-9_-]{40,}$/);
+    assert.notEqual(hash, "203.0.113.8");
+  } finally {
+    if (previous === undefined) delete environment.INTO_TRUSTED_SOURCE_HEADER;
+    else environment.INTO_TRUSTED_SOURCE_HEADER = previous;
   }
 });
 
@@ -312,6 +386,33 @@ test("verified request context attributes uploads and audit events without mutat
     assert.equal(store.auditEvents.every((event) => event.metadata?.sessionCorrelationId === "verified-session-correlation"), true);
   } finally {
     store.invoices = previousInvoices;
+    store.auditEvents = previousEvents;
+  }
+});
+
+test("general audit records field classification without raw correction or evidence values", () => {
+  const store = getStore();
+  const previousEvents = store.auditEvents;
+  store.auditEvents = [];
+  try {
+    const event = addAuditEvent({
+      type: "invoice_field_edited",
+      message: "Changed new-sensitive-line-description from old-sensitive-document-text.",
+      field: "bookingLines",
+      oldValue: { rawText: "old-sensitive-document-text" },
+      newValue: [{ description: "new-sensitive-line-description", amount: 42 }],
+      metadata: {
+        decision: "review",
+        documentAnalysis: { content: "sensitive-document-content" },
+        extractionEvidence: [{ value: "sensitive-evidence-value" }],
+      },
+    });
+    assert.equal(event.oldValue, undefined);
+    assert.equal(event.newValue, undefined);
+    assert.equal(event.metadata?.decision, "review");
+    assert.equal(event.metadata?.changeClassification, "field_changed");
+    assert.doesNotMatch(JSON.stringify(event), /old-sensitive|new-sensitive|sensitive-document|sensitive-evidence/);
+  } finally {
     store.auditEvents = previousEvents;
   }
 });

@@ -86,5 +86,6 @@ test("invoice creation records uploader metadata and audit event", () => {
 
   assert.equal(invoice.uploadedByUserId, "shared_user");
   assert.equal(auditEvents[0]?.type, "invoice_uploaded");
-  assert.match(auditEvents[0]?.message ?? "", /uploaded audit-test.pdf/);
+  assert.equal(auditEvents[0]?.message, "Audit event: invoice uploaded.");
+  assert.doesNotMatch(JSON.stringify(auditEvents[0]), /audit-test\.pdf/);
 });

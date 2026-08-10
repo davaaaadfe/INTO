@@ -1100,11 +1100,37 @@ export function logDuplicateDecision(input: Omit<DuplicateDecisionLog, "id" | "c
   return log;
 }
 
+function sanitizedAuditMetadata(metadata: Record<string, unknown> | undefined) {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(metadata ?? {})) {
+    if (/raw|document|evidence|line|text|payload|content|token|secret|password|file.?name|error.?message|reason/i.test(key)) {
+      continue;
+    }
+    if (value === null || typeof value === "boolean" || typeof value === "number") {
+      result[key] = value;
+    } else if (typeof value === "string") {
+      result[key] = value.slice(0, 256);
+    }
+  }
+  return result;
+}
+
 export function addAuditEvent(
   input: Omit<AuditEvent, "id" | "createdAt" | "userId" | "userName"> &
     Partial<Pick<AuditEvent, "userId" | "userName" | "createdAt">>
 ) {
   const principal = currentRequestPrincipal();
+  const field = input.field && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(input.field)
+    ? input.field
+    : undefined;
+  const metadata = sanitizedAuditMetadata(input.metadata);
+  if (input.oldValue !== undefined || input.newValue !== undefined) {
+    metadata.changeClassification = field ? "field_changed" : "record_changed";
+  }
+  if (principal) {
+    metadata.requestId = principal.requestId;
+    metadata.sessionCorrelationId = principal.sessionCorrelationId;
+  }
   const user = input.userId
     ? getStore().users.find((item) => item.id === input.userId) ?? mutationUser()
     : mutationUser();
@@ -1115,17 +1141,11 @@ export function addAuditEvent(
     createdAt: input.createdAt ?? now(),
     invoiceId: input.invoiceId,
     type: input.type,
-    message: input.message,
-    field: input.field,
-    oldValue: input.oldValue,
-    newValue: input.newValue,
-    metadata: principal
-      ? {
-          ...input.metadata,
-          requestId: principal.requestId,
-          sessionCorrelationId: principal.sessionCorrelationId,
-        }
-      : input.metadata,
+    message: field
+      ? `Field ${field} changed.`
+      : `Audit event: ${input.type.replace(/_/g, " ")}.`,
+    field,
+    metadata: Object.keys(metadata).length ? metadata : undefined,
   };
 
   getStore().auditEvents.unshift(event);

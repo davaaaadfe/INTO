@@ -16,6 +16,8 @@ import {
   isIntoPurchaseVatCode,
 } from "../domain/invoice";
 import { Buffer } from "node:buffer";
+import { timingSafeEqual } from "node:crypto";
+import type { RequestPrincipal } from "./verified-session-auth";
 import { createId } from "../utils/id";
 import { getStoredInvoiceFile } from "./storage-service";
 import {
@@ -49,6 +51,7 @@ type ExactStatePayload = {
   userId: string;
   nonce: string;
   issuedAt: number;
+  principal: RequestPrincipal;
 };
 
 type ExactBookingResult = {
@@ -166,11 +169,12 @@ function exactConfig() {
   return { baseUrl, clientId, clientSecret, redirectUri };
 }
 
-export async function createExactOAuthState(userId: string) {
+export async function createExactOAuthState(userId: string, principal: RequestPrincipal) {
   const payload = encodeExactStatePayload({
     userId,
     nonce: createId("exact_state"),
     issuedAt: Date.now(),
+    principal,
   } satisfies ExactStatePayload);
   const signature = await signExactState(payload);
 
@@ -178,27 +182,42 @@ export async function createExactOAuthState(userId: string) {
 }
 
 export async function verifyExactOAuthState(state: string) {
-  const [payload, signature] = state.split(".");
-  if (!payload || !signature) {
+  const parts = state.split(".");
+  const [payload, signature] = parts;
+  if (parts.length !== 2 || !payload || !signature) {
     throw new Error("Exact OAuth state is missing or invalid.");
   }
 
   const expected = await signExactState(payload);
-  if (signature !== expected) {
+  const actualBytes = Buffer.from(signature);
+  const expectedBytes = Buffer.from(expected);
+  if (actualBytes.length !== expectedBytes.length || !timingSafeEqual(actualBytes, expectedBytes)) {
     throw new Error("Exact OAuth state signature is invalid.");
   }
 
   const decoded = decodeExactStatePayload<ExactStatePayload>(payload);
-  if (Date.now() - decoded.issuedAt > 15 * 60 * 1000) {
+  const age = Date.now() - decoded.issuedAt;
+  if (!Number.isFinite(decoded.issuedAt) || age < -60_000 || age > 15 * 60 * 1000) {
     throw new Error("Exact OAuth state has expired. Start the connection again.");
+  }
+  const principal = decoded.principal;
+  const validPrincipal = principal &&
+    typeof principal.actorId === "string" && principal.actorId.length > 0 &&
+    typeof principal.actorName === "string" && principal.actorName.length > 0 &&
+    typeof principal.requestId === "string" && principal.requestId.length > 0 &&
+    typeof principal.sessionCorrelationId === "string" && principal.sessionCorrelationId.length > 0 &&
+    ((principal.accessLevel === "verified_user" && principal.verificationState === "verified") ||
+      (principal.accessLevel === "legacy_shared" && principal.verificationState === "legacy"));
+  if (!decoded.userId || !decoded.nonce || !validPrincipal) {
+    throw new Error("Exact OAuth state is missing or invalid.");
   }
 
   return decoded;
 }
 
-export async function createRealExactAuthorizationUrl(userId: string) {
+export async function createRealExactAuthorizationUrl(userId: string, principal: RequestPrincipal) {
   const { baseUrl, clientId, redirectUri } = exactConfig();
-  const state = await createExactOAuthState(userId);
+  const state = await createExactOAuthState(userId, principal);
   const params = new URLSearchParams({
     client_id: clientId,
     redirect_uri: redirectUri,

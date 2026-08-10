@@ -261,7 +261,7 @@ test("uploaded invoice files and audit state survive a local restart", async () 
       const uploadEvent = audit.events.find(
         (event) => event.type === "invoice_uploaded"
       );
-      assert.equal(uploadEvent?.metadata?.fileName, fixture.fileName);
+      assert.equal(uploadEvent?.metadata?.fileName, undefined);
       assert.equal(uploadEvent?.metadata?.checksum, sha256(fixture.bytes));
 
       const fileUrl = `http://localhost/api/invoices/${invoice.id}/file`;

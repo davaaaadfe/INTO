@@ -76,6 +76,13 @@ test("login mode matrix issues verified cookies and keeps credential failures ge
     }));
     assert.equal(legacy.status, 200);
     assert.match(legacy.headers.get("set-cookie") ?? "", /into_access_session=/);
+
+    const legacyEmailLogin = await login(new Request("https://into.example.test/api/access/login", {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://into.example.test" },
+      body: JSON.stringify({ email: "person@example.test", password: "correct horse battery staple" }),
+    }));
+    assert.equal(legacyEmailLogin.status, 403);
   } finally {
     closeConfiguredAuthRepository();
     setConfiguredAuthRepositoryFactoryForTest(undefined);
@@ -110,6 +117,17 @@ test("invitation, verification, session, users, status, and logout handlers are 
     const statusRoute = await import("../app/api/users/[id]/route");
     const logoutRoute = await import("../app/api/access/logout/route");
     const legacyCookie = createIntoAccessSession();
+
+    const bootstrapSession = await sessionRoute.GET(new Request("https://into.example.test/api/access/session", {
+      headers: { cookie: `into_access_session=${legacyCookie}` },
+    }));
+    assert.equal(bootstrapSession.status, 200);
+    assert.deepEqual(await bootstrapSession.json(), {
+      mode: "dual",
+      legacy: true,
+      user: null,
+      capabilities: { canInviteUsers: true },
+    });
 
     const crossOriginInvitation = await invitationRoute.POST(new Request("https://into.example.test/api/users/invitations", {
       method: "POST",
@@ -163,6 +181,12 @@ test("invitation, verification, session, users, status, and logout handlers are 
     assert.match(usersText, /person@example\.test/);
     assert.doesNotMatch(usersText, /permissions|scrypt|token_digest|locked_at/);
     const user = (JSON.parse(usersText) as { users: Array<{ id: string; version: number }> }).users[0]!;
+    const secondInvitation = await createUserInvitation(repository, {
+      actorId: user.id, actorName: "Person", accessLevel: "verified_user",
+      verificationState: "verified", sessionCorrelationId: "verified-session", requestId: "invite-2",
+    }, {
+      email: "second@example.test", name: "Second", requestKey: "invite-2",
+    }, "https://into.example.test");
 
     const crossOriginStatus = await statusRoute.PATCH(new Request(`https://into.example.test/api/users/${user.id}`, {
       method: "PATCH",
@@ -186,9 +210,26 @@ test("invitation, verification, session, users, status, and logout handlers are 
     }), { params: Promise.resolve({ id: user.id }) });
     assert.equal(finalActive.status, 422);
 
+    const invalidVersion = await statusRoute.PATCH(new Request(`https://into.example.test/api/users/${user.id}`, {
+      method: "PATCH",
+      headers: {
+        "content-type": "application/json",
+        origin: "https://into.example.test",
+        cookie: `into_verified_session=${verifiedCookie}`,
+      },
+      body: JSON.stringify({ expectedVersion: 0, status: "disabled" }),
+    }), { params: Promise.resolve({ id: user.id }) });
+    assert.equal(invalidVersion.status, 422);
+
+    const crossOriginLogout = await logoutRoute.POST(new Request("https://into.example.test/api/access/logout", {
+      method: "POST",
+      headers: { origin: "https://attacker.example.test", cookie: `into_verified_session=${verifiedCookie}` },
+    }));
+    assert.equal(crossOriginLogout.status, 403);
+
     const logout = await logoutRoute.POST(new Request("https://into.example.test/api/access/logout", {
       method: "POST",
-      headers: { cookie: `into_verified_session=${verifiedCookie}` },
+      headers: { origin: "https://into.example.test", cookie: `into_verified_session=${verifiedCookie}` },
     }));
     assert.equal(logout.status, 200);
     const cleared = logout.headers.get("set-cookie") ?? "";
@@ -200,14 +241,41 @@ test("invitation, verification, session, users, status, and logout handlers are 
     assert.equal(revoked.status, 401);
 
     let limited!: Response;
-    for (let attempt = 0; attempt < 10; attempt += 1) {
+    const abusedToken = `v1.${"A".repeat(43)}`;
+    for (let attempt = 0; attempt < 11; attempt += 1) {
       limited = await verifyRoute.POST(new Request("https://into.example.test/api/access/verify", {
         method: "POST",
         headers: { "content-type": "application/json", origin: "https://into.example.test" },
-        body: "{}",
+        body: JSON.stringify({ token: abusedToken, displayName: "Abuse", password: "short" }),
       }));
     }
     assert.equal(limited.status, 429);
+
+    const unrelatedVerification = await verifyRoute.POST(new Request("https://into.example.test/api/access/verify", {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://into.example.test" },
+      body: JSON.stringify({
+        token: new URL(secondInvitation.verificationUrl).searchParams.get("token"),
+        displayName: "Second",
+        password: "another correct password",
+      }),
+    }));
+    assert.equal(unrelatedVerification.status, 200);
+
+    const closedBootstrapSession = await sessionRoute.GET(new Request("https://into.example.test/api/access/session", {
+      headers: { cookie: `into_access_session=${legacyCookie}` },
+    }));
+    assert.deepEqual((await closedBootstrapSession.json() as { capabilities: unknown }).capabilities, {
+      canInviteUsers: false,
+    });
+
+    environment.AUTH_MODE = "legacy_password";
+    const legacyVerification = await verifyRoute.POST(new Request("https://into.example.test/api/access/verify", {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://into.example.test" },
+      body: JSON.stringify({ token: abusedToken, displayName: "Blocked", password: "correct password value" }),
+    }));
+    assert.equal(legacyVerification.status, 403);
   } finally {
     closeConfiguredAuthRepository();
     setConfiguredAuthRepositoryFactoryForTest(undefined);

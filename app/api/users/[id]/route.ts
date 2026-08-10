@@ -20,6 +20,7 @@ export async function PATCH(request: Request, context: RouteContext) {
       } | null;
       if (
         !Number.isInteger(payload?.expectedVersion) ||
+        (payload?.expectedVersion as number) <= 0 ||
         (payload?.status !== "active" && payload?.status !== "disabled")
       ) {
         return Response.json({ error: "expectedVersion and a valid status are required." }, { status: 422 });

@@ -14,6 +14,7 @@ import {
   parseAuthMode,
   RequestAuthenticationError,
   requireSameOrigin,
+  trustedRequestSourceHash,
   VERIFIED_SESSION_COOKIE_NAME,
   VERIFIED_SESSION_SECONDS,
 } from "../../../../lib/services/verified-session-auth";
@@ -29,6 +30,9 @@ export async function POST(request: Request) {
   const password = typeof payload?.password === "string" ? payload.password : "";
   const email = typeof payload?.email === "string" ? payload.email : "";
   const mode = parseAuthMode();
+  if (mode === "legacy_password" && email) {
+    return NextResponse.json({ error: "Access denied." }, { status: 403 });
+  }
   const legacyRequest = !email && mode !== "verified_user";
 
   if (!legacyRequest) {
@@ -37,7 +41,7 @@ export async function POST(request: Request) {
       const repository = await configuredAuthRepository();
       const result = await loginVerifiedUser(repository, email, password, Date.now(), {
         requestId: request.headers.get("idempotency-key")?.trim() || randomUUID(),
-        requestSource: new URL(request.url).origin,
+        sourceHash: trustedRequestSourceHash(request),
       });
       const response = NextResponse.json({
         ok: true,

@@ -4,6 +4,7 @@ import {
   syncExactDataNow,
 } from "../../../../lib/repository/invoice-store";
 import { withPublicPersistentStore } from "../../../../lib/repository/persistent-request";
+import { withPersistentStore } from "../../../../lib/repository/persistent-request";
 import { createMockExactConnection } from "../../../../lib/services/exact-online-service";
 import {
   exchangeExactAuthorizationCode,
@@ -13,27 +14,27 @@ import {
 import { logger } from "../../../../lib/utils/logger";
 
 export async function GET(request: Request) {
-  return withPublicPersistentStore(async () => {
-    const url = new URL(request.url);
-    const error = url.searchParams.get("error");
-    const code = url.searchParams.get("code");
-    const state = url.searchParams.get("state");
+  const url = new URL(request.url);
+  const error = url.searchParams.get("error");
+  const code = url.searchParams.get("code");
+  const state = url.searchParams.get("state");
 
-    if (error) {
-      logger.error("exact.oauth_callback_error", {
-        error,
-        description: url.searchParams.get("error_description"),
-      });
-      return Response.redirect(new URL("/?exact=error", request.url));
-    }
+  if (error) {
+    logger.error("exact.oauth_callback_error", {
+      error,
+      description: url.searchParams.get("error_description"),
+    });
+    return Response.redirect(new URL("/?exact=error", request.url));
+  }
 
-    if (isRealExactMode()) {
-      try {
-        if (!code || !state) {
-          throw new Error("Exact OAuth callback is missing code or state.");
-        }
+  if (isRealExactMode()) {
+    try {
+      if (!code || !state) {
+        throw new Error("Exact OAuth callback is missing code or state.");
+      }
 
-        const verifiedState = await verifyExactOAuthState(state);
+      const verifiedState = await verifyExactOAuthState(state);
+      return withPersistentStore(async () => {
         const connection = setExactConnection(
           await exchangeExactAuthorizationCode(verifiedState.userId, code)
         );
@@ -46,16 +47,18 @@ export async function GET(request: Request) {
         });
 
         return Response.redirect(new URL("/?exact=connected", request.url));
-      } catch (callbackError) {
-        const message =
-          callbackError instanceof Error
-            ? callbackError.message
-            : "Exact OAuth callback failed.";
-        logger.error("exact.oauth_callback_failed", { message });
-        return Response.redirect(new URL("/?exact=error", request.url));
-      }
+      }, request, verifiedState.principal);
+    } catch (callbackError) {
+      const message =
+        callbackError instanceof Error
+          ? callbackError.message
+          : "Exact OAuth callback failed.";
+      logger.error("exact.oauth_callback_failed", { message });
+      return Response.redirect(new URL("/?exact=error", request.url));
     }
+  }
 
+  return withPublicPersistentStore(async () => {
     const hasCode = Boolean(code);
     const connection = setExactConnection(
       createMockExactConnection(getCompanyConnectionUserId())

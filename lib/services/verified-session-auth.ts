@@ -26,6 +26,7 @@ const SCRYPT_R = 8;
 const SCRYPT_P = 1;
 const SCRYPT_MAX_MEMORY = 64 * 1024 * 1024;
 let testLegacyPrincipalEnabled = false;
+let testPasswordVerificationObserver: (() => void) | undefined;
 
 export type PasswordCredential = Readonly<{
   algorithm: "scrypt";
@@ -73,6 +74,7 @@ export async function verifyPasswordCredential(
   password: string,
   credential: PasswordCredential
 ) {
+  testPasswordVerificationObserver?.();
   validatePassword(password);
   if (credential.algorithm !== "scrypt" || credential.version !== 1) {
     throw new Error("Unsupported credential version.");
@@ -81,6 +83,11 @@ export async function verifyPasswordCredential(
   const stored = Buffer.from(credential.hash, "base64url");
   const comparable = stored.length === actual.length ? stored : Buffer.alloc(actual.length);
   return timingSafeEqual(actual, comparable) && stored.length === actual.length;
+}
+
+/** Test-only work-factor seam; no environment value can enable it. */
+export function setPasswordVerificationObserverForTests(observer?: () => void) {
+  testPasswordVerificationObserver = observer;
 }
 
 /** Test-loader seam; no environment value can enable this. */
@@ -122,6 +129,15 @@ export class LoginError extends Error {
 const INVITATION_SECONDS = 24 * 60 * 60;
 const LOGIN_LOCK_ATTEMPTS = 5;
 const LOGIN_LOCK_MS = 15 * 60 * 1_000;
+const DUMMY_LOGIN_CREDENTIAL: PasswordCredential = Object.freeze({
+  algorithm: "scrypt",
+  version: 1,
+  hash: "b3qw5l8nUENKHosTC06bne_Lwyk1w7iYd0Uf5Bf4Q74",
+  salt: "SU5UTyBsb2dpbiBkdW1teQ",
+  n: SCRYPT_N,
+  r: SCRYPT_R,
+  p: SCRYPT_P,
+});
 
 function invitationSecret() {
   const secret = process.env.INTO_INVITATION_SECRET ?? "";
@@ -246,46 +262,56 @@ export async function loginVerifiedUser(
   emailInput: string,
   password: string,
   now = Date.now(),
-  context?: { requestId: string; requestSource: string }
+  context?: { requestId: string; sourceHash: string | null }
 ) {
+  let normalizedEmail: string;
   let stored = null;
   try {
-    stored = await repository.findUserCredentialByEmail(canonicalAuthEmail(emailInput));
+    normalizedEmail = canonicalAuthEmail(emailInput);
+    stored = await repository.findUserCredentialByEmail(normalizedEmail);
   } catch {
     // Invalid identifiers follow the same password-work path as unknown users.
+    normalizedEmail = emailInput.trim().toLowerCase().slice(0, 320);
   }
-  if (stored?.lockedAt) {
-    const lockedAt = Date.parse(stored.lockedAt);
+  const emailHash = createHash("sha256")
+    .update(`INTO login email:v1:${normalizedEmail}`)
+    .digest("base64url");
+  const scopeHash = createHash("sha256")
+    .update(`INTO login throttle:v1:${emailHash}:${context?.sourceHash ?? "unattributed"}`)
+    .digest("base64url");
+  const throttle = await repository.findLoginThrottle(scopeHash);
+  let activeLock = false;
+  if (throttle?.lockedAt) {
+    const lockedAt = Date.parse(throttle.lockedAt);
     if (Number.isFinite(lockedAt) && now - lockedAt < LOGIN_LOCK_MS) {
-      throw new LoginError(429, "Too many login attempts. Try again later.");
+      activeLock = true;
+    } else {
+      await repository.resetLoginFailures(scopeHash, new Date(now).toISOString());
     }
-    await repository.resetLoginFailures(stored.user.id, new Date(now).toISOString());
   }
   const validLength = Buffer.byteLength(password, "utf8") >= 12 && Buffer.byteLength(password, "utf8") <= 1024;
   const candidate = validLength ? password : "invalid password input";
-  const credential = stored?.credential ?? await createPasswordCredential("unknown user timing password");
+  const credential = stored?.credential ?? DUMMY_LOGIN_CREDENTIAL;
   const valid = await verifyPasswordCredential(candidate, credential);
+  if (activeLock) throw new LoginError(429, "Too many login attempts. Try again later.");
   if (!stored || !validLength || !valid) {
-    const failure = stored
-      ? await repository.recordLoginFailure(
-          stored.user.id,
-          new Date(now).toISOString(),
-          LOGIN_LOCK_ATTEMPTS,
-          context ? {
-            requestId: context.requestId,
-            sourceHash: createHash("sha256")
-              .update(`INTO login source:v1:${context.requestSource}`)
-              .digest("base64url"),
-          } : undefined
-        )
-      : null;
+    const failure = await repository.recordLoginFailure(
+      scopeHash,
+      new Date(now).toISOString(),
+      LOGIN_LOCK_ATTEMPTS,
+      context ? {
+        requestId: context.requestId,
+        targetUserId: stored?.user.id,
+        sourceHash: context.sourceHash,
+      } : undefined
+    );
     if (failure?.lockedAt) throw new LoginError(429, "Too many login attempts. Try again later.");
     throw new LoginError(401, "Invalid email or password.");
   }
   if (stored.user.status !== "active" || !stored.user.verifiedAt) {
     throw new LoginError(403, "Account is not active.");
   }
-  await repository.resetLoginFailures(stored.user.id, new Date(now).toISOString());
+  await repository.resetLoginFailures(scopeHash, new Date(now).toISOString());
   const session = await issueVerifiedSession(repository, stored.user.id, now);
   return { user: stored.user, session };
 }
@@ -354,6 +380,16 @@ export function safeAuthUser(user: {
     status: user.status,
     version: user.version,
   };
+}
+
+export function trustedRequestSourceHash(request: Request) {
+  const header = process.env.INTO_TRUSTED_SOURCE_HEADER?.trim().toLowerCase() ?? "";
+  if (!/^[a-z0-9-]+$/.test(header)) return null;
+  const source = request.headers.get(header)?.trim();
+  if (!source) return null;
+  return createHash("sha256")
+    .update(`INTO trusted request source:v1:${source.slice(0, 512)}`)
+    .digest("base64url");
 }
 
 export function isVerifiedSessionTokenFormat(token: string | null | undefined) {

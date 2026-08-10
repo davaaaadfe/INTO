@@ -1317,6 +1317,7 @@ export function IntoWorkbench() {
   } | null>(null);
   const [activeView, setActiveView] = useState<ActiveView>("queue");
   const [actor, setActor] = useState<SafeActor | null>(null);
+  const [canInviteUsers, setCanInviteUsers] = useState(false);
   const [archiveFilters, setArchiveFilters] =
     useState<ArchiveFilterState>(defaultArchiveFilters);
   const [archive, setArchive] = useState<InvoiceArchiveResult | null>(null);
@@ -1327,7 +1328,7 @@ export function IntoWorkbench() {
   const availableViews: ActiveView[] = state.supplierLearningEnabled
     ? ["queue", "archive", "supplier-learning"]
     : ["queue", "archive"];
-  if (actor) availableViews.push("users");
+  if (actor || canInviteUsers) availableViews.push("users");
   const visibleActiveView =
     activeView === "supplier-learning" && !state.supplierLearningEnabled
       ? "queue"
@@ -2222,8 +2223,17 @@ export function IntoWorkbench() {
     const timeoutId = window.setTimeout(() => {
       fetch("/api/access/session")
         .then((response) => response.json())
-        .then((body: { user?: SafeActor | null }) => setActor(body.user ?? null))
-        .catch(() => setActor(null));
+        .then((body: {
+          user?: SafeActor | null;
+          capabilities?: { canInviteUsers?: boolean };
+        }) => {
+          setActor(body.user ?? null);
+          setCanInviteUsers(body.capabilities?.canInviteUsers === true);
+        })
+        .catch(() => {
+          setActor(null);
+          setCanInviteUsers(false);
+        });
     }, 0);
     return () => window.clearTimeout(timeoutId);
   }, []);
@@ -4086,7 +4096,7 @@ export function IntoWorkbench() {
           ))}
         </div>
 
-        {visibleActiveView === "users" ? <IntoUsersPanel /> : null}
+        {visibleActiveView === "users" ? <IntoUsersPanel bootstrapOnly={!actor} /> : null}
 
         {visibleActiveView === "archive" ? (
           <section className="rounded-lg border border-stone-300 bg-white p-4">

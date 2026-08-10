@@ -25,7 +25,8 @@ export async function GET(request: Request) {
       requireSystemOwner(principal);
       if (isRealExactMode()) {
         const authorization = await createRealExactAuthorizationUrl(
-          getCompanyConnectionUserId()
+          getCompanyConnectionUserId(),
+          principal
         );
         return Response.json({
           ...authorization,
@@ -61,7 +62,8 @@ export async function POST(request: Request) {
       requireSystemOwner(principal);
       if (isRealExactMode()) {
         const authorization = await createRealExactAuthorizationUrl(
-          getCompanyConnectionUserId()
+          getCompanyConnectionUserId(),
+          principal
         );
         logger.info("exact.oauth_started", { mode: exactIntegrationMode() });
         return Response.json({

@@ -2,9 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   POSTGRES_AUTH_MIGRATIONS,
-  POSTGRES_AUTH_MIGRATION_CHECKSUM,
+  POSTGRES_AUTH_V1_CHECKSUM,
+  POSTGRES_AUTH_V2_CHECKSUM,
   PostgresAuthRepository,
 } from "../lib/repository/postgres-auth-repository";
+import { AuthEmailNormalizationConflictError } from "../lib/repository/auth-repository";
 
 test("PostgreSQL auth migrations define secret-safe normalized auth tables", () => {
   const sql = POSTGRES_AUTH_MIGRATIONS.join("\n");
@@ -28,14 +30,13 @@ test("PostgreSQL auth migration is checksummed and fails closed for newer schema
   const calls: Array<{ query: string; parameters?: unknown[] }> = [];
   const repository = PostgresAuthRepository.fromQuery(async (query, parameters) => {
     calls.push({ query, parameters });
-    if (query.startsWith("SELECT version, checksum")) return [{ version: 0, checksum: null }];
     return [];
   });
   await repository.migrate();
   assert.equal(calls.some((call) => call.query.includes("into_auth_users")), true);
   assert.deepEqual(
     calls.find((call) => call.query.includes("INSERT INTO into_auth_schema_migrations"))?.parameters,
-    [1, POSTGRES_AUTH_MIGRATION_CHECKSUM]
+    [1, POSTGRES_AUTH_V1_CHECKSUM]
   );
 
   const futureCalls: string[] = [];
@@ -50,10 +51,39 @@ test("PostgreSQL auth migration is checksummed and fails closed for newer schema
 test("PostgreSQL rejects a current schema with a stale PostgreSQL migration checksum", async () => {
   const repository = PostgresAuthRepository.fromQuery(async (query) =>
     query.startsWith("SELECT version, checksum")
-      ? [{ version: 1, checksum: "sqlite-derived-checksum" }]
+      ? [{ version: 2, checksum: "sqlite-derived-checksum" }]
       : []
   );
   await assert.rejects(repository.migrate(), /checksum does not match/);
+});
+
+test("PostgreSQL upgrades compatible v1 ledger entries through a collision check and v2 DDL", async () => {
+  const transactions: Array<Array<{ query: string; parameters?: unknown[] }>> = [];
+  const repository = PostgresAuthRepository.fromQuery(
+    async (query) => query.startsWith("SELECT version, checksum")
+      ? [{ version: 1, checksum: POSTGRES_AUTH_V1_CHECKSUM }]
+      : query.includes("GROUP BY lower(btrim(email))") ? [] : [],
+    async (statements) => { transactions.push(statements); }
+  );
+  await repository.migrate();
+  assert.equal(transactions.length, 1);
+  assert.match(transactions[0]?.[0]?.query ?? "", /UPDATE into_auth_users SET email = lower\(btrim\(email\)\)/i);
+  assert.match(transactions[0]?.[1]?.query ?? "", /ADD CONSTRAINT into_auth_users_email_canonical_check/i);
+  assert.deepEqual(transactions[0]?.[2]?.parameters, [2, POSTGRES_AUTH_V2_CHECKSUM]);
+});
+
+test("PostgreSQL v1 canonical email collisions fail closed before v2 changes", async () => {
+  let transactions = 0;
+  const repository = PostgresAuthRepository.fromQuery(
+    async (query) => query.startsWith("SELECT version, checksum")
+      ? [{ version: 1, checksum: POSTGRES_AUTH_V1_CHECKSUM }]
+      : query.includes("GROUP BY lower(btrim(email))")
+        ? [{ canonical_email: "case@example.test", user_ids: ["first", "second"] }]
+        : [],
+    async () => { transactions += 1; }
+  );
+  await assert.rejects(repository.migrate(), AuthEmailNormalizationConflictError);
+  assert.equal(transactions, 0);
 });
 
 test("PostgreSQL legacy migration upserts canonical users and append-only events", async () => {

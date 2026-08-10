@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-export const AUTH_SCHEMA_VERSION = 1;
+export const AUTH_SCHEMA_VERSION = 2;
 
 export type AuthUserStatus = "invited" | "active" | "disabled";
 export type AuthUserRecord = {
@@ -28,6 +28,7 @@ export type LegacyUserInventory = {
 export type AuthMigrationReport = LegacyUserInventory;
 
 export class AuthSchemaVersionError extends Error {}
+export class AuthEmailNormalizationConflictError extends Error {}
 
 const migrationTable = `
   PRAGMA foreign_keys = ON;
@@ -38,10 +39,10 @@ const migrationTable = `
   );
 `;
 
-const schema = `
+const sqliteV1Schema = `
   CREATE TABLE IF NOT EXISTS into_auth_users (
     id TEXT PRIMARY KEY,
-    email TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK (email = lower(trim(email))),
+    email TEXT NOT NULL COLLATE NOCASE UNIQUE,
     display_name TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('invited', 'active', 'disabled')),
     access_level TEXT NOT NULL CHECK (access_level = 'verified_user'),
@@ -104,9 +105,35 @@ const schema = `
     ON into_auth_events (target_user_id, created_at);
 `;
 
-export const AUTH_MIGRATION_CHECKSUM = createHash("sha256")
-  .update(schema)
+const sqliteV2Schema = `
+  CREATE TABLE into_auth_users_next (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK (email = lower(trim(email))),
+    display_name TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('invited', 'active', 'disabled')),
+    access_level TEXT NOT NULL CHECK (access_level = 'verified_user'),
+    verified_at TEXT,
+    version INTEGER NOT NULL CHECK (version > 0),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  INSERT INTO into_auth_users_next (
+    id, email, display_name, status, access_level, verified_at, version, created_at, updated_at
+  ) SELECT
+    id, lower(trim(email)), display_name, status, access_level, verified_at, version, created_at, updated_at
+  FROM into_auth_users;
+  DROP TABLE into_auth_users;
+  ALTER TABLE into_auth_users_next RENAME TO into_auth_users;
+`;
+
+export const SQLITE_AUTH_V1_CHECKSUM = createHash("sha256")
+  .update(sqliteV1Schema)
   .digest("hex");
+export const SQLITE_AUTH_V2_CHECKSUM = createHash("sha256")
+  .update(`2\n${sqliteV2Schema}`)
+  .digest("hex");
+/** @deprecated Use the version-specific checksum. */
+export const AUTH_MIGRATION_CHECKSUM = SQLITE_AUTH_V2_CHECKSUM;
 
 export function canonicalAuthEmail(email: string) {
   return email.trim().toLowerCase();
@@ -249,29 +276,67 @@ export class SqliteAuthRepository implements AuthRepository {
   async migrate() {
     this.database.exec(migrationTable);
     const rows = this.database.prepare(
-      "SELECT version, checksum FROM into_auth_schema_migrations ORDER BY version DESC LIMIT 1"
+      "SELECT version, checksum FROM into_auth_schema_migrations ORDER BY version"
     ).all() as Array<{ version: number; checksum: string }>;
-    const current = Number(rows[0]?.version ?? 0);
+    const current = Number(rows.at(-1)?.version ?? 0);
     if (current > AUTH_SCHEMA_VERSION) {
       throw new AuthSchemaVersionError(
         `Auth database schema ${current} is newer than supported schema ${AUTH_SCHEMA_VERSION}.`
       );
     }
-    if (current === AUTH_SCHEMA_VERSION && rows[0]?.checksum !== AUTH_MIGRATION_CHECKSUM) {
-      throw new AuthSchemaVersionError("Auth database migration checksum does not match this release.");
+    const checksums = new Map([
+      [1, SQLITE_AUTH_V1_CHECKSUM],
+      [2, SQLITE_AUTH_V2_CHECKSUM],
+    ]);
+    for (const row of rows) {
+      if (checksums.get(Number(row.version)) !== row.checksum) {
+        throw new AuthSchemaVersionError("Auth database migration checksum does not match this release.");
+      }
     }
-    if (current < AUTH_SCHEMA_VERSION) {
+    if (current < 1) {
       this.database.exec("BEGIN IMMEDIATE");
       try {
-        this.database.exec(schema);
+        this.database.exec(sqliteV1Schema);
         this.database.prepare(
           "INSERT INTO into_auth_schema_migrations (version, checksum, applied_at) VALUES (?, ?, ?)"
-        ).run(AUTH_SCHEMA_VERSION, AUTH_MIGRATION_CHECKSUM, new Date().toISOString());
+        ).run(1, SQLITE_AUTH_V1_CHECKSUM, new Date().toISOString());
         this.database.exec("COMMIT");
       } catch (error) {
         this.database.exec("ROLLBACK");
         throw error;
       }
+    }
+    if (current < 2) this.migrateCanonicalEmailV2();
+  }
+
+  private migrateCanonicalEmailV2() {
+    const collisions = this.database.prepare(`
+      SELECT lower(trim(email)) AS canonical_email, group_concat(id, ',') AS user_ids
+      FROM into_auth_users
+      GROUP BY lower(trim(email))
+      HAVING COUNT(*) > 1
+      ORDER BY canonical_email
+    `).all() as Array<{ canonical_email: string; user_ids: string }>;
+    if (collisions.length) {
+      throw new AuthEmailNormalizationConflictError(
+        `Auth email canonicalization conflicts: ${collisions
+          .map((row) => `${row.canonical_email} (${row.user_ids})`)
+          .join(", ")}.`
+      );
+    }
+    this.database.exec("PRAGMA foreign_keys = OFF");
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.exec(sqliteV2Schema);
+      this.database.prepare(
+        "INSERT INTO into_auth_schema_migrations (version, checksum, applied_at) VALUES (?, ?, ?)"
+      ).run(2, SQLITE_AUTH_V2_CHECKSUM, new Date().toISOString());
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    } finally {
+      this.database.exec("PRAGMA foreign_keys = ON");
     }
   }
 

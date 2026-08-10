@@ -2,9 +2,11 @@ import { neon } from "@neondatabase/serverless";
 import { createHash } from "node:crypto";
 import {
   AUTH_SCHEMA_VERSION,
+  AuthEmailNormalizationConflictError,
   AuthSchemaVersionError,
   canonicalAuthEmail,
   inventoryLegacyUsers,
+  SQLITE_AUTH_V1_CHECKSUM,
   type AuthRepository,
   type AuthMigrationReport,
   type AuthUserRecord,
@@ -12,7 +14,7 @@ import {
   type LegacyAuthUser,
 } from "./auth-repository";
 
-export const POSTGRES_AUTH_MIGRATIONS = [
+export const POSTGRES_AUTH_V1_MIGRATIONS = [
   `CREATE TABLE IF NOT EXISTS into_auth_schema_migrations (
     version integer PRIMARY KEY,
     checksum text NOT NULL,
@@ -20,7 +22,7 @@ export const POSTGRES_AUTH_MIGRATIONS = [
   )`,
   `CREATE TABLE IF NOT EXISTS into_auth_users (
     id text PRIMARY KEY,
-    email text NOT NULL UNIQUE CHECK (email = lower(btrim(email))),
+    email text NOT NULL UNIQUE,
     display_name text NOT NULL,
     status text NOT NULL CHECK (status IN ('invited', 'active', 'disabled')),
     access_level text NOT NULL CHECK (access_level = 'verified_user'),
@@ -83,9 +85,27 @@ export const POSTGRES_AUTH_MIGRATIONS = [
     ON into_auth_events (target_user_id, created_at)`,
 ] as const;
 
-export const POSTGRES_AUTH_MIGRATION_CHECKSUM = createHash("sha256")
-  .update(`${AUTH_SCHEMA_VERSION}\n${POSTGRES_AUTH_MIGRATIONS.join("\n")}`)
+export const POSTGRES_AUTH_V2_MIGRATIONS = [
+  `UPDATE into_auth_users SET email = lower(btrim(email))
+   WHERE email IS DISTINCT FROM lower(btrim(email))`,
+  `ALTER TABLE into_auth_users
+   ADD CONSTRAINT into_auth_users_email_canonical_check
+   CHECK (email = lower(btrim(email)))`,
+] as const;
+
+export const POSTGRES_AUTH_MIGRATIONS = [
+  ...POSTGRES_AUTH_V1_MIGRATIONS,
+  ...POSTGRES_AUTH_V2_MIGRATIONS,
+] as const;
+
+export const POSTGRES_AUTH_V1_CHECKSUM = createHash("sha256")
+  .update(`1\n${POSTGRES_AUTH_V1_MIGRATIONS.join("\n")}`)
   .digest("hex");
+export const POSTGRES_AUTH_V2_CHECKSUM = createHash("sha256")
+  .update(`2\n${POSTGRES_AUTH_V2_MIGRATIONS.join("\n")}`)
+  .digest("hex");
+/** @deprecated Use the version-specific checksum. */
+export const POSTGRES_AUTH_MIGRATION_CHECKSUM = POSTGRES_AUTH_V2_CHECKSUM;
 
 type PostgresRows = Array<Record<string, unknown>>;
 type PostgresQuery = (query: string, parameters?: unknown[]) => Promise<PostgresRows>;
@@ -121,32 +141,61 @@ export class PostgresAuthRepository implements AuthRepository {
   }
 
   async migrate() {
-    await this.query(POSTGRES_AUTH_MIGRATIONS[0]);
+    await this.query(POSTGRES_AUTH_V1_MIGRATIONS[0]);
     const rows = await this.query(
-      "SELECT version, checksum FROM into_auth_schema_migrations ORDER BY version DESC LIMIT 1"
+      "SELECT version, checksum FROM into_auth_schema_migrations ORDER BY version"
     );
-    const current = Number(rows[0]?.version ?? 0);
+    const current = Number(rows.at(-1)?.version ?? 0);
     if (current > AUTH_SCHEMA_VERSION) {
       throw new AuthSchemaVersionError(
         `Auth database schema ${current} is newer than supported schema ${AUTH_SCHEMA_VERSION}.`
       );
     }
-    if (
-      current === AUTH_SCHEMA_VERSION &&
-      rows[0]?.checksum !== POSTGRES_AUTH_MIGRATION_CHECKSUM
-    ) {
-      throw new AuthSchemaVersionError("Auth database migration checksum does not match this release.");
+    for (const row of rows) {
+      const version = Number(row.version);
+      const valid = version === 1
+        ? row.checksum === POSTGRES_AUTH_V1_CHECKSUM || row.checksum === SQLITE_AUTH_V1_CHECKSUM
+        : version === 2 && row.checksum === POSTGRES_AUTH_V2_CHECKSUM;
+      if (!valid) {
+        throw new AuthSchemaVersionError("Auth database migration checksum does not match this release.");
+      }
     }
-    if (current < AUTH_SCHEMA_VERSION) {
+    if (current < 1) {
       await this.transaction([
-        ...POSTGRES_AUTH_MIGRATIONS.slice(1).map((query) => ({ query })),
+        ...POSTGRES_AUTH_V1_MIGRATIONS.slice(1).map((query) => ({ query })),
         {
           query: `INSERT INTO into_auth_schema_migrations (version, checksum, applied_at)
                   VALUES ($1, $2, now()) ON CONFLICT(version) DO NOTHING`,
-          parameters: [AUTH_SCHEMA_VERSION, POSTGRES_AUTH_MIGRATION_CHECKSUM],
+          parameters: [1, POSTGRES_AUTH_V1_CHECKSUM],
         },
       ]);
     }
+    if (current < 2) await this.migrateCanonicalEmailV2();
+  }
+
+  private async migrateCanonicalEmailV2() {
+    const collisions = await this.query(`
+      SELECT lower(btrim(email)) AS canonical_email, array_agg(id ORDER BY id) AS user_ids
+      FROM into_auth_users
+      GROUP BY lower(btrim(email))
+      HAVING COUNT(*) > 1
+      ORDER BY canonical_email
+    `);
+    if (collisions.length) {
+      throw new AuthEmailNormalizationConflictError(
+        `Auth email canonicalization conflicts: ${collisions
+          .map((row) => `${String(row.canonical_email)} (${String(row.user_ids)})`)
+          .join(", ")}.`
+      );
+    }
+    await this.transaction([
+      ...POSTGRES_AUTH_V2_MIGRATIONS.map((query) => ({ query })),
+      {
+        query: `INSERT INTO into_auth_schema_migrations (version, checksum, applied_at)
+                VALUES ($1, $2, now()) ON CONFLICT(version) DO NOTHING`,
+        parameters: [2, POSTGRES_AUTH_V2_CHECKSUM],
+      },
+    ]);
   }
 
   async schemaVersion() {

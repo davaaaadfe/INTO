@@ -5,7 +5,9 @@ import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   AuthSchemaVersionError,
+  AuthEmailNormalizationConflictError,
   SqliteAuthRepository,
+  SQLITE_AUTH_V1_CHECKSUM,
   inventoryLegacyUsers,
   inventoryRawSqliteSnapshot,
   mapLegacyRole,
@@ -41,7 +43,7 @@ async function withRepository(
 test("SQLite auth migration creates safe normalized storage and is replayable", async () => {
   await withRepository(async (repository) => {
     await repository.migrate();
-    assert.equal(await repository.schemaVersion(), 1);
+    assert.equal(await repository.schemaVersion(), 2);
     assert.deepEqual(await repository.tableNames(), [
       "into_auth_credentials",
       "into_auth_events",
@@ -206,6 +208,81 @@ test("SQLite enforces canonical lowercase email storage", async () => {
   });
 });
 
+test("SQLite upgrades an immutable v1 auth fixture to canonical email v2", async () => {
+  const path = databasePath();
+  const database = new DatabaseSync(path);
+  database.exec(`
+    CREATE TABLE into_auth_schema_migrations (
+      version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL
+    );
+    INSERT INTO into_auth_schema_migrations VALUES (1, '${SQLITE_AUTH_V1_CHECKSUM}', '2026-08-10T00:00:00.000Z');
+    CREATE TABLE into_auth_users (
+      id TEXT PRIMARY KEY,
+      email TEXT NOT NULL COLLATE NOCASE UNIQUE,
+      display_name TEXT NOT NULL,
+      status TEXT NOT NULL,
+      access_level TEXT NOT NULL,
+      verified_at TEXT,
+      version INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    INSERT INTO into_auth_users VALUES (
+      'v1-user', ' V1@Example.test ', 'V1', 'invited', 'verified_user', NULL, 1,
+      '2026-08-10T00:00:00.000Z', '2026-08-10T00:00:00.000Z'
+    );
+  `);
+  database.close();
+  const repository = new SqliteAuthRepository(path);
+  try {
+    await repository.migrate();
+    assert.equal(await repository.schemaVersion(), 2);
+    assert.equal((await repository.listUsers())[0]?.email, "v1@example.test");
+    assert.match(await repository.schemaSql(), /CHECK \(email = lower\(trim\(email\)\)\)/);
+  } finally {
+    repository.close();
+    await rm(path, { force: true });
+  }
+});
+
+test("SQLite v1 email canonicalization collision fails closed without a v2 write", async () => {
+  const path = databasePath();
+  const database = new DatabaseSync(path);
+  database.exec(`
+    CREATE TABLE into_auth_schema_migrations (
+      version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL
+    );
+    INSERT INTO into_auth_schema_migrations VALUES (1, '${SQLITE_AUTH_V1_CHECKSUM}', '2026-08-10T00:00:00.000Z');
+    CREATE TABLE into_auth_users (
+      id TEXT PRIMARY KEY,
+      email TEXT NOT NULL COLLATE NOCASE UNIQUE,
+      display_name TEXT NOT NULL,
+      status TEXT NOT NULL,
+      access_level TEXT NOT NULL,
+      verified_at TEXT,
+      version INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    INSERT INTO into_auth_users VALUES
+      ('first', ' case@example.test', 'First', 'invited', 'verified_user', NULL, 1, '2026-08-10T00:00:00.000Z', '2026-08-10T00:00:00.000Z'),
+      ('second', 'case@example.test ', 'Second', 'invited', 'verified_user', NULL, 1, '2026-08-10T00:00:00.000Z', '2026-08-10T00:00:00.000Z');
+  `);
+  database.close();
+  const repository = new SqliteAuthRepository(path);
+  try {
+    await assert.rejects(repository.migrate(), AuthEmailNormalizationConflictError);
+    assert.equal(await repository.schemaVersion(), 1);
+    assert.deepEqual((await repository.listUsers()).map((user) => user.email), [
+      " case@example.test",
+      "case@example.test ",
+    ]);
+  } finally {
+    repository.close();
+    await rm(path, { force: true });
+  }
+});
+
 test("raw runtime snapshots retain multiple legacy identities without hydration coercion", async () => {
   const path = databasePath();
   const database = new DatabaseSync(path);
@@ -278,7 +355,7 @@ test("configured auth storage auto-migrates locally but never in production", as
     environment.NODE_ENV = "test";
     closeConfiguredAuthRepository();
     const local = await configuredAuthRepository();
-    assert.equal(await local.schemaVersion(), 1);
+    assert.equal(await local.schemaVersion(), 2);
     assert.equal(typeof local.migrateLegacyUsers, "function");
 
     closeConfiguredAuthRepository();

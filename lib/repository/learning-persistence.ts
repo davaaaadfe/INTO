@@ -937,6 +937,7 @@ export async function persistLearningState(
         actorId: context.actorId ?? "shared_user",
         sessionCorrelationId: context.sessionCorrelationId || "session_unavailable",
         requestId:
+          runtimeProfile.lastResetRequestKey ||
           context.requestId ||
           stableId("request", ["reset", scope, desiredGeneration]),
         createdAt: runtimeProfile.lastResetAt,
@@ -1415,6 +1416,9 @@ export async function hydrateLearningState(
     };
     const examples = await repository.listExamples(scope);
     const patterns = await repository.listPatterns(scope);
+    const resetEvent = (await repository.listEvents(scope)).findLast(
+      (event) => event.type === "reset" && event.generation === profile.generation
+    );
     const baselineExample = examples[0];
     learning.supplierProfiles.push({
       supplierAccountId: profile.supplierAccountId,
@@ -1422,6 +1426,11 @@ export async function hydrateLearningState(
       exampleCount: profile.learnedCount,
       lastLearnedAt: profile.lastLearnedAt,
       lastResetAt: profile.lastResetAt,
+      lastResetRequestKey: resetEvent?.requestId,
+      lastResetExpectedGeneration:
+        typeof resetEvent?.metadata.previousGeneration === "number"
+          ? resetEvent.metadata.previousGeneration
+          : undefined,
       formatFingerprint: baselineExample?.fingerprint,
       formatDrift: profile.driftState,
     });

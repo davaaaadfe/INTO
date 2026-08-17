@@ -68,6 +68,9 @@ test("adds a Supplier learning view with separate reliability copy", () => {
     /type ActiveView = "queue" \| "archive" \| "supplier-learning"/
   );
   assert.match(activeReviewSource, />\s*Supplier learning\s*</);
+  assert.match(activeReviewSource, /\/learning`/);
+  assert.match(activeReviewSource, />\s*Format clusters\s*</);
+  assert.match(activeReviewSource, />\s*Recent outcomes\s*</);
   assert.match(activeReviewSource, /Supplier reliability/);
   assert.match(activeReviewSource, /INTO usually reads this supplier correctly\./);
   assert.match(activeReviewSource, /Review recommended\./);
@@ -126,16 +129,16 @@ test("uses an accessible reset dialog with the approved destructive-action copy"
     activeReviewSource,
     /expectedGeneration:\s*learningResetTarget\.generation/
   );
+  assert.match(activeReviewSource, /"Idempotency-Key"/);
+  assert.match(activeReviewSource, /data\.summary/);
 });
 
 test("does not turn committed mutations or failed summary reads into false training state", () => {
   assert.match(activeReviewSource, /if \(!learningStateLoaded\)/);
   assert.match(activeReviewSource, /supplierLearningLoaded:\s*false/);
   assert.match(activeReviewSource, /state\.supplierLearningLoaded\s*\?/);
-  assert.match(activeReviewSource, /profile\?: SupplierLearningProfile/);
-  assert.match(activeReviewSource, /applyResetProfile/);
-  assert.match(activeReviewSource, /lastLearnedAt:\s*profile\.lastLearnedAt/);
-  assert.match(activeReviewSource, /formatFingerprint:\s*profile\.formatFingerprint/);
+  assert.match(activeReviewSource, /summary\?: SupplierLearningSummary/);
+  assert.match(activeReviewSource, /applyResetSummary/);
   assert.match(activeReviewSource, /Supplier learning was saved, but its summary could not be refreshed\./);
   assert.match(activeReviewSource, /Supplier learning was reset, but its summary could not be refreshed\./);
   assert.match(activeReviewSource, /busy === `reset-learning-\$\{learningResetTarget\.supplierAccountId\}`/);

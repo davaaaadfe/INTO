@@ -100,6 +100,11 @@ type PreviewFileStatus = "checking" | "available" | "missing";
 type ResolvedPreviewFileStatus = Exclude<PreviewFileStatus, "checking">;
 type ActiveView = "queue" | "archive" | "supplier-learning" | "users";
 type SafeActor = { id: string; email: string; displayName: string; status: string; version: number };
+type SupplierLearningDetail = {
+  profile: SupplierLearningSummary;
+  clusters: Array<{ id: string; exampleCount: number }>;
+  recentEvents: Array<{ type: string; fields: string[]; createdAt: string }>;
+};
 type PreviewInteractionMode = "pan" | "select_text";
 type FieldTone = "neutral" | "warning" | "error";
 
@@ -1325,6 +1330,8 @@ export function IntoWorkbench() {
   const [learningResetTarget, setLearningResetTarget] =
     useState<SupplierLearningSummary | null>(null);
   const [learningDetailAccountId, setLearningDetailAccountId] = useState("");
+  const [learningDetailData, setLearningDetailData] =
+    useState<SupplierLearningDetail | null>(null);
   const availableViews: ActiveView[] = state.supplierLearningEnabled
     ? ["queue", "archive", "supplier-learning"]
     : ["queue", "archive"];
@@ -2136,25 +2143,7 @@ export function IntoWorkbench() {
     }));
   }
 
-  function applyResetProfile(
-    target: SupplierLearningSummary,
-    profile: SupplierLearningProfile
-  ) {
-    const summary: SupplierLearningSummary = {
-      ...target,
-      ...profile,
-      lastLearnedAt: profile.lastLearnedAt,
-      formatFingerprint: profile.formatFingerprint,
-      confidence: {
-        score: 35,
-        band: "Low",
-        baseline: 35,
-        exampleCount: 0,
-        volume: 0,
-        quality: 0,
-        driftPenalty: 0,
-      },
-    };
+  function applyResetSummary(summary: SupplierLearningSummary) {
     setState((current) => ({
       ...current,
       supplierLearningLoaded: true,
@@ -2820,7 +2809,10 @@ export function IntoWorkbench() {
         )}/learning/reset`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": `reset:${learningResetTarget.supplierAccountId}:${learningResetTarget.generation}`,
+          },
           body: JSON.stringify({
             expectedGeneration: learningResetTarget.generation,
           }),
@@ -2828,16 +2820,17 @@ export function IntoWorkbench() {
       );
       const data = (await readApiJson(response)) as {
         profile?: SupplierLearningProfile;
+        summary?: SupplierLearningSummary;
         error?: string;
       };
-      if (!response.ok || !data.profile) {
+      if (!response.ok || !data.profile || !data.summary) {
         if (response.status === 409) {
           await refreshSupplierLearning();
           setLearningResetTarget(null);
         }
         throw new Error(data.error ?? "Supplier learning reset failed.");
       }
-      applyResetProfile(learningResetTarget, data.profile);
+      applyResetSummary(data.summary);
       setLearningResetTarget(null);
       setMessage(`Learning reset for ${learningResetTarget.supplierName}.`);
       flashButton(
@@ -3405,6 +3398,25 @@ export function IntoWorkbench() {
     document.body.appendChild(link);
     link.click();
     link.remove();
+  }
+
+  async function showSupplierLearningDetail(accountId: string) {
+    if (learningDetailAccountId === accountId) {
+      setLearningDetailAccountId("");
+      setLearningDetailData(null);
+      return;
+    }
+    const response = await fetch(
+      `/api/suppliers/${encodeURIComponent(accountId)}/learning`
+    );
+    const data = (await readApiJson(response)) as SupplierLearningDetail & {
+      error?: string;
+    };
+    if (!response.ok || !data.profile) {
+      throw new Error(data.error ?? "Supplier learning details could not be loaded.");
+    }
+    setLearningDetailAccountId(accountId);
+    setLearningDetailData(data);
   }
 
   async function copyExtractedText() {
@@ -4562,10 +4574,12 @@ export function IntoWorkbench() {
                             <ActionButton
                               variant="secondary"
                               onClick={() =>
-                                setLearningDetailAccountId((current) =>
-                                  current === summary.supplierAccountId
-                                    ? ""
-                                    : summary.supplierAccountId
+                                showSupplierLearningDetail(summary.supplierAccountId).catch(
+                                  (error) => setMessage(
+                                    error instanceof Error
+                                      ? error.message
+                                      : "Supplier learning details could not be loaded."
+                                  )
                                 )
                               }
                             >
@@ -4672,6 +4686,28 @@ export function IntoWorkbench() {
                     No trusted metric outcomes have been recorded yet.
                   </p>
                 )}
+                <div className="mt-4 grid gap-4 md:grid-cols-2">
+                  <div>
+                    <h4 className="text-sm font-semibold">Format clusters</h4>
+                    <ul className="mt-2 text-sm text-stone-600">
+                      {(learningDetailData?.clusters ?? []).map((cluster) => (
+                        <li key={cluster.id}>{cluster.id}: {cluster.exampleCount} invoices</li>
+                      ))}
+                      {!learningDetailData?.clusters.length ? <li>No active clusters.</li> : null}
+                    </ul>
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-semibold">Recent outcomes</h4>
+                    <ul className="mt-2 text-sm text-stone-600">
+                      {(learningDetailData?.recentEvents ?? []).map((event) => (
+                        <li key={`${event.type}:${event.createdAt}`}>
+                          {event.type.replace(/_/g, " ")} · {event.fields.join(", ") || "invoice"}
+                        </li>
+                      ))}
+                      {!learningDetailData?.recentEvents.length ? <li>No recent outcomes.</li> : null}
+                    </ul>
+                  </div>
+                </div>
               </section>
             ) : null}
           </section>

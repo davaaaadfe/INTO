@@ -45,6 +45,12 @@ export async function POST(request: Request, context: RouteContext) {
           { status: 400 }
         );
       }
+      if (accountId.startsWith("supplier-overview:")) {
+        return Response.json(
+          { error: "A canonical Exact supplier account is required." },
+          { status: 422 }
+        );
+      }
       getSupplierLearningDetail(accountId);
       const requestKey =
         request.headers.get("idempotency-key")?.trim() ||

@@ -23,6 +23,7 @@ import {
 } from "../lib/repository/configured-learning-repository";
 import { SqliteLearningRepository } from "../lib/repository/learning-repository";
 import {
+  hydrateLearningState,
   persistAnalysisArtifacts,
   persistLearningState,
   snapshotWithoutDocumentEvidence,
@@ -670,6 +671,94 @@ test("supplier candidate outcome events project idempotently without values", as
     assert.doesNotMatch(JSON.stringify(events), /SECRET|rawValue|correctedValue/);
   } finally {
     repository.close();
+    await removeDatabase(databasePath);
+  }
+});
+
+test("normalized supplier outcomes and reset replay metadata hydrate after restart", async () => {
+  const databasePath = testDatabasePath();
+  const previous = {
+    mode: process.env.DATABASE_MODE,
+    path: process.env.LOCAL_DATABASE_PATH,
+    enabled: process.env.LEARNING_V2_ENABLED,
+  };
+  process.env.DATABASE_MODE = "sqlite";
+  process.env.LOCAL_DATABASE_PATH = databasePath;
+  process.env.LEARNING_V2_ENABLED = "true";
+  const repository = new SqliteLearningRepository(databasePath);
+  try {
+    await repository.migrate();
+    const store = structuredClone(getStore());
+    const supplier = createMockExactMasterData().suppliers[0]!;
+    store.invoices = [];
+    store.exactMasterDataCaches = [{
+      userId: "company_connection",
+      cache: createMockExactMasterData(),
+    }];
+    store.learning.supplierProfiles = [{
+      supplierAccountId: supplier.id,
+      generation: 1,
+      exampleCount: 0,
+      formatDrift: "none",
+    }];
+    store.learning.supplierOutcomeEvents = [{
+      id: "outcome-acceptance-restart",
+      supplierAccountId: supplier.id,
+      generation: 1,
+      invoiceId: "invoice-restart",
+      invoiceRevision: 7,
+      type: "acceptance",
+      candidateIds: ["private-candidate-id"],
+      fields: ["referenceCode"],
+      createdAt: "2026-08-17T11:00:00.000Z",
+    }];
+    await persistLearningState(store, { requestId: "outcome-restart" }, repository);
+    const profile = (await repository.listProfiles(
+      process.env.INTO_COMPANY_ID?.trim() || "into-company",
+      store.exactMasterDataCaches[0]!.cache.divisionCode
+    ))[0]!;
+    await repository.saveEvent({
+      id: "reset-restart",
+      companyId: profile.companyId,
+      divisionCode: profile.divisionCode,
+      supplierAccountId: supplier.id,
+      generation: 1,
+      type: "reset",
+      idempotencyKey: "reset:restart-key",
+      actorId: "verified-a",
+      sessionCorrelationId: "session-a",
+      requestId: "restart-key",
+      metadata: { previousGeneration: 0 },
+      createdAt: "2026-08-17T12:00:00.000Z",
+    });
+
+    store.learning.supplierProfiles = [];
+    store.learning.supplierOutcomeEvents = [];
+    await closeConfiguredLearningRepository();
+    assert.equal(await hydrateLearningState(store), true);
+
+    assert.deepEqual(store.learning.supplierOutcomeEvents, [{
+      id: "outcome-acceptance-restart",
+      supplierAccountId: supplier.id,
+      generation: 1,
+      invoiceId: "invoice-restart",
+      invoiceRevision: 7,
+      type: "acceptance",
+      candidateIds: [],
+      fields: ["referenceCode"],
+      createdAt: "2026-08-17T11:00:00.000Z",
+    }]);
+    assert.equal(store.learning.supplierProfiles[0]?.lastResetRequestKey, "restart-key");
+    assert.equal(store.learning.supplierProfiles[0]?.lastResetExpectedGeneration, 0);
+  } finally {
+    repository.close();
+    await closeConfiguredLearningRepository();
+    if (previous.mode === undefined) delete process.env.DATABASE_MODE;
+    else process.env.DATABASE_MODE = previous.mode;
+    if (previous.path === undefined) delete process.env.LOCAL_DATABASE_PATH;
+    else process.env.LOCAL_DATABASE_PATH = previous.path;
+    if (previous.enabled === undefined) delete process.env.LEARNING_V2_ENABLED;
+    else process.env.LEARNING_V2_ENABLED = previous.enabled;
     await removeDatabase(databasePath);
   }
 });

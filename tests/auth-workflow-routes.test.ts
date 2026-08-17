@@ -27,16 +27,17 @@ test("login mode matrix issues verified cookies and keeps credential failures ge
   environment.INTO_INVITATION_SECRET = "test-only-invitation-secret-at-least-32-bytes";
   try {
     await repository.migrate();
+    const invitationNow = Date.UTC(2026, 7, 10);
     const invitation = await createUserInvitation(repository, {
       actorId: "bootstrap", actorName: "Bootstrap", accessLevel: "verified_user",
       verificationState: "verified", sessionCorrelationId: "bootstrap-session", requestId: "invite-1",
     }, {
       email: "person@example.test", name: "Person", requestKey: "invite-key",
-    }, "https://into.example.test", Date.UTC(2026, 7, 10));
+    }, "https://into.example.test", invitationNow);
     await verifyUserInvitation(repository, {
       token: new URL(invitation.verificationUrl).searchParams.get("token")!,
       displayName: "Person", password: "correct horse battery staple", requestId: "verify-1",
-    }, Date.now());
+    }, invitationNow + 1_000);
 
     setConfiguredAuthRepositoryFactoryForTest(() => repository);
     closeConfiguredAuthRepository();

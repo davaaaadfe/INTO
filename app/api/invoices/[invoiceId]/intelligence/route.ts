@@ -1,7 +1,9 @@
 import {
   approveInvoiceIntelligence,
+  assertExpectedInvoiceRevision,
   getInvoice,
   InvoiceRevisionConflictError,
+  InvoiceRevisionValidationError,
   listInvoices,
   requirePermission,
   saveInvoiceReview,
@@ -37,34 +39,25 @@ export async function POST(request: Request, context: RouteContext) {
       const payload = (await request.json()) as {
         action?: "approve" | "selectSupplier";
         accountId?: string;
-        expectedRevision?: number;
+        expectedRevision?: unknown;
         extractedData?: ExtractedInvoiceData;
         bookingLines?: PurchaseJournalLine[];
       };
 
-      if (
-        payload.action === "selectSupplier" &&
-        payload.extractedData
-      ) {
-        if (
-          typeof payload.expectedRevision !== "number" ||
-          payload.expectedRevision !== invoice.revision
-        ) {
-          throw new InvoiceRevisionConflictError(
-            "Invoice revision changed. Refresh and try again."
-          );
-        }
+      assertExpectedInvoiceRevision(invoice, payload.expectedRevision);
+      if (payload.action === "selectSupplier" && payload.extractedData) {
         saveInvoiceReview(
           invoiceId,
           payload.extractedData,
-          payload.bookingLines ?? []
+          payload.bookingLines ?? [],
+          { incrementRevision: false }
         );
       }
 
       const updatedInvoice =
         payload.action === "selectSupplier"
-          ? selectInvoiceSupplier(invoiceId, payload.accountId ?? "")
-          : approveInvoiceIntelligence(invoiceId);
+          ? selectInvoiceSupplier(invoiceId, payload.accountId ?? "", invoice.revision)
+          : approveInvoiceIntelligence(invoiceId, invoice.revision);
 
       if (!updatedInvoice) {
         return Response.json(
@@ -84,11 +77,17 @@ export async function POST(request: Request, context: RouteContext) {
       const message =
         error instanceof Error ? error.message : "Unexpected intelligence action error";
       if (error instanceof InvoiceRevisionConflictError) {
-        const invoiceId = await invoiceIdFromContext(context);
         return Response.json(
-          { error: message, invoice: getInvoice(invoiceId) },
+          {
+            error: message,
+            code: error.code,
+            currentInvoice: error.currentInvoice,
+          },
           { status: 409 }
         );
+      }
+      if (error instanceof InvoiceRevisionValidationError) {
+        return Response.json({ error: message, code: error.code }, { status: 422 });
       }
       logger.error("invoice.intelligence_action_failed", { message });
       return Response.json(

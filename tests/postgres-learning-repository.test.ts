@@ -12,8 +12,10 @@ test("PostgreSQL learning migrations define the normalized production schema", (
     "supplier_identity_aliases",
     "document_analysis_artifacts",
     "supplier_learning_examples",
+    "supplier_learning_corrections",
     "supplier_learning_patterns",
     "supplier_learning_events",
+    "supplier_learning_data_migrations",
   ]) {
     assert.match(sql, new RegExp(`CREATE TABLE IF NOT EXISTS ${table}`));
   }
@@ -22,6 +24,11 @@ test("PostgreSQL learning migrations define the normalized production schema", (
     /UNIQUE \(\s*company_id, division_code, supplier_account_id, generation, content_hash\s*\)/
   );
   assert.match(sql, /UNIQUE \(company_id, idempotency_key\)/);
+  assert.match(sql, /evidence_revision integer NOT NULL DEFAULT 0/);
+  assert.match(
+    sql,
+    /CREATE UNIQUE INDEX IF NOT EXISTS supplier_learning_examples_active_hash_uidx[\s\S]+WHERE active = true/
+  );
   const aliasTable = POSTGRES_LEARNING_MIGRATIONS.find((statement) =>
     statement.includes("CREATE TABLE IF NOT EXISTS supplier_identity_aliases")
   );
@@ -53,7 +60,15 @@ test("PostgreSQL migrations are replayable and record one schema version", async
     calls.filter((call) =>
       call.query.includes("INSERT INTO supplier_learning_schema_migrations")
     ).length,
-    1
+    2
+  );
+  assert.deepEqual(
+    calls
+      .filter((call) =>
+        call.query.includes("INSERT INTO supplier_learning_schema_migrations")
+      )
+      .map((call) => call.parameters?.[0]),
+    [1, 2]
   );
 });
 

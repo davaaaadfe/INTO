@@ -17,6 +17,7 @@ import type {
   LearningScope,
 } from "./learning-repository";
 import { configuredLearningRepository } from "./configured-learning-repository";
+import type { LearningRepository } from "./learning-repository-contract";
 import { canonicalSupplierIdentityKey } from "../services/correction-learning";
 import {
   normalizeSupplierAddress,
@@ -681,7 +682,7 @@ function lifecycleExampleInput(
 
 async function saveAnalysisArtifacts(
   store: IntoStore,
-  repository: NonNullable<Awaited<ReturnType<typeof configuredLearningRepository>>>,
+  repository: LearningRepository,
   createdAt: string
 ) {
   await repository.pruneExpiredArtifacts(createdAt);
@@ -705,8 +706,11 @@ async function saveAnalysisArtifacts(
   return artifactsByContentHash;
 }
 
-export async function persistAnalysisArtifacts(store: IntoStore) {
-  const repository = await configuredLearningRepository();
+export async function persistAnalysisArtifacts(
+  store: IntoStore,
+  repositoryOverride?: LearningRepository
+) {
+  const repository = repositoryOverride ?? (await configuredLearningRepository());
   if (!repository) return false;
   await saveAnalysisArtifacts(store, repository, new Date().toISOString());
   return true;
@@ -720,9 +724,10 @@ export async function pruneExpiredLearningArtifacts(referenceDate = new Date()) 
 
 export async function persistLearningState(
   store: IntoStore,
-  context: LearningPersistenceContext = {}
+  context: LearningPersistenceContext = {},
+  repositoryOverride?: LearningRepository
 ) {
-  const repository = await configuredLearningRepository();
+  const repository = repositoryOverride ?? (await configuredLearningRepository());
   if (!repository) return false;
   const createdAt = new Date().toISOString();
   const artifactsByContentHash = await saveAnalysisArtifacts(

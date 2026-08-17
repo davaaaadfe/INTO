@@ -229,7 +229,7 @@ test("Learn route requires an integer revision and rejects stale drafts without 
     }),
     { params: { invoiceId: invoice.id } }
   );
-  assert.equal(missingResponse.status, 400);
+  assert.equal(missingResponse.status, 422);
 
   const staleResponse = await learnInvoiceRoute(
     new Request(`http://localhost/api/invoices/${invoice.id}/learn`, {
@@ -387,6 +387,8 @@ test("single booking rejects learning-only invoices before attempts or connectio
   const response = await bookInvoiceRoute(
     new Request(`http://localhost/api/invoices/${invoice.id}/book`, {
       method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expectedRevision: invoice.revision }),
     }),
     { params: { invoiceId: invoice.id } }
   );
@@ -397,6 +399,54 @@ test("single booking rejects learning-only invoices before attempts or connectio
   assert.deepEqual(invoice.bookingAttempts, []);
   assert.equal(invoice.status, "Ready to Book");
   assert.equal(getStore().auditEvents.length, auditCount);
+});
+
+test("single booking requires a positive expectedRevision before booking work", async () => {
+  const invoice = createUploadedInvoice({
+    fileName: "single-booking-revision.pdf",
+    fileType: "application/pdf",
+    fileSize: 100,
+    storageKey: "storage/tmp-invoices/single-booking-revision.pdf",
+  });
+  invoice.status = "Ready to Book";
+  const before = structuredClone(invoice);
+
+  const response = await bookInvoiceRoute(
+    new Request(`http://localhost/api/invoices/${invoice.id}/book`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expectedRevision: 0 }),
+    }),
+    { params: { invoiceId: invoice.id } }
+  );
+  const payload = (await response.json()) as { code?: string };
+
+  assert.equal(response.status, 422);
+  assert.equal(payload.code, "invalid_expected_revision");
+  assert.deepEqual(invoice, before);
+});
+
+test("single booking rejects malformed JSON as invalid request data", async () => {
+  const invoice = createUploadedInvoice({
+    fileName: "single-booking-malformed.pdf",
+    fileType: "application/pdf",
+    fileSize: 100,
+    storageKey: "storage/tmp-invoices/single-booking-malformed.pdf",
+  });
+  invoice.status = "Ready to Book";
+  const before = structuredClone(invoice);
+
+  const response = await bookInvoiceRoute(
+    new Request(`http://localhost/api/invoices/${invoice.id}/book`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{",
+    }),
+    { params: { invoiceId: invoice.id } }
+  );
+
+  assert.equal(response.status, 422);
+  assert.deepEqual(invoice, before);
 });
 
 test("bulk booking excludes learning-only ready invoices before attempts or connection work", async () => {
@@ -410,11 +460,22 @@ test("bulk booking excludes learning-only ready invoices before attempts or conn
   invoice.processingPurpose = "learning_only";
   const auditCount = getStore().auditEvents.length;
 
-  const response = await bookReadyRoute(new Request("http://localhost/api/invoices/book-ready", { method: "POST" }));
-  const payload = (await response.json()) as { results?: unknown[] };
+  const response = await bookReadyRoute(
+    new Request("http://localhost/api/invoices/book-ready", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        items: [{ invoiceId: invoice.id, expectedRevision: invoice.revision }],
+      }),
+    })
+  );
+  const payload = (await response.json()) as {
+    results?: Array<{ invoiceId: string; status: string }>;
+  };
 
   assert.equal(response.status, 200);
-  assert.deepEqual(payload.results, []);
+  assert.equal(payload.results?.[0]?.invoiceId, invoice.id);
+  assert.equal(payload.results?.[0]?.status, "excluded");
   assert.deepEqual(invoice.bookingAttempts, []);
   assert.equal(invoice.status, "Ready to Book");
   assert.equal(getStore().auditEvents.length, auditCount);

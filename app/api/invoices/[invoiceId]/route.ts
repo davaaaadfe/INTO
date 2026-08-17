@@ -3,7 +3,10 @@ import type {
   PurchaseJournalLine,
 } from "../../../../lib/domain/invoice";
 import {
+  assertExpectedInvoiceRevision,
   getInvoice,
+  InvoiceRevisionConflictError,
+  InvoiceRevisionValidationError,
   listInvoices,
   requirePermission,
   saveInvoiceReview,
@@ -53,15 +56,18 @@ export async function PATCH(request: Request, context: RouteContext) {
       const payload = (await request.json()) as
         | Partial<ExtractedInvoiceData>
         | {
+            expectedRevision?: unknown;
             extractedData?: Partial<ExtractedInvoiceData>;
             bookingLines?: PurchaseJournalLine[];
           };
       const wrappedPayload =
         "extractedData" in payload || "bookingLines" in payload;
       const envelope = payload as {
+        expectedRevision?: unknown;
         extractedData?: Partial<ExtractedInvoiceData>;
         bookingLines?: PurchaseJournalLine[];
       };
+      assertExpectedInvoiceRevision(invoice, envelope.expectedRevision);
       const extractedPatch: Partial<ExtractedInvoiceData> = wrappedPayload
         ? envelope.extractedData ?? {}
         : (payload as Partial<ExtractedInvoiceData>);
@@ -79,7 +85,8 @@ export async function PATCH(request: Request, context: RouteContext) {
       const updatedInvoice = saveInvoiceReview(
         invoiceId,
         nextData,
-        bookingLines
+        bookingLines,
+        { expectedRevision: envelope.expectedRevision }
       );
 
       logger.info("invoice.review_saved", {
@@ -91,6 +98,19 @@ export async function PATCH(request: Request, context: RouteContext) {
       return Response.json({ invoice: updatedInvoice, invoices: listInvoices() });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unexpected review error";
+      if (error instanceof InvoiceRevisionValidationError) {
+        return Response.json({ error: message, code: error.code }, { status: 422 });
+      }
+      if (error instanceof InvoiceRevisionConflictError) {
+        return Response.json(
+          {
+            error: message,
+            code: error.code,
+            currentInvoice: error.currentInvoice,
+          },
+          { status: 409 }
+        );
+      }
       logger.error("invoice.review_save_failed", { message });
       return Response.json(
         { error: message },

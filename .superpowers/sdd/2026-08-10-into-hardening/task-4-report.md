@@ -25,11 +25,13 @@ Status: DONE_WITH_CONCERNS
 - GREEN: focused persistence/service/handler/UI/OAuth/audit contracts now cover each corrected behavior, including pre-scrypt rejection at limiter ceilings and verified callback actor/request/session attribution.
 - RED: second-review tests reproduced unbounded verification keys and aggregate bypass, durable unknown-login growth, OAuth authorization surviving session/user/mode/repository changes, and default legacy logout failing without new origin configuration.
 - GREEN: bounded limiter tests cover per-subject and aggregate ceilings, deterministic hard caps, expiry pruning, and preservation of an active scope at capacity; login tests prove identical known/unknown status and work sequences with zero unknown persistence; OAuth tests cover revoke, expiry, disable, mode cutover, repository identity switch, and pre-exchange rejection; logout tests cover legacy default and trusted server origins.
+- RED: final-review tests reproduced malformed identifiers reaching repository canonicalization, persisted credential locks being ignored after repository restart, and a test-only export leaking from the Next verification route.
+- GREEN: malformed and oversized identifiers are bounded, HMAC-scoped, skip repository lookup, and match unknown-user 401/429 and one-scrypt sequencing; known-user lock expiry survives repository restart while wrong passwords remain generic 401 and only correct locked credentials receive 429; the verification route exports only `POST`, with limiter stats/reset coverage isolated in the limiter module.
 
 ## Verification
 
-- Focused auth/repository/route/UI/OAuth suite: 46 passed, 0 failed.
-- Full `pnpm test`: 354 passed, 0 failed.
+- Focused auth/repository/route/OAuth suite: 49 passed, 0 failed.
+- Full test suite: 357 passed, 0 failed.
 - `pnpm run typecheck`: passed.
 - `pnpm run lint`: passed.
 - `pnpm run build`: passed; Next.js compiled, typechecked, generated all 22 static pages, and finalized route output.

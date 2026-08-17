@@ -72,7 +72,7 @@ async function removeDatabase(databasePath: string) {
   await rm(`${databasePath}-wal`, { force: true });
 }
 
-test("undesirable: a post-CAS learning projection failure leaves the committed snapshot ahead of normalized learning", async () => {
+test("SQLite rolls back snapshot and normalized learning together when projection fails", async () => {
   const databasePath = testDatabasePath();
   const previous = {
     mode: process.env.DATABASE_MODE,
@@ -130,7 +130,11 @@ test("undesirable: a post-CAS learning projection failure leaves the committed s
     await assert.rejects(flushStoreToPersistence(), /post-CAS projection fault/);
 
     const snapshot = await loadSqliteStoreSnapshot(databasePath);
-    assert.equal(snapshot?.learning.supplierExamples[0]?.id, "post-cas-example");
+    assert.deepEqual(snapshot?.learning.supplierExamples, []);
+    assert.equal(
+      snapshot?.auditEvents.some((event) => event.id === "post-cas-example"),
+      false
+    );
     const repository = await configuredLearningRepository();
     assert.equal(
       (await repository?.listProfiles("into-company", "unassigned"))?.length,
@@ -900,6 +904,11 @@ test("persistent requests reuse unchanged normalized learning but refresh artifa
   process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY = "request-hydration-key";
   process.env.LEARNING_V2_ENABLED = "true";
   process.env.SUPPLIER_LEARNING_MODE = "apply";
+  const persistenceRuntime = globalThis as typeof globalThis & {
+    __INTO_STORE_TEST_HOOKS?: {
+      beforeLearningProjection?: () => void | Promise<void>;
+    };
+  };
 
   let restoreRepositoryMethods: (() => void) | undefined;
   try {
@@ -1107,8 +1116,10 @@ test("persistent requests reuse unchanged normalized learning but refresh artifa
     assert.equal(artifactReads > artifactReadsAfterFailedHydration, true);
     assert.equal(artifactExistenceReads, 1);
 
-    requestRepository.saveArtifact = async () => {
-      throw new Error("Forced artifact persistence failure");
+    persistenceRuntime.__INTO_STORE_TEST_HOOKS = {
+      beforeLearningProjection: () => {
+        throw new Error("Forced atomic persistence failure");
+      },
     };
     const rejectedAuditEventId = "rejected-persistence-change";
     const rejectedLearningPatternKey = "rejected-learning-pattern";
@@ -1128,7 +1139,7 @@ test("persistent requests reuse unchanged normalized learning but refresh artifa
     assert.ok(rejected instanceof Response);
     assert.equal(rejected.status, 500);
     assert.equal(artifactExistenceReads, 2);
-    requestRepository.saveArtifact = saveArtifact;
+    delete persistenceRuntime.__INTO_STORE_TEST_HOOKS;
 
     const snapshotAfterRejection =
       await loadSqliteStoreSnapshot(databasePath);
@@ -1292,6 +1303,7 @@ test("persistent requests reuse unchanged normalized learning but refresh artifa
     assert.equal(artifactReads > artifactReadsAfterReenable, true);
     assert.equal(artifactExistenceReads, 3);
   } finally {
+    delete persistenceRuntime.__INTO_STORE_TEST_HOOKS;
     restoreRepositoryMethods?.();
     if (previous.mode === undefined) delete process.env.DATABASE_MODE;
     else process.env.DATABASE_MODE = previous.mode;

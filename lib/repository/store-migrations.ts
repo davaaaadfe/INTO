@@ -1,6 +1,6 @@
 import type { IntoStore } from "./invoice-store";
 
-export const CURRENT_STORE_SCHEMA_VERSION = 2;
+export const CURRENT_STORE_SCHEMA_VERSION = 3;
 
 type VersionedStore = IntoStore & {
   schemaVersion?: number;
@@ -9,6 +9,19 @@ type VersionedStore = IntoStore & {
 };
 
 type MutableRecord = Record<string, unknown>;
+
+function hasLearningMetadata(value: unknown) {
+  if (!value || typeof value !== "object") return false;
+  const metadata = value as MutableRecord;
+  return (
+    typeof metadata.exampleId === "string" &&
+    typeof metadata.supplierAccountId === "string" &&
+    Number.isInteger(metadata.generation) &&
+    typeof metadata.contentHash === "string" &&
+    typeof metadata.learnedAt === "string" &&
+    typeof metadata.learnedByUserId === "string"
+  );
+}
 
 export function migrateStoreSnapshot(snapshot: IntoStore): IntoStore {
   const migrated = structuredClone(snapshot) as VersionedStore;
@@ -19,7 +32,7 @@ export function migrateStoreSnapshot(snapshot: IntoStore): IntoStore {
     );
   }
 
-  const migratingLegacyLearning = sourceVersion < CURRENT_STORE_SCHEMA_VERSION;
+  const migratingLegacyLearning = sourceVersion < 2;
   if (
     migratingLegacyLearning &&
     !migrated.legacyLearningRollback &&
@@ -70,10 +83,35 @@ export function migrateStoreSnapshot(snapshot: IntoStore): IntoStore {
       mutableInvoice.processingPurpose = "learning_only";
       mutableInvoice.learningState = "saved";
       mutableInvoice.exactBookingStatus = "not_booked";
-    } else if (String(mutableInvoice.learningState ?? "") === "none") {
+      delete mutableInvoice.intelligenceApprovedAt;
+      if (!hasLearningMetadata(mutableInvoice.learningMetadata)) {
+        const migrationIssues = Array.isArray(mutableInvoice.migrationIssues)
+          ? mutableInvoice.migrationIssues.filter(
+              (issue) =>
+                typeof issue === "object" &&
+                issue !== null &&
+                (issue as MutableRecord).code === "learning_metadata_unrecoverable"
+            )
+          : [];
+        if (migrationIssues.length === 0) {
+          migrationIssues.push({
+            code: "learning_metadata_unrecoverable",
+            message:
+              "Legacy Learned invoice needs manual review because its learning evidence cannot be reconstructed safely.",
+          });
+        }
+        mutableInvoice.migrationIssues = migrationIssues;
+      }
+    } else {
+      mutableInvoice.processingPurpose = "booking";
       mutableInvoice.learningState = "not_saved";
     }
-    mutableInvoice.revision ??= 1;
+    if (
+      !Number.isInteger(mutableInvoice.revision) ||
+      Number(mutableInvoice.revision) <= 0
+    ) {
+      mutableInvoice.revision = 1;
+    }
   }
 
   migrated.schemaVersion = CURRENT_STORE_SCHEMA_VERSION;

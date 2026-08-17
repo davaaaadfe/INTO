@@ -1,11 +1,14 @@
 import {
   addBookingAttempt,
+  assertExpectedInvoiceRevision,
   deleteInvoiceFileAfterBooking,
   getExactMasterData,
   getInvoice,
   isCachedExactMasterDataStale,
   markInvoiceBooked,
   markInvoiceBookingFailed,
+  InvoiceRevisionConflictError,
+  InvoiceRevisionValidationError,
   recomputeInvoiceState,
   refreshExactConnectionForUser,
   requirePermission,
@@ -41,10 +44,31 @@ export async function POST(request: Request, context: RouteContext) {
       return Response.json({ error: message, invoice }, { status: 403 });
     }
 
+    let expectedRevision: unknown;
+    let payload: { expectedRevision?: unknown };
     try {
+      payload = (await request.json()) as { expectedRevision?: unknown };
+    } catch {
+      return Response.json(
+        { error: "Request body must be valid JSON.", code: "invalid_request" },
+        { status: 422 }
+      );
+    }
+    try {
+      expectedRevision = payload.expectedRevision;
+      assertExpectedInvoiceRevision(invoice, expectedRevision);
       assertInvoiceBookingAllowed(invoice);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Booking not allowed.";
+      if (error instanceof InvoiceRevisionValidationError) {
+        return Response.json({ error: message, code: error.code }, { status: 422 });
+      }
+      if (error instanceof InvoiceRevisionConflictError) {
+        return Response.json(
+          { error: message, code: error.code, currentInvoice: error.currentInvoice },
+          { status: 409 }
+        );
+      }
       return Response.json({ error: message, invoice }, { status: 409 });
     }
 
@@ -55,8 +79,10 @@ export async function POST(request: Request, context: RouteContext) {
         masterData = await syncExactDataNow();
       }
 
-      const invoiceToBook = recomputeInvoiceState(invoice.id) ?? invoice;
+      const invoiceToBook =
+        recomputeInvoiceState(invoice.id, { incrementRevision: false }) ?? invoice;
       const result = await bookInvoiceInExact(connection, invoiceToBook, masterData);
+      assertExpectedInvoiceRevision(getInvoice(invoice.id) ?? invoice, expectedRevision);
 
       addBookingAttempt(invoice.id, {
         status: "success",
@@ -67,7 +93,7 @@ export async function POST(request: Request, context: RouteContext) {
         },
         responsePayload: result,
       });
-      markInvoiceBooked(invoice.id, result.exactBookingId);
+      markInvoiceBooked(invoice.id, result.exactBookingId, expectedRevision);
       const updatedInvoice = await deleteInvoiceFileAfterBooking(invoice.id);
 
       logger.info("invoice.booked", {
@@ -78,6 +104,15 @@ export async function POST(request: Request, context: RouteContext) {
       return Response.json({ invoice: updatedInvoice });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Booking failed.";
+      if (error instanceof InvoiceRevisionValidationError) {
+        return Response.json({ error: message, code: error.code }, { status: 422 });
+      }
+      if (error instanceof InvoiceRevisionConflictError) {
+        return Response.json(
+          { error: message, code: error.code, currentInvoice: error.currentInvoice },
+          { status: 409 }
+        );
+      }
       addBookingAttempt(invoice.id, {
         status: "failed",
         errorMessage: message,
@@ -86,7 +121,11 @@ export async function POST(request: Request, context: RouteContext) {
           purchaseJournal: invoice.purchaseJournal,
         },
       });
-      const updatedInvoice = markInvoiceBookingFailed(invoice.id, message);
+      const updatedInvoice = markInvoiceBookingFailed(
+        invoice.id,
+        message,
+        expectedRevision
+      );
 
       logger.error("invoice.booking_failed", { invoiceId, message });
       return Response.json(

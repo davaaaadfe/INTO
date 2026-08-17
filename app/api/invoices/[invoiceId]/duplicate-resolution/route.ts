@@ -3,7 +3,10 @@ import type {
   DuplicateResolutionDecision,
 } from "../../../../../lib/domain/invoice";
 import {
+  assertExpectedInvoiceRevision,
   getInvoice,
+  InvoiceRevisionConflictError,
+  InvoiceRevisionValidationError,
   listInvoices,
   replaceInvoiceExtractionFromReread,
   requirePermission,
@@ -44,7 +47,9 @@ export async function POST(request: Request, context: RouteContext) {
         decision: DuplicateResolutionDecision;
         message?: string;
         detectionOutcome?: DuplicateDetectionOutcome;
+        expectedRevision?: unknown;
       };
+      assertExpectedInvoiceRevision(invoice, payload.expectedRevision);
       const decision = payload.decision;
       const detectionOutcome =
         payload.detectionOutcome ?? invoice.duplicateDetection?.outcome ?? "processed_unbooked";
@@ -75,7 +80,8 @@ export async function POST(request: Request, context: RouteContext) {
         const updatedInvoice = replaceInvoiceExtractionFromReread(
           invoice.id,
           extractedData,
-          "re_read"
+          "re_read",
+          payload.expectedRevision
         );
         await resolveDuplicateDecision({
           invoiceId: invoice.id,
@@ -86,6 +92,8 @@ export async function POST(request: Request, context: RouteContext) {
           decision,
           message,
           exactBookingId: invoice.exactBookingId,
+          expectedRevision: updatedInvoice?.revision,
+          skipInvoiceRevision: true,
         });
 
         logger.info("invoice.duplicate_reread", {
@@ -105,6 +113,7 @@ export async function POST(request: Request, context: RouteContext) {
         decision,
         message,
         exactBookingId: invoice.exactBookingId,
+        expectedRevision: payload.expectedRevision,
       });
 
       logger.info("invoice.duplicate_decision", {
@@ -121,6 +130,15 @@ export async function POST(request: Request, context: RouteContext) {
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Duplicate decision failed.";
+      if (error instanceof InvoiceRevisionValidationError) {
+        return Response.json({ error: message, code: error.code }, { status: 422 });
+      }
+      if (error instanceof InvoiceRevisionConflictError) {
+        return Response.json(
+          { error: message, code: error.code, currentInvoice: error.currentInvoice },
+          { status: 409 }
+        );
+      }
       logger.error("invoice.duplicate_decision_failed", { invoiceId, message });
       return Response.json({ error: message }, { status: 500 });
     }

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { PATCH as patchInvoiceRoute } from "../app/api/invoices/[invoiceId]/route";
 import {
@@ -17,11 +18,11 @@ function createRouteInvoice(name: string) {
   });
 }
 
-test("undesirable: a stale ordinary invoice PATCH is accepted without an expectedRevision guard", async () => {
+test("PATCH rejects a stale ordinary invoice revision without changing reviewed values", async () => {
   const invoice = createRouteInvoice("stale-ordinary-patch.pdf");
   const staleRevision = invoice.revision!;
   const current = saveInvoiceReview(invoice.id, invoice.extractedData, [])!;
-  const currentRevision = current.revision!;
+  const auditsBefore = structuredClone(getInvoice(invoice.id));
 
   const response = await patchInvoiceRoute(
     new Request(`http://localhost/api/invoices/${invoice.id}`, {
@@ -35,12 +36,47 @@ test("undesirable: a stale ordinary invoice PATCH is accepted without an expecte
     { params: { invoiceId: invoice.id } }
   );
   const payload = (await response.json()) as {
-    invoice?: ReturnType<typeof getInvoice>;
+    code?: string;
+    currentInvoice?: ReturnType<typeof getInvoice>;
   };
 
-  assert.equal(response.status, 200);
-  assert.equal(payload.invoice?.revision, currentRevision + 1);
-  assert.equal(payload.invoice?.extractedData.expenseDescription, "Stale route edit");
+  assert.equal(response.status, 409);
+  assert.equal(payload.code, "invoice_revision_conflict");
+  assert.equal(payload.currentInvoice?.revision, current.revision);
+  assert.deepEqual(getInvoice(invoice.id), auditsBefore);
+});
+
+test("PATCH requires a positive integer expectedRevision", async () => {
+  for (const expectedRevision of [undefined, 0, -1, 1.5, "1"] as const) {
+    const invoice = createRouteInvoice(`invalid-revision-${String(expectedRevision)}.pdf`);
+    const before = structuredClone(invoice);
+    const response = await patchInvoiceRoute(
+      new Request(`http://localhost/api/invoices/${invoice.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          expectedRevision,
+          extractedData: { expenseDescription: "Must not save" },
+        }),
+      }),
+      { params: { invoiceId: invoice.id } }
+    );
+
+    assert.equal(response.status, 422, String(expectedRevision));
+    assert.deepEqual(getInvoice(invoice.id), before, String(expectedRevision));
+  }
+});
+
+test("booking recompute cannot consume the command revision before Exact returns", () => {
+  const source = readFileSync(
+    new URL("../app/api/invoices/[invoiceId]/book/route.ts", import.meta.url),
+    "utf8"
+  );
+
+  assert.match(
+    source,
+    /recomputeInvoiceState\(invoice\.id,\s*\{\s*incrementRevision:\s*false\s*\}\)/
+  );
 });
 
 test("direct invoice handler invocation requires a valid server-side session", async () => {

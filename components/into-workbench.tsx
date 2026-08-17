@@ -1909,6 +1909,20 @@ export function IntoWorkbench() {
     }, 1800);
   }
 
+  function applyInvoiceRevisionConflict(currentInvoice?: UploadedInvoice) {
+    if (currentInvoice) {
+      setState((current) => ({
+        ...current,
+        invoices: current.invoices.map((invoice) =>
+          invoice.id === currentInvoice.id ? currentInvoice : invoice
+        ),
+      }));
+    }
+    setMessage(
+      "This invoice changed in another session. Review the latest version before retrying."
+    );
+  }
+
   function buttonFeedbackFor(key: string, loadingKey?: string) {
     return busy === (loadingKey ?? key) ? undefined : buttonFeedback[key];
   }
@@ -2707,6 +2721,7 @@ export function IntoWorkbench() {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          expectedRevision: selectedInvoice.revision,
           extractedData: draft,
           bookingLines: bookingLinePayloads,
         }),
@@ -2714,6 +2729,9 @@ export function IntoWorkbench() {
       const data = await readApiJson(response);
 
       if (!response.ok) {
+        if (response.status === 409) {
+          applyInvoiceRevisionConflict(data.currentInvoice);
+        }
         throw new Error(data.error ?? "Save failed.");
       }
 
@@ -2753,17 +2771,13 @@ export function IntoWorkbench() {
       });
       const data = (await readApiJson(response)) as {
         invoice?: UploadedInvoice;
+        currentInvoice?: UploadedInvoice;
         message?: string;
         error?: string;
       };
       if (!response.ok || !data.invoice) {
-        if (response.status === 409 && data.invoice) {
-          setState((current) => ({
-            ...current,
-            invoices: current.invoices.map((invoice) =>
-              invoice.id === data.invoice!.id ? data.invoice! : invoice
-            ),
-          }));
+        if (response.status === 409) {
+          applyInvoiceRevisionConflict(data.currentInvoice);
         }
         throw new Error(data.error ?? "Learning could not be saved.");
       }
@@ -2870,9 +2884,9 @@ export function IntoWorkbench() {
           body: JSON.stringify({
             action,
             accountId,
+            expectedRevision: selectedInvoice.revision,
             ...(action === "selectSupplier" && hasUnsavedChanges && draft
               ? {
-                  expectedRevision: selectedInvoice.revision,
                   extractedData: draft,
                   bookingLines: bookingLinePayloads,
                 }
@@ -2882,18 +2896,14 @@ export function IntoWorkbench() {
       );
       const data = (await readApiJson(response)) as {
         invoice?: UploadedInvoice;
+        currentInvoice?: UploadedInvoice;
         invoices?: UploadedInvoice[];
         error?: string;
       };
 
       if (!response.ok) {
-        if (response.status === 409 && data.invoice) {
-          setState((current) => ({
-            ...current,
-            invoices: current.invoices.map((invoice) =>
-              invoice.id === data.invoice!.id ? data.invoice! : invoice
-            ),
-          }));
+        if (response.status === 409) {
+          applyInvoiceRevisionConflict(data.currentInvoice);
         }
         throw new Error(data.error ?? "Could not save purchase journal decision.");
       }
@@ -2925,6 +2935,13 @@ export function IntoWorkbench() {
     decision: "re_read" | "keep_existing" | "cancel_upload"
   ) {
     const busyKey = `duplicate-${decision}-${prompt.duplicateInvoiceId}`;
+    const invoice = state.invoices.find(
+      (item) => item.id === prompt.duplicateInvoiceId
+    );
+    if (!invoice) {
+      setMessage("The duplicate invoice is no longer available. Refresh and review the queue.");
+      return;
+    }
     setBusy(busyKey);
 
     try {
@@ -2935,6 +2952,7 @@ export function IntoWorkbench() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             decision,
+            expectedRevision: invoice.revision,
             detectionOutcome: prompt.detection.outcome,
             message: prompt.reason,
           }),
@@ -2943,6 +2961,9 @@ export function IntoWorkbench() {
       const data = await readApiJson(response);
 
       if (!response.ok) {
+        if (response.status === 409) {
+          applyInvoiceRevisionConflict(data.currentInvoice);
+        }
         throw new Error(data.error ?? "Duplicate decision failed.");
       }
 
@@ -2993,6 +3014,7 @@ export function IntoWorkbench() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             decision,
+            expectedRevision: selectedInvoice.revision,
             detectionOutcome: selectedInvoice.duplicateDetection.outcome,
             message: selectedInvoice.duplicateDetection.message,
           }),
@@ -3001,6 +3023,9 @@ export function IntoWorkbench() {
       const data = await readApiJson(response);
 
       if (!response.ok) {
+        if (response.status === 409) {
+          applyInvoiceRevisionConflict(data.currentInvoice);
+        }
         throw new Error(data.error ?? "Duplicate decision failed.");
       }
 
@@ -3042,6 +3067,7 @@ export function IntoWorkbench() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             decision: "re_read",
+            expectedRevision: selectedInvoice.revision,
             detectionOutcome:
               selectedInvoice.duplicateDetection?.outcome ?? "processed_unbooked",
             message: "User requested a fresh read from the original invoice.",
@@ -3051,6 +3077,9 @@ export function IntoWorkbench() {
       const data = await readApiJson(response);
 
       if (!response.ok) {
+        if (response.status === 409) {
+          applyInvoiceRevisionConflict(data.currentInvoice);
+        }
         throw new Error(data.error ?? "Re-read failed.");
       }
 
@@ -3084,6 +3113,7 @@ export function IntoWorkbench() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             action: "needs_review",
+            expectedRevision: selectedInvoice.revision,
             reason: "Marked as needs review by user.",
           }),
         }
@@ -3091,6 +3121,9 @@ export function IntoWorkbench() {
       const data = await readApiJson(response);
 
       if (!response.ok) {
+        if (response.status === 409) {
+          applyInvoiceRevisionConflict(data.currentInvoice);
+        }
         throw new Error(data.error ?? "Could not mark invoice for review.");
       }
 
@@ -3115,10 +3148,17 @@ export function IntoWorkbench() {
 
   async function bookInvoice(invoiceId: string) {
     const key = `book-${invoiceId}`;
+    const invoice = state.invoices.find((item) => item.id === invoiceId);
+    if (!invoice) {
+      setMessage("The invoice is no longer available. Refresh and review the queue.");
+      return;
+    }
     setBusy(key);
     try {
       const response = await fetch(`/api/invoices/${invoiceId}/book`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expectedRevision: invoice.revision }),
       });
       const data = await readApiJson(response);
 
@@ -3130,6 +3170,9 @@ export function IntoWorkbench() {
       }));
 
       if (!response.ok) {
+        if (response.status === 409) {
+          applyInvoiceRevisionConflict(data.currentInvoice);
+        }
         throw new Error(data.error ?? "Booking failed.");
       }
 
@@ -3158,7 +3201,18 @@ export function IntoWorkbench() {
 
     setBusy("book-all");
     try {
-      const response = await fetch("/api/invoices/book-ready", { method: "POST" });
+      const response = await fetch("/api/invoices/book-ready", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: state.invoices
+            .filter((invoice) => invoice.status === "Ready to Book")
+            .map((invoice) => ({
+              invoiceId: invoice.id,
+              expectedRevision: invoice.revision,
+            })),
+        }),
+      });
       const data = await readApiJson(response);
 
       if (!response.ok) {
@@ -3166,6 +3220,28 @@ export function IntoWorkbench() {
       }
 
       setState((current) => ({ ...current, invoices: data.invoices }));
+      const staleResults =
+        data.results?.filter(
+          (result: { status?: string }) => result.status === "stale"
+        ) ?? [];
+      const failedResults =
+        data.results?.filter(
+          (result: { status?: string }) => result.status === "failed"
+        ) ?? [];
+      if (staleResults.length > 0) {
+        setMessage(
+          `${staleResults.length} invoice${staleResults.length === 1 ? "" : "s"} changed in another session. Review the latest versions before retrying.`
+        );
+        flashButton("book-all", "error");
+        return;
+      }
+      if (failedResults.length > 0) {
+        setMessage(
+          `${failedResults.length} invoice${failedResults.length === 1 ? "" : "s"} could not be booked. Review the latest results before retrying.`
+        );
+        flashButton("book-all", "error");
+        return;
+      }
       setMessage("Ready invoices were sent to mock Exact Online.");
       flashButton("book-all", "success");
     } catch (error) {

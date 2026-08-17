@@ -159,8 +159,23 @@ test("supplier selection preserves live edits and refreshes revision conflicts",
     /action === "selectSupplier" && hasUnsavedChanges && draft/
   );
   assert.match(activeReviewSource, /expectedRevision:\s*selectedInvoice\.revision/);
-  assert.match(activeReviewSource, /response\.status === 409 && data\.invoice/);
-  assert.match(activeReviewSource, /response\.status === 409[\s\S]*refreshSupplierLearning/);
+  assert.match(
+    activeReviewSource,
+    /response\.status === 409[\s\S]*applyInvoiceRevisionConflict\(data\.currentInvoice\)/
+  );
+  assert.match(activeReviewSource, /Review the latest version before retrying\./);
+});
+
+test("bulk booking reports stale and failed items instead of claiming blanket success", () => {
+  assert.match(
+    activeReviewSource,
+    /data\.results\?\.filter\([\s\S]{0,200}result\.status === "stale"/
+  );
+  assert.match(
+    activeReviewSource,
+    /data\.results\?\.filter\([\s\S]{0,200}result\.status === "failed"/
+  );
+  assert.match(activeReviewSource, /changed in another session/);
 });
 
 test("hides every supplier-learning surface behind the public enabled state", () => {

@@ -153,6 +153,92 @@ export const POSTGRES_LEARNING_MIGRATIONS = [
     ON supplier_learning_events (
       company_id, division_code, supplier_account_id, generation, created_at
     )`,
+  `ALTER TABLE supplier_learning_profiles
+    ADD COLUMN IF NOT EXISTS evidence_revision integer NOT NULL DEFAULT 0`,
+  `ALTER TABLE supplier_learning_profiles
+    ADD COLUMN IF NOT EXISTS derived_evidence_revision integer NOT NULL DEFAULT 0`,
+  `ALTER TABLE supplier_learning_examples
+    ADD COLUMN IF NOT EXISTS observation_state_json jsonb NOT NULL DEFAULT '{}'::jsonb`,
+  `ALTER TABLE supplier_learning_examples
+    ADD COLUMN IF NOT EXISTS request_fingerprint text NOT NULL DEFAULT ''`,
+  `ALTER TABLE supplier_learning_examples
+    ADD COLUMN IF NOT EXISTS deactivated_at timestamptz`,
+  `DO $$
+    DECLARE legacy_constraint text;
+    BEGIN
+      SELECT constraint_name INTO legacy_constraint
+      FROM information_schema.table_constraints
+      WHERE table_schema = current_schema()
+        AND table_name = 'supplier_learning_examples'
+        AND constraint_type = 'UNIQUE'
+      LIMIT 1;
+      IF legacy_constraint IS NOT NULL THEN
+        EXECUTE format(
+          'ALTER TABLE supplier_learning_examples DROP CONSTRAINT %I',
+          legacy_constraint
+        );
+      END IF;
+    END $$`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS supplier_learning_examples_active_hash_uidx
+    ON supplier_learning_examples (
+      company_id, division_code, supplier_account_id, generation, content_hash
+    ) WHERE active = true`,
+  `ALTER TABLE supplier_learning_patterns
+    ADD COLUMN IF NOT EXISTS evidence_revision integer NOT NULL DEFAULT 0`,
+  `ALTER TABLE supplier_learning_events
+    ADD COLUMN IF NOT EXISTS payload_fingerprint text NOT NULL DEFAULT ''`,
+  `CREATE TABLE IF NOT EXISTS supplier_learning_corrections (
+    id text PRIMARY KEY,
+    company_id text NOT NULL,
+    division_code text NOT NULL,
+    supplier_account_id text NOT NULL,
+    generation integer NOT NULL,
+    invoice_id text NOT NULL,
+    invoice_revision integer NOT NULL,
+    artifact_id text REFERENCES document_analysis_artifacts(id),
+    format_cluster text,
+    field text NOT NULL,
+    slot_key text NOT NULL DEFAULT '',
+    before_ciphertext text NOT NULL,
+    after_ciphertext text NOT NULL,
+    evidence_ciphertext text NOT NULL,
+    after_value_fingerprint text NOT NULL,
+    trust_state text NOT NULL,
+    reason text NOT NULL,
+    actor_id text NOT NULL,
+    session_correlation_id text NOT NULL,
+    request_id text NOT NULL,
+    active boolean NOT NULL DEFAULT true,
+    created_at timestamptz NOT NULL,
+    promoted_at timestamptz,
+    deactivated_at timestamptz,
+    UNIQUE (
+      company_id, division_code, supplier_account_id, invoice_id,
+      invoice_revision, field, slot_key, after_value_fingerprint
+    )
+  )`,
+  `CREATE INDEX IF NOT EXISTS supplier_learning_corrections_scope_idx
+    ON supplier_learning_corrections (
+      company_id, division_code, supplier_account_id, generation, active
+    )`,
+  `CREATE TABLE IF NOT EXISTS supplier_learning_data_migrations (
+    migration_name text NOT NULL,
+    version integer NOT NULL,
+    source_snapshot_revision bigint,
+    source_snapshot_hash text,
+    status text NOT NULL,
+    row_counts_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+    checksum text NOT NULL,
+    error_code text,
+    started_at timestamptz NOT NULL,
+    completed_at timestamptz,
+    PRIMARY KEY (migration_name, version)
+  )`,
+] as const;
+
+export const POSTGRES_LEARNING_MIGRATION_STEPS = [
+  { version: 1, statements: POSTGRES_LEARNING_MIGRATIONS.slice(1, 10) },
+  { version: 2, statements: POSTGRES_LEARNING_MIGRATIONS.slice(10) },
 ] as const;
 
 type PostgresRows = Array<Record<string, unknown>>;
@@ -275,14 +361,15 @@ export class PostgresLearningRepository {
         `Learning database schema ${current} is newer than supported schema ${LEARNING_REPOSITORY_SCHEMA_VERSION}.`
       );
     }
-    if (current < LEARNING_REPOSITORY_SCHEMA_VERSION) {
+    for (const migration of POSTGRES_LEARNING_MIGRATION_STEPS) {
+      if (migration.version <= current) continue;
       await this.transaction([
-        ...POSTGRES_LEARNING_MIGRATIONS.slice(1).map((query) => ({ query })),
+        ...migration.statements.map((query) => ({ query })),
         {
           query: `INSERT INTO supplier_learning_schema_migrations (version, applied_at)
                   VALUES ($1, $2) ON CONFLICT(version) DO NOTHING`,
           parameters: [
-            LEARNING_REPOSITORY_SCHEMA_VERSION,
+            migration.version,
             new Date().toISOString(),
           ],
         },

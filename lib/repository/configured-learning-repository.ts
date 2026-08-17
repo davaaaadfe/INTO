@@ -2,6 +2,7 @@ import {
   SqliteLearningRepository,
 } from "./learning-repository";
 import { PostgresLearningRepository } from "./postgres-learning-repository";
+import type { LearningRepository } from "./learning-repository-contract";
 import {
   databaseMode,
   databasePersistenceIdentity,
@@ -12,9 +13,7 @@ import {
   supplierLearningMode,
 } from "../services/learning-feature-flags";
 
-export type ConfiguredLearningRepository =
-  | SqliteLearningRepository
-  | PostgresLearningRepository;
+export type ConfiguredLearningRepository = LearningRepository;
 
 type LearningRepositoryLoading = {
   identity: string;
@@ -30,9 +29,7 @@ const runtime = globalThis as typeof globalThis & {
 
 function closeCurrentRepository() {
   const current = runtime.__INTO_LEARNING_REPOSITORY;
-  if (current instanceof SqliteLearningRepository) {
-    current.close();
-  }
+  current?.close?.();
   delete runtime.__INTO_LEARNING_REPOSITORY;
   delete runtime.__INTO_LEARNING_REPOSITORY_IDENTITY;
 }

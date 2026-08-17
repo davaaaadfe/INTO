@@ -887,7 +887,7 @@ test("legacy snapshots hydrate safe learning and invoice defaults", () => {
     storageKey: "storage/tmp-invoices/legacy-learned.pdf",
   });
   invoice.status = "Learned";
-  delete invoice.processingPurpose;
+  delete (invoice as Partial<typeof invoice>).processingPurpose;
   delete (invoice as Partial<typeof invoice>).learningState;
   delete (invoice as Partial<typeof invoice>).revision;
   const legacyLearning = getStore().learning as Partial<BookingLearningStore>;

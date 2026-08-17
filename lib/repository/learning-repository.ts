@@ -12,7 +12,7 @@ import type {
   ExtractedInvoiceData,
 } from "../domain/invoice";
 
-export const LEARNING_REPOSITORY_SCHEMA_VERSION = 1;
+export const LEARNING_REPOSITORY_SCHEMA_VERSION = 2;
 
 export class LearningGenerationConflictError extends Error {}
 
@@ -328,6 +328,126 @@ const migration = `
     );
 `;
 
+const migrationV2 = `
+  ALTER TABLE supplier_learning_profiles
+    ADD COLUMN evidence_revision INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE supplier_learning_profiles
+    ADD COLUMN derived_evidence_revision INTEGER NOT NULL DEFAULT 0;
+  DROP INDEX IF EXISTS supplier_learning_examples_active_idx;
+  ALTER TABLE supplier_learning_examples RENAME TO supplier_learning_examples_v1;
+  CREATE TABLE supplier_learning_examples (
+    id TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL,
+    division_code TEXT NOT NULL,
+    supplier_account_id TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    invoice_id TEXT NOT NULL,
+    artifact_id TEXT REFERENCES document_analysis_artifacts(id),
+    content_hash TEXT NOT NULL,
+    original_filename TEXT NOT NULL,
+    original_prediction_json TEXT NOT NULL,
+    final_fields_json TEXT NOT NULL,
+    booking_lines_json TEXT NOT NULL,
+    observation_state_json TEXT NOT NULL DEFAULT '{}',
+    fingerprint TEXT NOT NULL,
+    fingerprint_version TEXT NOT NULL,
+    validation_result_json TEXT NOT NULL,
+    processing_purpose TEXT NOT NULL,
+    source TEXT NOT NULL,
+    trust_state TEXT NOT NULL,
+    trigger TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    session_correlation_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    request_fingerprint TEXT NOT NULL DEFAULT '',
+    active INTEGER NOT NULL DEFAULT 1,
+    superseded_by_id TEXT,
+    deactivated_at TEXT,
+    created_at TEXT NOT NULL
+  );
+  INSERT INTO supplier_learning_examples (
+    id, company_id, division_code, supplier_account_id, generation,
+    invoice_id, artifact_id, content_hash, original_filename,
+    original_prediction_json, final_fields_json, booking_lines_json,
+    fingerprint, fingerprint_version, validation_result_json,
+    processing_purpose, source, trust_state, trigger, actor_id,
+    session_correlation_id, request_id, active, superseded_by_id, created_at
+  )
+  SELECT
+    id, company_id, division_code, supplier_account_id, generation,
+    invoice_id, artifact_id, content_hash, original_filename,
+    original_prediction_json, final_fields_json, booking_lines_json,
+    fingerprint, fingerprint_version, validation_result_json,
+    processing_purpose, source, trust_state, trigger, actor_id,
+    session_correlation_id, request_id, active, superseded_by_id, created_at
+  FROM supplier_learning_examples_v1;
+  DROP TABLE supplier_learning_examples_v1;
+  CREATE INDEX supplier_learning_examples_active_idx
+    ON supplier_learning_examples (
+      company_id, division_code, supplier_account_id, generation, active
+    );
+  CREATE UNIQUE INDEX supplier_learning_examples_active_hash_uidx
+    ON supplier_learning_examples (
+      company_id, division_code, supplier_account_id, generation, content_hash
+    ) WHERE active = 1;
+  ALTER TABLE supplier_learning_patterns
+    ADD COLUMN evidence_revision INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE supplier_learning_events
+    ADD COLUMN payload_fingerprint TEXT NOT NULL DEFAULT '';
+  CREATE TABLE IF NOT EXISTS supplier_learning_corrections (
+    id TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL,
+    division_code TEXT NOT NULL,
+    supplier_account_id TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    invoice_id TEXT NOT NULL,
+    invoice_revision INTEGER NOT NULL,
+    artifact_id TEXT REFERENCES document_analysis_artifacts(id),
+    format_cluster TEXT,
+    field TEXT NOT NULL,
+    slot_key TEXT NOT NULL DEFAULT '',
+    before_ciphertext TEXT NOT NULL,
+    after_ciphertext TEXT NOT NULL,
+    evidence_ciphertext TEXT NOT NULL,
+    after_value_fingerprint TEXT NOT NULL,
+    trust_state TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    session_correlation_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    promoted_at TEXT,
+    deactivated_at TEXT,
+    UNIQUE (
+      company_id, division_code, supplier_account_id, invoice_id,
+      invoice_revision, field, slot_key, after_value_fingerprint
+    )
+  );
+  CREATE INDEX IF NOT EXISTS supplier_learning_corrections_scope_idx
+    ON supplier_learning_corrections (
+      company_id, division_code, supplier_account_id, generation, active
+    );
+  CREATE TABLE IF NOT EXISTS supplier_learning_data_migrations (
+    migration_name TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    source_snapshot_revision INTEGER,
+    source_snapshot_hash TEXT,
+    status TEXT NOT NULL,
+    row_counts_json TEXT NOT NULL DEFAULT '{}',
+    checksum TEXT NOT NULL,
+    error_code TEXT,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    PRIMARY KEY (migration_name, version)
+  );
+`;
+
+export const SQLITE_LEARNING_MIGRATIONS = [
+  { version: 1, sql: migration },
+  { version: 2, sql: migrationV2 },
+] as const;
+
 function profileFromRow(row: ProfileRow): LearningProfileRecord {
   return {
     companyId: row.company_id,
@@ -380,12 +500,37 @@ function exampleFromRow(row: ExampleRow): LearningExampleRecord {
 
 export class SqliteLearningRepository {
   private readonly database: DatabaseSync;
+  private readonly ownsDatabase: boolean;
 
   constructor(databasePath: string) {
     const resolvedPath = resolve(databasePath);
     mkdirSync(dirname(resolvedPath), { recursive: true });
     this.database = new DatabaseSync(resolvedPath);
+    this.ownsDatabase = true;
     this.database.exec("PRAGMA journal_mode = WAL;");
+  }
+
+  static fromDatabase(database: DatabaseSync) {
+    const repository = Object.create(
+      SqliteLearningRepository.prototype
+    ) as SqliteLearningRepository;
+    Object.assign(repository, { database, ownsDatabase: false });
+    return repository;
+  }
+
+  private async inTransaction<T>(operation: () => T | Promise<T>) {
+    const ownsTransaction = !this.database.isTransaction;
+    if (ownsTransaction) this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      const result = await operation();
+      if (ownsTransaction) this.database.exec("COMMIT;");
+      return result;
+    } catch (error) {
+      if (ownsTransaction && this.database.isTransaction) {
+        this.database.exec("ROLLBACK;");
+      }
+      throw error;
+    }
   }
 
   async migrate() {
@@ -404,18 +549,21 @@ export class SqliteLearningRepository {
       return;
     }
 
-    this.database.exec("BEGIN IMMEDIATE;");
-    try {
-      this.database.exec(migration);
-      this.database
-        .prepare(
-          "INSERT OR IGNORE INTO supplier_learning_schema_migrations (version, applied_at) VALUES (?, ?)"
-        )
-        .run(LEARNING_REPOSITORY_SCHEMA_VERSION, new Date().toISOString());
-      this.database.exec("COMMIT;");
-    } catch (error) {
-      this.database.exec("ROLLBACK;");
-      throw error;
+    for (const migrationStep of SQLITE_LEARNING_MIGRATIONS) {
+      if (migrationStep.version <= (current.version ?? 0)) continue;
+      this.database.exec("BEGIN IMMEDIATE;");
+      try {
+        this.database.exec(migrationStep.sql);
+        this.database
+          .prepare(
+            "INSERT OR IGNORE INTO supplier_learning_schema_migrations (version, applied_at) VALUES (?, ?)"
+          )
+          .run(migrationStep.version, new Date().toISOString());
+        this.database.exec("COMMIT;");
+      } catch (error) {
+        this.database.exec("ROLLBACK;");
+        throw error;
+      }
     }
   }
 
@@ -433,6 +581,8 @@ export class SqliteLearningRepository {
          WHERE type = 'table' AND name IN (
            'document_analysis_artifacts',
            'supplier_identity_aliases',
+           'supplier_learning_corrections',
+           'supplier_learning_data_migrations',
            'supplier_learning_events',
            'supplier_learning_examples',
            'supplier_learning_patterns',
@@ -542,8 +692,7 @@ export class SqliteLearningRepository {
       updatedAt: string;
     }
   ) {
-    this.database.exec("BEGIN IMMEDIATE;");
-    try {
+    await this.inTransaction(() => {
       this.requireCurrentGeneration(input);
       this.database
         .prepare(
@@ -562,11 +711,7 @@ export class SqliteLearningRepository {
           input.supplierAccountId,
           input.generation
         );
-      this.database.exec("COMMIT;");
-    } catch (error) {
-      this.database.exec("ROLLBACK;");
-      throw error;
-    }
+    });
   }
 
   private requireCurrentGeneration(input: LearningScope & { generation: number }) {
@@ -749,8 +894,7 @@ export class SqliteLearningRepository {
   }
 
   async pruneExpiredArtifacts(currentTime: string) {
-    this.database.exec("BEGIN IMMEDIATE;");
-    try {
+    return this.inTransaction(() => {
       this.database
         .prepare(
           `UPDATE supplier_learning_examples SET artifact_id = NULL
@@ -766,17 +910,12 @@ export class SqliteLearningRepository {
            WHERE retention_until IS NOT NULL AND retention_until <= ?`
         )
         .run(currentTime);
-      this.database.exec("COMMIT;");
       return Number(result.changes);
-    } catch (error) {
-      this.database.exec("ROLLBACK;");
-      throw error;
-    }
+    });
   }
 
   async saveExample(input: LearningExampleInput) {
-    this.database.exec("BEGIN IMMEDIATE;");
-    try {
+    return this.inTransaction(() => {
       this.requireCurrentGeneration(input);
       const existing = this.database
         .prepare(
@@ -792,7 +931,6 @@ export class SqliteLearningRepository {
           input.contentHash
         ) as ExampleRow | undefined;
       if (existing) {
-        this.database.exec("COMMIT;");
         return { example: exampleFromRow(existing), created: false };
       }
 
@@ -864,12 +1002,8 @@ export class SqliteLearningRepository {
       const inserted = this.database
         .prepare("SELECT * FROM supplier_learning_examples WHERE id = ?")
         .get(input.id) as ExampleRow;
-      this.database.exec("COMMIT;");
       return { example: exampleFromRow(inserted), created: true };
-    } catch (error) {
-      this.database.exec("ROLLBACK;");
-      throw error;
-    }
+    });
   }
 
   async listExamples(scope: LearningScope, includeInactive = false) {
@@ -898,8 +1032,7 @@ export class SqliteLearningRepository {
   }
 
   async saveAlias(input: LearningAliasInput) {
-    this.database.exec("BEGIN IMMEDIATE;");
-    try {
+    await this.inTransaction(() => {
       this.requireCurrentGeneration(input);
       this.database
         .prepare(
@@ -923,11 +1056,7 @@ export class SqliteLearningRepository {
           input.createdAt,
           input.createdAt
         );
-      this.database.exec("COMMIT;");
-    } catch (error) {
-      this.database.exec("ROLLBACK;");
-      throw error;
-    }
+    });
   }
 
   async findAliases(
@@ -953,8 +1082,7 @@ export class SqliteLearningRepository {
   }
 
   async savePattern(input: LearningPatternInput) {
-    this.database.exec("BEGIN IMMEDIATE;");
-    try {
+    await this.inTransaction(() => {
       this.requireCurrentGeneration(input);
       this.database
         .prepare(
@@ -1014,11 +1142,7 @@ export class SqliteLearningRepository {
         input.createdAt,
           input.createdAt
         );
-      this.database.exec("COMMIT;");
-    } catch (error) {
-      this.database.exec("ROLLBACK;");
-      throw error;
-    }
+    });
   }
 
   async listPatterns(scope: LearningScope, includeInactive = false) {
@@ -1122,8 +1246,7 @@ export class SqliteLearningRepository {
       createdAt: string;
     }
   ) {
-    this.database.exec("BEGIN IMMEDIATE;");
-    try {
+    return this.inTransaction(() => {
       this.requireCurrentGeneration({
         ...input,
         generation: input.expectedGeneration,
@@ -1203,18 +1326,14 @@ export class SqliteLearningRepository {
           input.divisionCode,
           input.supplierAccountId
         ) as ProfileRow | undefined;
-      this.database.exec("COMMIT;");
       if (!resetRow) {
         throw new Error("Supplier learning profile disappeared during reset.");
       }
       return profileFromRow(resetRow);
-    } catch (error) {
-      this.database.exec("ROLLBACK;");
-      throw error;
-    }
+    });
   }
 
   close() {
-    this.database.close();
+    if (this.ownsDatabase) this.database.close();
   }
 }

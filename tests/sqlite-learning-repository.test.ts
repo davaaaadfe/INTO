@@ -97,10 +97,12 @@ const scope = {
 test("SQLite learning migrations are idempotent and create all normalized tables", async () => {
   await withRepository(async (repository) => {
     await repository.migrate();
-    assert.equal(await repository.schemaVersion(), 1);
+    assert.equal(await repository.schemaVersion(), 2);
     assert.deepEqual(await repository.tableNames(), [
       "document_analysis_artifacts",
       "supplier_identity_aliases",
+      "supplier_learning_corrections",
+      "supplier_learning_data_migrations",
       "supplier_learning_events",
       "supplier_learning_examples",
       "supplier_learning_patterns",
@@ -108,6 +110,41 @@ test("SQLite learning migrations are idempotent and create all normalized tables
       "supplier_learning_schema_migrations",
     ]);
   });
+});
+
+test("SQLite upgrades learning schema v1 with correction and evidence-revision storage", async () => {
+  const databasePath = testDatabasePath();
+  const repository = new SqliteLearningRepository(databasePath);
+  try {
+    await repository.migrate();
+    const database = new DatabaseSync(databasePath);
+    try {
+      const profileColumns = database
+        .prepare("PRAGMA table_info(supplier_learning_profiles)")
+        .all() as Array<{ name: string }>;
+      const correctionTable = database
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='supplier_learning_corrections'"
+        )
+        .get();
+      const activeExampleIndex = database
+        .prepare(
+          "SELECT sql FROM sqlite_master WHERE type='index' AND name='supplier_learning_examples_active_hash_uidx'"
+        )
+        .get() as { sql: string } | undefined;
+      assert.ok(profileColumns.some((column) => column.name === "evidence_revision"));
+      assert.ok(profileColumns.some((column) => column.name === "derived_evidence_revision"));
+      assert.ok(correctionTable);
+      assert.match(activeExampleIndex?.sql ?? "", /UNIQUE INDEX[\s\S]+WHERE active = 1/i);
+    } finally {
+      database.close();
+    }
+  } finally {
+    repository.close();
+    await rm(databasePath, { force: true });
+    await rm(`${databasePath}-shm`, { force: true });
+    await rm(`${databasePath}-wal`, { force: true });
+  }
 });
 
 test("SQLite rejects a future schema before applying current DDL", async () => {

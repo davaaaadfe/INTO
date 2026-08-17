@@ -605,9 +605,13 @@ export type UploadedInvoice = {
   storageKey: string;
   localFileStatus: LocalInvoiceFileStatus;
   status: InvoiceStatus;
-  processingPurpose?: "booking" | "learning_only";
-  learningState?: "not_saved" | "saving" | "saved" | "failed";
-  revision?: number;
+  processingPurpose: "booking" | "learning_only";
+  learningState: "not_saved" | "saving" | "saved" | "failed";
+  revision: number;
+  migrationIssues?: Array<{
+    code: "learning_metadata_unrecoverable";
+    message: string;
+  }>;
   learningMetadata?: {
     exampleId: string;
     supplierAccountId: string;

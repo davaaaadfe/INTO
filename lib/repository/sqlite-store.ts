@@ -177,6 +177,23 @@ export async function saveSqliteStoreSnapshot(
   versioned.revision = nextRevision;
 }
 
+export async function withSqliteStoreTransaction<T>(
+  operation: (database: DatabaseSync) => Promise<T>,
+  databasePath = sqliteDatabasePath()
+) {
+  const db = openDatabase(databasePath);
+  const ownsTransaction = !db.isTransaction;
+  if (ownsTransaction) db.exec("BEGIN IMMEDIATE;");
+  try {
+    const result = await operation(db);
+    if (ownsTransaction) db.exec("COMMIT;");
+    return result;
+  } catch (error) {
+    if (ownsTransaction && db.isTransaction) db.exec("ROLLBACK;");
+    throw error;
+  }
+}
+
 export async function verifySqliteStoreWorks() {
   try {
     openDatabase().prepare("SELECT 1 AS ok").get();

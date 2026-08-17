@@ -80,7 +80,10 @@ import {
   loadSqliteStoreSnapshot,
   saveSqliteStoreSnapshot,
   SnapshotRevisionConflictError,
+  withSqliteStoreTransaction,
 } from "./sqlite-store";
+import { configuredLearningRepository } from "./configured-learning-repository";
+import { SqliteLearningRepository } from "./learning-repository";
 import { CURRENT_STORE_SCHEMA_VERSION } from "./store-migrations";
 import { currentRequestPrincipal } from "./request-principal-context";
 import {
@@ -444,18 +447,25 @@ export function getStore() {
     if (!invoice.localFileStatus) {
       invoice.localFileStatus = invoice.storageKey ? "available" : "missing";
     }
-    invoice.processingPurpose ??=
-      invoice.status === "Learned" ? "learning_only" : "booking";
-    if (String(invoice.learningState ?? "") === "none") {
-      invoice.learningState = "not_saved";
-    }
-    invoice.learningState ??=
-      invoice.status === "Learned" ? "saved" : "not_saved";
-    invoice.revision ??= 1;
     if (invoice.status === "Learned") {
       invoice.processingPurpose = "learning_only";
       invoice.learningState = "saved";
+    } else {
+      invoice.processingPurpose ??= "booking";
+      if (
+        !invoice.learningState ||
+        invoice.learningState === "saving" ||
+        invoice.learningState === "failed"
+      ) {
+        invoice.learningState = "not_saved";
+      }
+    }
+    if (!Number.isInteger(invoice.revision) || invoice.revision <= 0) {
+      invoice.revision = 1;
+    }
+    if (invoice.status === "Learned") {
       invoice.exactBookingStatus = "not_booked";
+      invoice.intelligenceApprovedAt = undefined;
     }
   }
 
@@ -525,6 +535,45 @@ async function saveConfiguredStoreSnapshot(
     }
     return identityIsCurrent();
   };
+
+  if (databaseMode() === "sqlite") {
+    const configuredRepository = await configuredLearningRepository();
+    if (configuredRepository) {
+      const previousRevision = store.revision;
+      try {
+        const committedSnapshot = await withSqliteStoreTransaction(
+          async (database) => {
+            const repository = SqliteLearningRepository.fromDatabase(database);
+            const artifactsPrepared = await persistAnalysisArtifacts(
+              store,
+              repository
+            );
+            await globalStore.__INTO_STORE_TEST_HOOKS?.beforeLearningProjection?.();
+            const normalized = await persistLearningState(
+              store,
+              context,
+              repository
+            );
+            const evidenceSafeSnapshot = artifactsPrepared
+              ? snapshotWithoutDocumentEvidence(store)
+              : store;
+            const snapshot = normalized
+              ? snapshotWithoutActiveLearning(evidenceSafeSnapshot)
+              : evidenceSafeSnapshot;
+            snapshot.revision = previousRevision;
+            await saveSqliteStoreSnapshot(snapshot);
+            return snapshot;
+          }
+        );
+        store.schemaVersion = committedSnapshot.schemaVersion;
+        store.revision = committedSnapshot.revision;
+        return;
+      } catch (error) {
+        store.revision = previousRevision;
+        throw error;
+      }
+    }
+  }
 
   // Store OCR/layout evidence only in encrypted artifacts. Preparing those
   // artifacts before the CAS can at worst leave an unreferenced encrypted row;
@@ -1255,7 +1304,11 @@ function recomputedLearnInputs(invoice: UploadedInvoice) {
   });
 }
 
-function recomputeInvoiceInStore(store: IntoStore, invoiceId: string) {
+function recomputeInvoiceInStore(
+  store: IntoStore,
+  invoiceId: string,
+  options: { incrementRevision?: boolean } = {}
+) {
   const invoice = store.invoices.find((item) => item.id === invoiceId);
   if (!invoice) {
     return null;
@@ -1306,14 +1359,19 @@ function recomputeInvoiceInStore(store: IntoStore, invoiceId: string) {
     previousLearnInputs !== null &&
     previousLearnInputs !== recomputedLearnInputs(invoice)
   ) {
-    invoice.revision = (invoice.revision ?? 1) + 1;
+    if (options.incrementRevision !== false) {
+      invoice.revision += 1;
+    }
   }
   invoice.updatedAt = now();
   return invoice;
 }
 
-export function recomputeInvoiceState(invoiceId: string) {
-  return recomputeInvoiceInStore(getStore(), invoiceId);
+export function recomputeInvoiceState(
+  invoiceId: string,
+  options: { incrementRevision?: boolean } = {}
+) {
+  return recomputeInvoiceInStore(getStore(), invoiceId, options);
 }
 
 export function createUploadedInvoice(input: {
@@ -1434,11 +1492,14 @@ export function saveInvoiceReview(
   invoiceId: string,
   nextData: ExtractedInvoiceData,
   nextBookingLines?: PurchaseJournalLine[],
-  options: { incrementRevision?: boolean } = {}
+  options: { incrementRevision?: boolean; expectedRevision?: unknown } = {}
 ) {
   const invoice = getInvoice(invoiceId);
   if (!invoice) {
     return null;
+  }
+  if (options.expectedRevision !== undefined) {
+    assertExpectedInvoiceRevision(invoice, options.expectedRevision);
   }
   if (invoice.processingPurpose === "learning_only" || invoice.status === "Learned") {
     throw new Error("Learned invoices cannot be edited.");
@@ -1491,11 +1552,11 @@ export function saveInvoiceReview(
   invoice.intelligenceApprovedAt = undefined;
   invoice.purchaseJournal = null;
   if (options.incrementRevision !== false) {
-    invoice.revision = (invoice.revision ?? 1) + 1;
+    invoice.revision += 1;
   }
   invoice.updatedAt = now();
   persistStoreSoon();
-  return recomputeInvoiceState(invoiceId);
+  return recomputeInvoiceState(invoiceId, { incrementRevision: false });
 }
 
 function trustedContentHash(invoice: UploadedInvoice) {
@@ -1582,10 +1643,13 @@ export function learnInvoice(
     expectedRevision === (invoice.revision ?? 1) - 1 &&
     Boolean(invoice.learningMetadata?.requestFingerprint) &&
     retryFingerprint === invoice.learningMetadata?.requestFingerprint;
-  if (invoice.revision !== expectedRevision && !exactRetry) {
-    throw new InvoiceRevisionConflictError(
-      "Invoice revision changed. Refresh and try again."
+  if (!isExpectedInvoiceRevision(expectedRevision)) {
+    throw new InvoiceRevisionValidationError(
+      "expectedRevision must be a positive integer."
     );
+  }
+  if (invoice.revision !== expectedRevision && !exactRetry) {
+    throw new InvoiceRevisionConflictError(invoice);
   }
   if (invoice.status === "Booked" || invoice.exactBookingId) {
     throw new Error("Booked invoices cannot be used as learning-only drafts.");
@@ -1715,7 +1779,7 @@ export function learnInvoice(
   saved.exactBookingId = undefined;
   saved.exactBookingStatus = "not_booked";
   saved.intelligenceApprovedAt = undefined;
-  saved.revision = (saved.revision ?? 1) + 1;
+  saved.revision += 1;
   saved.learningMetadata = {
     exampleId: example.id ?? exampleId,
     supplierAccountId,
@@ -1730,7 +1794,7 @@ export function learnInvoice(
     learnedAt,
     learnedByUserId: mutationUser().id,
   };
-  recomputeInvoiceInStore(store, invoiceId);
+  recomputeInvoiceInStore(store, invoiceId, { incrementRevision: false });
   addAuditEvent({
     invoiceId,
     type: "invoice_learned",
@@ -1746,7 +1810,41 @@ export function learnInvoice(
   return saved;
 }
 
-export class InvoiceRevisionConflictError extends Error {}
+export class InvoiceRevisionConflictError extends Error {
+  readonly code = "invoice_revision_conflict";
+  readonly currentInvoice: UploadedInvoice;
+
+  constructor(invoice: UploadedInvoice) {
+    super("Invoice revision changed. Refresh and review the current invoice before retrying.");
+    this.name = "InvoiceRevisionConflictError";
+    this.currentInvoice = structuredClone(invoice);
+  }
+}
+
+export class InvoiceRevisionValidationError extends Error {
+  readonly code = "invalid_expected_revision";
+
+  constructor(message = "expectedRevision must be a positive integer.") {
+    super(message);
+    this.name = "InvoiceRevisionValidationError";
+  }
+}
+
+export function isExpectedInvoiceRevision(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
+export function assertExpectedInvoiceRevision(
+  invoice: UploadedInvoice,
+  expectedRevision: unknown
+) {
+  if (!isExpectedInvoiceRevision(expectedRevision)) {
+    throw new InvoiceRevisionValidationError();
+  }
+  if (invoice.revision !== expectedRevision) {
+    throw new InvoiceRevisionConflictError(invoice);
+  }
+}
 export class SupplierLearningNotFoundError extends Error {}
 export class SupplierLearningGenerationConflictError extends Error {}
 
@@ -1976,11 +2074,15 @@ function pushExtractionHistory(
 export function replaceInvoiceExtractionFromReread(
   invoiceId: string,
   extractedData: ExtractedInvoiceData,
-  decision: DuplicateResolutionDecision = "re_read"
+  decision: DuplicateResolutionDecision = "re_read",
+  expectedRevision?: unknown
 ) {
   const invoice = getInvoice(invoiceId);
   if (!invoice) {
     return null;
+  }
+  if (expectedRevision !== undefined) {
+    assertExpectedInvoiceRevision(invoice, expectedRevision);
   }
   if (invoice.processingPurpose === "learning_only" || invoice.status === "Learned") {
     throw new Error("Learned invoices cannot be re-read.");
@@ -1996,7 +2098,7 @@ export function replaceInvoiceExtractionFromReread(
   invoice.intelligenceApprovedAt = undefined;
   invoice.purchaseJournal = null;
   invoice.lastError = undefined;
-  invoice.revision = (invoice.revision ?? 1) + 1;
+  invoice.revision += 1;
   invoice.updatedAt = now();
   addAuditEvent({
     invoiceId,
@@ -2007,7 +2109,7 @@ export function replaceInvoiceExtractionFromReread(
       extractionHistoryCount: invoice.extractionHistory.length,
     },
   });
-  return recomputeInvoiceState(invoiceId);
+  return recomputeInvoiceState(invoiceId, { incrementRevision: false });
 }
 
 export async function resolveDuplicateDecision(input: {
@@ -2020,10 +2122,15 @@ export async function resolveDuplicateDecision(input: {
   decision: DuplicateResolutionDecision;
   message: string;
   exactBookingId?: string;
+  expectedRevision?: unknown;
+  skipInvoiceRevision?: boolean;
 }) {
-  const log = logDuplicateDecision(input);
   const targetId = input.invoiceId ?? input.duplicateInvoiceId;
   const invoice = targetId ? getInvoice(targetId) : null;
+  if (invoice && input.expectedRevision !== undefined) {
+    assertExpectedInvoiceRevision(invoice, input.expectedRevision);
+  }
+  const log = logDuplicateDecision(input);
 
   addAuditEvent({
     invoiceId: targetId,
@@ -2054,7 +2161,10 @@ export async function resolveDuplicateDecision(input: {
       );
       invoice.lastError = undefined;
       invoice.status = "Uploaded";
-      recomputeInvoiceInStore(getStore(), invoice.id);
+      recomputeInvoiceInStore(getStore(), invoice.id, { incrementRevision: false });
+    }
+    if (!input.skipInvoiceRevision) {
+      invoice.revision += 1;
     }
     invoice.updatedAt = now();
   }
@@ -2082,10 +2192,17 @@ export function addBookingAttempt(
   return bookingAttempt;
 }
 
-export function markInvoiceBooked(invoiceId: string, exactBookingId: string) {
+export function markInvoiceBooked(
+  invoiceId: string,
+  exactBookingId: string,
+  expectedRevision?: unknown
+) {
   const invoice = getInvoice(invoiceId);
   if (!invoice) {
     return null;
+  }
+  if (expectedRevision !== undefined) {
+    assertExpectedInvoiceRevision(invoice, expectedRevision);
   }
   assertInvoiceBookingAllowed(invoice);
 
@@ -2093,6 +2210,7 @@ export function markInvoiceBooked(invoiceId: string, exactBookingId: string) {
   invoice.exactBookingId = exactBookingId;
   invoice.exactBookingStatus = "booked";
   invoice.lastError = undefined;
+  invoice.revision += 1;
   promoteInvoiceCorrections(getStore().learning, invoiceId, "booking", now());
   rememberDecisionsFromInvoice(invoice, getStore().learning);
   invoice.updatedAt = now();
@@ -2196,16 +2314,24 @@ export async function cleanupTemporaryInvoiceFiles(referenceDate = new Date()) {
   };
 }
 
-export function markInvoiceBookingFailed(invoiceId: string, message: string) {
+export function markInvoiceBookingFailed(
+  invoiceId: string,
+  message: string,
+  expectedRevision?: unknown
+) {
   const invoice = getInvoice(invoiceId);
   if (!invoice) {
     return null;
+  }
+  if (expectedRevision !== undefined) {
+    assertExpectedInvoiceRevision(invoice, expectedRevision);
   }
   assertInvoiceBookingAllowed(invoice);
 
   invoice.status = "Booking Failed";
   invoice.exactBookingStatus = "failed";
   invoice.lastError = message;
+  invoice.revision += 1;
   invoice.updatedAt = now();
   addAuditEvent({
     invoiceId,
@@ -2220,11 +2346,15 @@ export function markInvoiceBookingFailed(invoiceId: string, message: string) {
 
 export function markInvoiceNeedsReview(
   invoiceId: string,
-  reason = "Marked as needs review by user."
+  reason = "Marked as needs review by user.",
+  expectedRevision?: unknown
 ) {
   const invoice = getInvoice(invoiceId);
   if (!invoice || invoice.status === "Booked") {
     return null;
+  }
+  if (expectedRevision !== undefined) {
+    assertExpectedInvoiceRevision(invoice, expectedRevision);
   }
   if (invoice.processingPurpose === "learning_only" || invoice.status === "Learned") {
     throw new Error("Learned invoices cannot be returned to review.");
@@ -2233,6 +2363,7 @@ export function markInvoiceNeedsReview(
   const previousStatus = invoice.status;
   invoice.status = "Validation Failed";
   invoice.lastError = reason;
+  invoice.revision += 1;
   invoice.validationErrors = uniqueValidationErrors([
     ...invoice.validationErrors,
     {
@@ -2257,19 +2388,26 @@ export function markInvoiceNeedsReview(
   return invoice;
 }
 
-export function approveInvoiceIntelligence(invoiceId: string) {
+export function approveInvoiceIntelligence(
+  invoiceId: string,
+  expectedRevision?: unknown
+) {
   const invoice = getInvoice(invoiceId);
   if (!invoice) {
     return null;
+  }
+  if (expectedRevision !== undefined) {
+    assertExpectedInvoiceRevision(invoice, expectedRevision);
   }
   if (invoice.processingPurpose === "learning_only" || invoice.status === "Learned") {
     throw new Error("Learned invoices cannot be approved for booking.");
   }
 
   invoice.intelligenceApprovedAt = now();
-  const updatedInvoice = recomputeInvoiceState(invoiceId);
+  const updatedInvoice = recomputeInvoiceState(invoiceId, { incrementRevision: false });
 
   if (updatedInvoice) {
+    updatedInvoice.revision += 1;
     promoteInvoiceCorrections(
       getStore().learning,
       invoiceId,
@@ -2291,7 +2429,11 @@ export function approveInvoiceIntelligence(invoiceId: string) {
   return updatedInvoice;
 }
 
-export function selectInvoiceSupplier(invoiceId: string, accountId: string) {
+export function selectInvoiceSupplier(
+  invoiceId: string,
+  accountId: string,
+  expectedRevision?: unknown
+) {
   const invoice = getInvoice(invoiceId);
   const store = getStore();
   const account =
@@ -2303,8 +2445,14 @@ export function selectInvoiceSupplier(invoiceId: string, accountId: string) {
   if (!invoice || !account) {
     return null;
   }
+  if (expectedRevision !== undefined) {
+    assertExpectedInvoiceRevision(invoice, expectedRevision);
+  }
   if (invoice.processingPurpose === "learning_only" || invoice.status === "Learned") {
     throw new Error("Learned invoices cannot change supplier.");
+  }
+  if (invoice.purchaseJournal?.supplierResolution.selectedAccountId === accountId) {
+    return invoice;
   }
 
   const shadowEvaluation = structuredClone(
@@ -2342,7 +2490,10 @@ export function selectInvoiceSupplier(invoiceId: string, accountId: string) {
     trustState: "trusted",
   });
 
-  const updatedInvoice = recomputeInvoiceState(invoiceId);
+  const updatedInvoice = recomputeInvoiceState(invoiceId, { incrementRevision: false });
+  if (updatedInvoice) {
+    updatedInvoice.revision += 1;
+  }
   addAuditEvent({
     invoiceId,
     type: "invoice_field_edited",

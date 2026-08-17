@@ -384,6 +384,8 @@ test("a failed Exact booking remains retryable with its original file after rest
       const firstBookingResponse = await bookInvoice(
         new Request(`http://localhost/api/invoices/${invoice.id}/book`, {
           method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ expectedRevision: invoice.revision }),
         }),
         { params: { invoiceId: invoice.id } }
       );
@@ -436,6 +438,8 @@ test("a failed Exact booking remains retryable with its original file after rest
       const retryResponse = await bookInvoice(
         new Request(`http://localhost/api/invoices/${retained.id}/book`, {
           method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ expectedRevision: retained.revision }),
         }),
         { params: { invoiceId: retained.id } }
       );

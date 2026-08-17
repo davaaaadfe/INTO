@@ -18,7 +18,10 @@ import type {
 } from "./learning-repository";
 import { configuredLearningRepository } from "./configured-learning-repository";
 import type { LearningRepository } from "./learning-repository-contract";
-import { canonicalSupplierIdentityKey } from "../services/correction-learning";
+import {
+  canonicalSupplierIdentityKey,
+  learnedFilenamePattern,
+} from "../services/correction-learning";
 import {
   normalizeSupplierAddress,
   normalizeSupplierBic,
@@ -29,7 +32,8 @@ import {
   normalizeSupplierVat,
 } from "../services/supplier-identity";
 import {
-  formatFingerprint,
+  assignFormatCluster,
+  structuralFormat,
   supplierReliability,
   supplierReliabilityEvidenceFromExamples,
 } from "../services/supplier-learning";
@@ -37,6 +41,10 @@ import {
   createInitialLearningStore,
   generatePurchaseJournalBooking,
 } from "../services/purchase-journal-intelligence";
+import {
+  rebuildSupplierPatterns,
+  SUPPLIER_PATTERN_MODEL_VERSION,
+} from "../services/supplier-pattern-derivation";
 
 const COMPANY_CONNECTION_USER_ID = "company_connection";
 const RUNTIME_PATTERN_VERSION = "runtime-pattern-v1";
@@ -260,10 +268,6 @@ function rowText(row: PatternRow, snake: string, camel: string) {
   return String(row[snake] ?? row[camel] ?? "");
 }
 
-function rowNumber(row: PatternRow, snake: string, camel: string) {
-  return Number(row[snake] ?? row[camel] ?? 0);
-}
-
 function rowMapping(row: PatternRow) {
   return jsonValue(row.booking_mapping_json ?? row.bookingMapping) as
     | Record<string, unknown>
@@ -319,6 +323,67 @@ function minimizedExtractedData(data: ExtractedInvoiceData | undefined) {
   };
 }
 
+const observationFields = [
+  "supplierName",
+  "supplierVatNumber",
+  "supplierChamberOfCommerceNumber",
+  "supplierAddress",
+  "supplierCountry",
+  "invoiceNumber",
+  "referenceCode",
+  "invoiceDate",
+  "dueDate",
+  "paymentTerms",
+  "currency",
+  "netAmount",
+  "vatAmount",
+  "grossAmount",
+  "iban",
+  "expenseDescription",
+  "beneficiary",
+  "serviceStartDate",
+  "serviceEndDate",
+  "companyVatNumber",
+  "reverseChargeMentioned",
+  "intraCommunityMentioned",
+  "lineItems",
+] as const satisfies readonly (keyof ExtractedInvoiceData)[];
+
+function observationState(
+  data: ExtractedInvoiceData | undefined,
+  corrections: readonly LearnedCorrection[]
+): NonNullable<LearningExampleInput["observationState"]> {
+  const correctionFields: Partial<Record<LearnedCorrection["field"], keyof ExtractedInvoiceData>> = {
+    supplier: "supplierName",
+    yourRefPattern: "referenceCode",
+    invoiceDate: "invoiceDate",
+    netAmount: "netAmount",
+    vatAmount: "vatAmount",
+    totalAmount: "grossAmount",
+    expenseDescription: "expenseDescription",
+    paymentCondition: "paymentTerms",
+  };
+  return Object.fromEntries(
+    observationFields.map((field) => {
+      const value = data?.[field];
+      const observed =
+        typeof value === "string"
+          ? Boolean(value.trim())
+          : typeof value === "number"
+            ? Number.isFinite(value)
+            : typeof value === "boolean"
+              ? value
+              : Array.isArray(value) && value.length > 0;
+      const reviewedEmpty = corrections.some(
+        (correction) =>
+          correctionFields[correction.field] === field &&
+          (correction.correctedValue === "" || correction.correctedValue === null)
+      );
+      return [field, observed ? "observed" : reviewedEmpty ? "reviewed_empty" : "unknown"];
+    })
+  );
+}
+
 function extractedDataWithoutDocumentEvidence(
   data: ExtractedInvoiceData | undefined
 ) {
@@ -349,6 +414,46 @@ function rollbackLearningStore(learning: BookingLearningStore) {
   return rollback;
 }
 
+function legacyLearningMigrationInput(store: IntoStore, completedAt: string) {
+  const source = rollbackLearningStore(store.learning);
+  const rowCounts = {
+    corrections: source.corrections.length,
+    examples: source.supplierExamples.length,
+    mappings:
+      source.glAccountSelections.length +
+      source.vatCodeSelections.length +
+      source.costCentreSelections.length +
+      source.costUnitSelections.length,
+    patterns: source.supplierPatterns.length,
+    selections: source.supplierSelections.length,
+  };
+  const migrationName = `legacy-learning:${companyId()}:${divisionCode(store)}`;
+  const sourceSnapshotHash = createHash("sha256")
+    .update(JSON.stringify(source))
+    .digest("hex");
+  const checksum = createHash("sha256")
+    .update(
+      JSON.stringify({
+        migrationName,
+        version: 1,
+        sourceSnapshotRevision: store.revision,
+        sourceSnapshotHash,
+        rowCounts,
+      })
+    )
+    .digest("hex");
+  return {
+    migrationName,
+    version: 1,
+    sourceSnapshotRevision: store.revision,
+    sourceSnapshotHash,
+    rowCounts,
+    checksum,
+    startedAt: completedAt,
+    completedAt,
+  };
+}
+
 function minimizedBookingLines(
   lines: BookingLearningStore["supplierExamples"][number]["bookingLines"] = []
 ) {
@@ -373,35 +478,36 @@ function minimizedBookingLines(
 function runtimePatternInput(
   store: IntoStore,
   pattern: SupplierLearningPattern,
-  supportDelta: number,
-  successDelta: number,
-  createdAt: string
+  createdAt: string,
+  generation = pattern.generation
 ): LearningPatternInput {
   const scope = scopeFor(store, pattern.supplierAccountId);
   return {
     id: stableId("pattern", [
       scope,
       pattern.generation,
-      "runtime_extraction",
+      pattern.formatCluster ?? "runtime",
+      pattern.field ?? "runtime_extraction",
       pattern.key,
     ]),
     ...scope,
-    generation: pattern.generation,
-    formatCluster: "runtime",
-    field: "runtime_extraction",
+    generation,
+    formatCluster: pattern.formatCluster ?? "runtime",
+    field: pattern.field ?? "runtime_extraction",
     patternKey: pattern.key,
     label: pattern.label,
     anchor: {
       context: pattern.context,
       relativePosition: pattern.relativePosition,
     },
-    dataType: RUNTIME_PATTERN_VERSION,
+    dataType: pattern.dataType ?? RUNTIME_PATTERN_VERSION,
     bookingMapping: { kind: "runtime_pattern", pattern },
-    supportCount: supportDelta,
-    successCount: successDelta,
-    correctionCount: Math.max(0, supportDelta - successDelta),
-    driftState: "none",
-    modelVersion: RUNTIME_PATTERN_VERSION,
+    supportCount: pattern.supportCount ?? pattern.attempts,
+    successCount: pattern.successCount ?? pattern.successes,
+    correctionCount:
+      pattern.correctionCount ?? Math.max(0, pattern.attempts - pattern.successes),
+    driftState: pattern.driftState ?? "none",
+    modelVersion: pattern.modelVersion ?? RUNTIME_PATTERN_VERSION,
     createdAt,
   };
 }
@@ -468,14 +574,33 @@ function exampleInput(
         correction.trustState !== "pending"
     )
     .map(sanitizeCorrection);
+  const format = structuralFormat(
+    example.finalExtractedData?.rawText ?? invoice?.extractedData.rawText ?? ""
+  );
+  const formatCluster =
+    example.formatCluster ??
+    assignFormatCluster(
+      example.formatSignature ?? format.signature,
+      store.learning.supplierExamples
+        .filter(
+          (item) =>
+            item !== example &&
+            item.supplierAccountId === example.supplierAccountId &&
+            item.generation === example.generation &&
+            item.active !== false &&
+            item.formatSignature &&
+            item.formatCluster
+        )
+        .map((item) => ({ id: item.formatCluster!, signature: item.formatSignature! }))
+    ).clusterId;
   return {
     id: example.id ?? stableId("example", [scope, example.contentHash]),
     ...scope,
-    generation: example.generation,
+    generation: legacy ? 0 : example.generation,
     invoiceId: example.invoiceId,
     artifactId,
     contentHash: example.contentHash,
-    originalFilename: invoice?.fileName ?? "unknown",
+    originalFilename: learnedFilenamePattern(invoice?.fileName ?? ""),
     originalPrediction: {
       extractedData: minimizedExtractedData(example.originalExtractedData),
       bookingLines: minimizedBookingLines(
@@ -491,8 +616,16 @@ function exampleInput(
       corrections,
     },
     bookingLines: minimizedBookingLines(example.bookingLines),
+    observationState: observationState(
+      example.finalExtractedData,
+      store.learning.corrections.filter(
+        (correction) => correction.invoiceId === example.invoiceId
+      )
+    ),
     fingerprint: example.formatFingerprint,
     fingerprintVersion: "layout-v1",
+    formatSignature: example.formatSignature ?? format.signature,
+    formatCluster,
     validationResult:
       example.validationResult ??
       {
@@ -517,6 +650,30 @@ function exampleInput(
       stableId("request", [example.id, example.contentHash]),
     createdAt: example.learnedAt,
   };
+}
+
+function isCorroboratedExplicitLearn(
+  store: IntoStore,
+  example: BookingLearningStore["supplierExamples"][number]
+) {
+  const invoice = store.invoices.find((item) => item.id === example.invoiceId);
+  const metadata = invoice?.learningMetadata;
+  if (
+    invoice?.status !== "Learned" ||
+    !metadata ||
+    metadata.exampleId !== example.id ||
+    metadata.supplierAccountId !== example.supplierAccountId ||
+    metadata.generation !== example.generation ||
+    metadata.contentHash !== example.contentHash
+  ) {
+    return false;
+  }
+  return store.auditEvents.some(
+    (event) =>
+      event.invoiceId === example.invoiceId &&
+      event.type === "invoice_learned" &&
+      (!event.metadata?.exampleId || event.metadata.exampleId === example.id)
+  );
 }
 
 function trustedContentHash(invoice: UploadedInvoice) {
@@ -637,13 +794,14 @@ function lifecycleExampleInput(
     createInitialLearningStore(),
     exactCache(store) ?? null
   );
+  const format = structuralFormat(invoice.extractedData.rawText ?? "");
   return {
     id: stableId("example", [scope, generation, contentHash]),
     ...scope,
     generation,
     invoiceId: invoice.id,
     contentHash,
-    originalFilename: invoice.fileName,
+    originalFilename: learnedFilenamePattern(invoice.fileName),
     originalPrediction: {
       extractedData: minimizedExtractedData(originalPrediction),
       bookingLines: minimizedBookingLines(originalBooking.lines),
@@ -659,8 +817,16 @@ function lifecycleExampleInput(
     bookingLines: minimizedBookingLines(
       invoice.bookingLineOverrides ?? invoice.purchaseJournal?.lines ?? []
     ),
-    fingerprint: formatFingerprint(invoice.extractedData.rawText ?? ""),
+    observationState: observationState(
+      invoice.extractedData,
+      store.learning.corrections.filter(
+        (correction) => correction.invoiceId === invoice.id
+      )
+    ),
+    fingerprint: format.fingerprint,
     fingerprintVersion: "layout-v1",
+    formatSignature: format.signature,
+    formatCluster: assignFormatCluster(format.signature, []).clusterId,
     validationResult: {
       valid: !invoice.validationErrors.some((error) => error.severity === "error"),
       issues: invoice.validationErrors.map((error) => ({
@@ -741,13 +907,20 @@ export async function persistLearningState(
     string,
     Awaited<ReturnType<typeof repository.ensureProfile>>
   >();
+  const completedLegacyAccounts = new Set<string>();
 
   for (const supplierAccountId of accountIds) {
     const scope = scopeFor(store, supplierAccountId);
     const runtimeProfile = runtimeProfileForAccount(store, scope.supplierAccountId);
     const existingProfile = await repository.getProfile(scope);
-    const desiredGeneration =
-      runtimeProfile?.generation ?? existingProfile?.generation ?? 1;
+    const desiredGeneration = legacyMigration
+      ? 0
+      : (runtimeProfile?.generation ?? existingProfile?.generation ?? 1);
+    if (legacyMigration && existingProfile && existingProfile.generation > 0) {
+      profilesByAccount.set(scope.supplierAccountId, existingProfile);
+      completedLegacyAccounts.add(scope.supplierAccountId);
+      continue;
+    }
     let profile;
     if (
       existingProfile &&
@@ -817,6 +990,7 @@ export async function persistLearningState(
       observedAt: string
     ) => {
       const identity = patternIdentity(field, patternKey);
+      if (patternIds.has(identity)) return;
       await repository.savePattern(
         mappingPatternInput(
           store,
@@ -827,7 +1001,7 @@ export async function persistLearningState(
           mapping,
           trustState,
           observedAt,
-          !patternIds.has(identity)
+          true
         )
       );
       patternIds.add(identity);
@@ -856,27 +1030,29 @@ export async function persistLearningState(
 
     for (const pattern of store.learning.supplierPatterns.filter(
       (item) =>
+        item.modelVersion !== SUPPLIER_PATTERN_MODEL_VERSION &&
         canonicalAccount(store, item.supplierAccountId).accountId ===
           scope.supplierAccountId &&
         item.generation === profile.generation
     )) {
-      const existing = existingPatterns.find(
-        (row) =>
-          rowText(row, "field", "field") === "runtime_extraction" &&
-          rowText(row, "pattern_key", "patternKey") === pattern.key
-      );
-      const supportDelta = Math.max(
-        0,
-        pattern.attempts - rowNumber(existing ?? {}, "support_count", "supportCount")
-      );
-      const successDelta = Math.max(
-        0,
-        pattern.successes - rowNumber(existing ?? {}, "success_count", "successCount")
-      );
       await repository.savePattern(
-        runtimePatternInput(store, pattern, supportDelta, successDelta, createdAt)
+        runtimePatternInput(store, pattern, createdAt, profile.generation)
       );
     }
+    const derivedPatterns = rebuildSupplierPatterns(
+      scope.supplierAccountId,
+      profile.generation,
+      store.learning.supplierExamples
+    ).map((pattern) =>
+      runtimePatternInput(store, pattern, createdAt, profile.generation)
+    );
+    await repository.replaceDerivedPatterns({
+      ...scope,
+      generation: profile.generation,
+      modelVersion: SUPPLIER_PATTERN_MODEL_VERSION,
+      patterns: derivedPatterns,
+      updatedAt: createdAt,
+    });
 
     for (const correction of store.learning.corrections.filter(
       (item) =>
@@ -919,12 +1095,20 @@ export async function persistLearningState(
   }
 
   for (const example of store.learning.supplierExamples) {
+    if (example.active === false) continue;
     const canonicalSupplierAccountId = canonicalAccount(
       store,
       example.supplierAccountId
     ).accountId;
     const profile = profilesByAccount.get(canonicalSupplierAccountId);
-    if (!profile || profile.generation !== example.generation) continue;
+    const targetGeneration = legacyMigration ? 0 : example.generation;
+    if (
+      !profile ||
+      profile.generation !== targetGeneration ||
+      (legacyMigration && isCorroboratedExplicitLearn(store, example))
+    ) {
+      continue;
+    }
     const invoice = store.invoices.find((item) => item.id === example.invoiceId);
     const artifact =
       artifactsByContentHash.get(example.contentHash) ??
@@ -942,29 +1126,31 @@ export async function persistLearningState(
     );
   }
 
-  for (const invoice of store.invoices) {
-    const selectedAccountId = invoice.purchaseJournal?.supplierResolution.selectedAccountId;
-    if (!selectedAccountId) continue;
-    const canonicalSupplierAccountId = canonicalAccount(
-      store,
-      selectedAccountId
-    ).accountId;
-    const profile = profilesByAccount.get(canonicalSupplierAccountId);
-    if (!profile) continue;
-    const input = lifecycleExampleInput(
-      store,
-      invoice,
-      canonicalSupplierAccountId,
-      profile.generation,
-      context
-    );
-    if (!input) continue;
-    const artifact =
-      artifactsByContentHash.get(input.contentHash) ??
-      (await repository.saveArtifact(
-        artifactInput(input.contentHash, invoice.extractedData, input.createdAt)
-      ));
-    await repository.saveExample({ ...input, artifactId: artifact.id });
+  if (!legacyMigration) {
+    for (const invoice of store.invoices) {
+      const selectedAccountId = invoice.purchaseJournal?.supplierResolution.selectedAccountId;
+      if (!selectedAccountId) continue;
+      const canonicalSupplierAccountId = canonicalAccount(
+        store,
+        selectedAccountId
+      ).accountId;
+      const profile = profilesByAccount.get(canonicalSupplierAccountId);
+      if (!profile) continue;
+      const input = lifecycleExampleInput(
+        store,
+        invoice,
+        canonicalSupplierAccountId,
+        profile.generation,
+        context
+      );
+      if (!input) continue;
+      const artifact =
+        artifactsByContentHash.get(input.contentHash) ??
+        (await repository.saveArtifact(
+          artifactInput(input.contentHash, invoice.extractedData, input.createdAt)
+        ));
+      await repository.saveExample({ ...input, artifactId: artifact.id });
+    }
   }
 
   for (const [supplierAccountId, profile] of profilesByAccount) {
@@ -990,6 +1176,101 @@ export async function persistLearningState(
         score: confidence.score,
         driftState,
         updatedAt: createdAt,
+      });
+    }
+  }
+  if (legacyMigration) {
+    for (const [supplierAccountId, legacyProfile] of profilesByAccount) {
+      const trustedExamples = store.learning.supplierExamples.filter(
+        (example) =>
+          canonicalAccount(store, example.supplierAccountId).accountId ===
+            supplierAccountId &&
+          isCorroboratedExplicitLearn(store, example)
+      );
+      const activeGeneration = Math.max(
+        1,
+        ...trustedExamples.map((example) => example.generation)
+      );
+      const activeProfile = completedLegacyAccounts.has(supplierAccountId)
+        ? legacyProfile
+        : await repository.completeLegacyMigration({
+            companyId: legacyProfile.companyId,
+            divisionCode: legacyProfile.divisionCode,
+            supplierAccountId,
+            activeGeneration,
+            updatedAt: createdAt,
+          });
+      if (activeProfile.generation !== activeGeneration) {
+        throw new Error(
+          "Supplier learning generation changed during legacy migration."
+        );
+      }
+      for (const example of trustedExamples.filter(
+        (item) => item.generation === activeGeneration
+      )) {
+        const invoice = store.invoices.find(
+          (item) => item.id === example.invoiceId
+        );
+        const artifact =
+          artifactsByContentHash.get(example.contentHash) ??
+          (await repository.saveArtifact(
+            artifactInput(
+              example.contentHash,
+              invoice?.extractedData ??
+                example.finalExtractedData ??
+                example.originalExtractedData,
+              example.learnedAt
+            )
+          ));
+        await repository.saveExample(
+          exampleInput(store, example, artifact.id, {
+            ...context,
+            requestId: stableId("migration-trusted", [example.id]),
+          })
+        );
+      }
+      const activeExamples = await repository.listExamples({
+        companyId: activeProfile.companyId,
+        divisionCode: activeProfile.divisionCode,
+        supplierAccountId,
+      });
+      const confidence = supplierReliability(
+        supplierReliabilityEvidenceFromExamples(activeExamples)
+      );
+      await repository.updateProfileConfidence({
+        companyId: activeProfile.companyId,
+        divisionCode: activeProfile.divisionCode,
+        supplierAccountId,
+        generation: activeProfile.generation,
+        score: confidence.score,
+        driftState: activeProfile.driftState,
+        updatedAt: createdAt,
+      });
+      const migrationKey = stableId("legacy-migration", [
+        activeProfile.companyId,
+        activeProfile.divisionCode,
+        supplierAccountId,
+        activeGeneration,
+      ]);
+      await repository.saveEvent({
+        id: stableId("event", [migrationKey]),
+        companyId: activeProfile.companyId,
+        divisionCode: activeProfile.divisionCode,
+        supplierAccountId,
+        generation: activeGeneration,
+        type: "migration",
+        idempotencyKey: migrationKey,
+        actorId: "shared_user",
+        sessionCorrelationId: "session_unavailable",
+        requestId: "legacy-migration",
+        metadata: {
+          activeGeneration,
+          legacyGeneration: 0,
+          trustedExampleCount: trustedExamples.filter(
+            (example) => example.generation === activeGeneration
+          ).length,
+        },
+        createdAt,
       });
     }
   }
@@ -1051,8 +1332,23 @@ export async function hydrateLearningState(
   const versioned = store as IntoStore & { learningRepositoryMigratedAt?: string };
   if (!versioned.learningRepositoryMigratedAt) {
     versioned.legacyLearningRollback ??= rollbackLearningStore(store.learning);
-    await persistLearningState(store, { requestId: "legacy-migration" });
-    versioned.learningRepositoryMigratedAt = new Date().toISOString();
+    const migration = legacyLearningMigrationInput(
+      store,
+      new Date().toISOString()
+    );
+    const existing = await repository.getDataMigration(
+      migration.migrationName,
+      migration.version
+    );
+    if (!existing) {
+      await persistLearningState(
+        store,
+        { requestId: "legacy-migration" },
+        repository
+      );
+    }
+    const recorded = await repository.recordDataMigration(migration);
+    versioned.learningRepositoryMigratedAt = recorded.record.completedAt;
   }
   if (!hydrateNormalizedLearning) return true;
 
@@ -1111,6 +1407,8 @@ export async function hydrateLearningState(
         invoiceId: example.invoiceId,
         contentHash: example.contentHash,
         formatFingerprint: example.fingerprint,
+        formatSignature: example.formatSignature,
+        formatCluster: example.formatCluster,
         learnedAt: example.createdAt,
         learnedByUserId: example.actorId,
         originalExtractedData:

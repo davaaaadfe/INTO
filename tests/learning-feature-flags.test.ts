@@ -10,6 +10,7 @@ test("learning feature flags are independently disabled by default in production
 
   assert.deepEqual(flags, {
     learningV2Enabled: false,
+    learnWorkflowEnabled: false,
     documentIntelligenceEnabled: false,
     learningUiEnabled: false,
     supplierResolutionV2Enabled: false,
@@ -22,6 +23,7 @@ test("learning feature flags parse explicit true and false values", () => {
   const flags = learningFeatureFlags({
     NODE_ENV: "production",
     LEARNING_V2_ENABLED: "true",
+    LEARN_WORKFLOW_ENABLED: "true",
     DOCUMENT_INTELLIGENCE_ENABLED: "1",
     LEARNING_UI_ENABLED: "yes",
     SUPPLIER_RESOLUTION_V2_ENABLED: "on",
@@ -29,6 +31,7 @@ test("learning feature flags parse explicit true and false values", () => {
   });
 
   assert.equal(flags.learningV2Enabled, true);
+  assert.equal(flags.learnWorkflowEnabled, true);
   assert.equal(flags.documentIntelligenceEnabled, true);
   assert.equal(flags.learningUiEnabled, true);
   assert.equal(flags.supplierResolutionV2Enabled, true);

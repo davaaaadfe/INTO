@@ -1,77 +1,29 @@
+import type {
+  DocumentAnalysis,
+  DocumentAnalysisPage,
+  DocumentProviderOutcome,
+  DocumentToken,
+  FieldCandidate,
+  NormalizedPoint,
+} from "../domain/document-analysis";
+
+export type {
+  DocumentAnalysis,
+  DocumentAnalysisPage,
+  DocumentAnalysisSourceMode,
+  DocumentProviderOutcome,
+  DocumentTable,
+  DocumentTableCell,
+  DocumentToken,
+  FieldCandidate,
+  NormalizedPoint,
+} from "../domain/document-analysis";
+
 export type DocumentAnalysisInput = {
   readonly name: string;
   readonly type: string;
   readonly text?: () => Promise<string>;
   readonly arrayBuffer?: () => Promise<ArrayBuffer>;
-};
-
-export type NormalizedPoint = {
-  readonly x: number;
-  readonly y: number;
-};
-
-export type DocumentToken = {
-  readonly text: string;
-  readonly polygon: readonly NormalizedPoint[];
-  readonly confidence: number;
-};
-
-export type DocumentTableCell = {
-  readonly rowIndex: number;
-  readonly columnIndex: number;
-  readonly rowSpan: number;
-  readonly columnSpan: number;
-  readonly text: string;
-  readonly polygon: readonly NormalizedPoint[];
-  readonly confidence: number;
-};
-
-export type DocumentTable = {
-  readonly rowCount: number;
-  readonly columnCount: number;
-  readonly cells: readonly DocumentTableCell[];
-};
-
-export type FieldCandidate = {
-  readonly value: string | number | boolean | null;
-  readonly field: string;
-  readonly label?: string;
-  readonly page?: number;
-  readonly polygon: readonly NormalizedPoint[];
-  readonly confidence: number;
-  readonly source: string;
-};
-
-export type DocumentAnalysisPage = {
-  readonly pageNumber: number;
-  readonly width: number;
-  readonly height: number;
-  readonly unit: "pixel" | "inch" | "normalized";
-  readonly text: string;
-  readonly tokens: readonly DocumentToken[];
-  readonly language?: string;
-  readonly tables: readonly DocumentTable[];
-};
-
-export type DocumentAnalysisSourceMode =
-  | "embedded_pdf_text"
-  | "xml_text"
-  | "plain_text"
-  | "ocr"
-  | "unavailable";
-
-export type DocumentAnalysis = {
-  readonly pages: readonly DocumentAnalysisPage[];
-  readonly fieldCandidates: readonly FieldCandidate[];
-  readonly rawText: string;
-  readonly confidence: number;
-  readonly language?: string;
-  readonly provider: {
-    readonly name: string;
-    readonly model?: string;
-    readonly modelVersion?: string;
-  };
-  readonly sourceMode: DocumentAnalysisSourceMode;
 };
 
 export type DocumentAnalysisProviderConfig = {
@@ -113,13 +65,16 @@ function rectangle(left: number, top: number, right: number, bottom: number) {
   ];
 }
 
-function unavailable(): DocumentAnalysis {
+function unavailable(
+  reason: DocumentProviderOutcome["reason"] = "no_extractable_content"
+): DocumentAnalysis {
   return {
     pages: [],
     fieldCandidates: [],
     rawText: "",
     confidence: 0,
     provider: { name: "local", model: "deterministic-layout" },
+    providerOutcome: { status: "unavailable", adapter: "local", reason },
     sourceMode: "unavailable",
   };
 }
@@ -180,6 +135,7 @@ function analysisFromText(
         rawText: pages.map((page) => page.text).join("\f"),
         confidence: 1,
         provider: { name: "local", model: "deterministic-layout" },
+        providerOutcome: { status: "succeeded", adapter: "local" },
         sourceMode,
       }
     : unavailable();
@@ -211,7 +167,9 @@ function pdfTokens(
   });
 }
 
-async function localPdfAnalysis(input: DocumentAnalysisInput) {
+async function localPdfAnalysis(
+  input: DocumentAnalysisInput
+): Promise<DocumentAnalysis> {
   if (!input.arrayBuffer) {
     return analysisFromText(await suppliedText(input), "plain_text");
   }
@@ -275,15 +233,18 @@ async function localPdfAnalysis(input: DocumentAnalysisInput) {
           rawText: pages.map((page) => page.text).join("\f"),
           confidence: 1,
           provider: { name: "local", model: "pdfjs-layout" },
+          providerOutcome: { status: "succeeded", adapter: "local" },
           sourceMode: "embedded_pdf_text" as const,
         }
-      : unavailable();
+      : unavailable("ocr_unavailable");
   } catch {
-    return unavailable();
+    return unavailable("ocr_unavailable");
   }
 }
 
-async function localAnalysis(input: DocumentAnalysisInput) {
+async function localAnalysis(
+  input: DocumentAnalysisInput
+): Promise<DocumentAnalysis> {
   const type = input.type.toLowerCase();
   const extension = input.name.toLowerCase().split(".").pop();
   if (type === "application/pdf" || extension === "pdf") {
@@ -295,7 +256,7 @@ async function localAnalysis(input: DocumentAnalysisInput) {
   if (input.text && !type.startsWith("image/")) {
     return analysisFromText(await suppliedText(input), "plain_text");
   }
-  return unavailable();
+  return unavailable("ocr_unavailable");
 }
 
 function azurePolygon(
@@ -455,6 +416,11 @@ function azureAnalysis(payload: Record<string, unknown>): DocumentAnalysis {
       model: String(result.modelId ?? "prebuilt-layout"),
       modelVersion: typeof result.apiVersion === "string" ? result.apiVersion : undefined,
     },
+    providerOutcome: {
+      status: pages.length ? "succeeded" : "unavailable",
+      adapter: "azure-document-intelligence",
+      ...(pages.length ? {} : { reason: "empty_result" as const }),
+    },
     sourceMode: pages.length ? "ocr" : "unavailable",
   };
 }
@@ -530,7 +496,7 @@ function shouldUseManagedAnalysis(
 export async function analyzeDocument(
   input: DocumentAnalysisInput,
   options: DocumentAnalysisOptions = {}
-) {
+): Promise<DocumentAnalysis> {
   const local = await localAnalysis(input);
   const env = options.env ?? process.env;
   const enabled =
@@ -569,10 +535,33 @@ export async function analyzeDocument(
           ? configuredTimeout
           : undefined,
     });
+    const adapter = managed.provider.name || "managed-document-analysis";
     return managed.pages.length || managed.fieldCandidates.length || managed.rawText.trim()
-      ? managed
-      : local;
-  } catch {
-    return local;
+      ? {
+          ...managed,
+          providerOutcome: { status: "succeeded", adapter },
+        }
+      : {
+          ...local,
+          providerOutcome: {
+            status: "unavailable",
+            adapter,
+            reason: "empty_result",
+          },
+        };
+  } catch (error) {
+    return {
+      ...local,
+      providerOutcome: {
+        status: "failed",
+        adapter: options.provider
+          ? "managed-document-analysis"
+          : "azure-document-intelligence",
+        reason:
+          error instanceof Error && /timed out/i.test(error.message)
+            ? "timeout"
+            : "provider_error",
+      },
+    };
   }
 }

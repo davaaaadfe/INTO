@@ -1,4 +1,4 @@
-import { neon, type NeonQueryFunction } from "@neondatabase/serverless";
+import { neon, Pool, type NeonQueryFunction } from "@neondatabase/serverless";
 import { Buffer } from "node:buffer";
 import type { IntoStore } from "./invoice-store";
 import { migrateStoreSnapshot } from "./store-migrations";
@@ -17,6 +17,17 @@ type VersionedStore = IntoStore & {
 };
 
 type SqlClient = NeonQueryFunction<false, false>;
+export type PostgresStoreQuery = (
+  query: string,
+  parameters?: unknown[]
+) => Promise<Array<Record<string, unknown>>>;
+type PostgresTransactionConnection = {
+  query: PostgresStoreQuery;
+  release(): void;
+  end(): Promise<void>;
+};
+type PostgresTransactionConnectionFactory =
+  () => Promise<PostgresTransactionConnection>;
 type SchemaInitialization = {
   identity: string;
   promise: Promise<void>;
@@ -98,6 +109,37 @@ async function sqlClient() {
   const { sql, runtimeReady } = selectSqlClient();
   await runtimeReady;
   return sql;
+}
+
+async function connectPostgresTransaction(): Promise<PostgresTransactionConnection> {
+  await sqlClient();
+  const pool = new Pool({ connectionString: databaseUrl() });
+  const client = await pool.connect();
+  return {
+    query: async (query, parameters = []) =>
+      (await client.query(query, parameters)).rows,
+    release: () => client.release(),
+    end: () => pool.end(),
+  };
+}
+
+export async function withPostgresStoreTransaction<T>(
+  callback: (query: PostgresStoreQuery) => Promise<T>,
+  connect: PostgresTransactionConnectionFactory = connectPostgresTransaction
+) {
+  const connection = await connect();
+  try {
+    await connection.query("BEGIN");
+    const result = await callback(connection.query);
+    await connection.query("COMMIT");
+    return result;
+  } catch (error) {
+    await connection.query("ROLLBACK");
+    throw error;
+  } finally {
+    connection.release();
+    await connection.end();
+  }
 }
 
 async function invoiceFileSqlClient() {
@@ -253,12 +295,21 @@ export async function loadStoreRevision() {
   return rows[0] ? Number(rows[0].revision) : null;
 }
 
-export async function saveStoreSnapshot(store: IntoStore) {
+export async function saveStoreSnapshot(
+  store: IntoStore,
+  queryOverride?: PostgresStoreQuery
+) {
   if (!isPostgresPersistenceEnabled()) {
     return;
   }
 
-  const sql = await sqlClient();
+  const sql = queryOverride ? null : await sqlClient();
+  const query: PostgresStoreQuery =
+    queryOverride ??
+    ((text, parameters = []) =>
+      sql!.query(text, parameters) as Promise<
+        Array<Record<string, unknown>>
+      >);
   Object.assign(store, migrateStoreSnapshot(store));
   const versioned = store as VersionedStore;
   const expectedRevision = versioned.revision ?? 0;
@@ -268,31 +319,27 @@ export async function saveStoreSnapshot(store: IntoStore) {
     schemaVersion: CURRENT_SNAPSHOT_SCHEMA_VERSION,
     revision: nextRevision,
   };
-  const rows =
-    expectedRevision === 0
-      ? await sql`
-          INSERT INTO into_runtime_store (id, payload, revision, updated_at)
-          VALUES (
-            ${snapshotId},
-            ${JSON.stringify(nextStore)}::jsonb,
-            ${nextRevision},
-            now()
-          )
-          ON CONFLICT (id) DO UPDATE SET
-            payload = EXCLUDED.payload,
-            revision = EXCLUDED.revision,
-            updated_at = now()
-          WHERE into_runtime_store.revision = ${expectedRevision}
-          RETURNING revision
-        `
-      : await sql`
-          UPDATE into_runtime_store SET
-            payload = ${JSON.stringify(nextStore)}::jsonb,
-            revision = ${nextRevision},
-            updated_at = now()
-          WHERE id = ${snapshotId} AND revision = ${expectedRevision}
-          RETURNING revision
-        `;
+  const rows = expectedRevision === 0
+    ? await query(
+        `INSERT INTO into_runtime_store (id, payload, revision, updated_at)
+         VALUES ($1, $2::jsonb, $3, now())
+         ON CONFLICT (id) DO UPDATE SET
+           payload = EXCLUDED.payload,
+           revision = EXCLUDED.revision,
+           updated_at = now()
+         WHERE into_runtime_store.revision = $4
+         RETURNING revision`,
+        [snapshotId, JSON.stringify(nextStore), nextRevision, expectedRevision]
+      )
+    : await query(
+        `UPDATE into_runtime_store SET
+           payload = $1::jsonb,
+           revision = $2,
+           updated_at = now()
+         WHERE id = $3 AND revision = $4
+         RETURNING revision`,
+        [JSON.stringify(nextStore), nextRevision, snapshotId, expectedRevision]
+      );
   if (!rows.length) {
     throw new SnapshotRevisionConflictError(
       "INTO data changed in another request. Reload and try again."

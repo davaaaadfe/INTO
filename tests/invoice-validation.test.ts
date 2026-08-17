@@ -677,6 +677,7 @@ test("uses managed field candidates and polygons when scan text has no labels", 
     rawText: "Scanned invoice",
     confidence: 0.95,
     provider: { name: "test-provider" },
+    providerOutcome: { status: "succeeded", adapter: "test-provider" },
     sourceMode: "ocr",
   });
 
@@ -704,8 +705,20 @@ test("uses managed field candidates and polygons when scan text has no labels", 
   assert.equal(data.extractionEvidence?.grossAmount?.sourceLabel, "InvoiceTotal");
   assert.equal(data.documentAnalysis?.sourceMode, "ocr");
   assert.equal(data.documentAnalysis?.provider.name, "test-provider");
+  assert.deepEqual(data.documentAnalysis?.providerOutcome, {
+    status: "succeeded",
+    adapter: "test-provider",
+  });
   assert.deepEqual(data.documentAnalysis?.pages[0]?.tokens[0]?.polygon, supplierPolygon);
   assert.deepEqual(data.documentAnalysis?.fieldCandidates[1]?.polygon, totalPolygon);
+  const grossCandidates = data.documentAnalysis?.fieldCandidates.filter(
+    (candidate) => candidate.field === "grossAmount"
+  );
+  assert.equal(grossCandidates?.length, 1);
+  assert.equal(grossCandidates?.[0]?.source, "test-provider");
+  assert.equal(grossCandidates?.[0]?.rule, "provider-field-candidate");
+  assert.equal(grossCandidates?.[0]?.model, "test-provider");
+  assert.match(grossCandidates?.[0]?.id ?? "", /^candidate_[a-f0-9]{24}$/);
 });
 
 test("extracts labelled values from embedded PDF text", async () => {
@@ -729,6 +742,44 @@ test("extracts labelled values from embedded PDF text", async () => {
   assert.equal(data.invoiceDate, "2026-03-24");
   assert.equal(data.grossAmount, 121);
   assert.equal(data.extractionEvidence?.grossAmount?.page, 1);
+});
+
+test("retains deterministic selections as stable provenance-rich candidates", async () => {
+  const file = {
+    name: "candidate-provenance.pdf",
+    type: "application/pdf",
+    size: 100,
+    text: async () =>
+      [
+        "Supplier: Content Driven Services B.V.",
+        "Invoice number: CONTENT-100",
+        "Invoice date: 24-03-2026",
+        "Net amount: EUR 100.00",
+        "VAT amount: EUR 21.00",
+        "Invoice total: EUR 121.00",
+      ].join("\n"),
+  };
+
+  const first = await extractInvoiceData(file);
+  const second = await extractInvoiceData(file);
+  const reference = first.documentAnalysis?.fieldCandidates.find(
+    (candidate) => candidate.field === "referenceCode"
+  );
+
+  assert.equal(first.referenceCode, "CONTENT-100");
+  assert.equal(reference?.rawValue, "CONTENT-100");
+  assert.equal(reference?.normalizedValue, "CONTENT-100");
+  assert.equal(reference?.source, "deterministic-rule");
+  assert.equal(reference?.rule, "invoice-reference-label");
+  assert.equal(reference?.model, "generic-deterministic-v1");
+  assert.equal(reference?.supportingText, "Invoice number: CONTENT-100");
+  assert.match(reference?.id ?? "", /^candidate_[a-f0-9]{24}$/);
+  assert.equal(
+    reference?.id,
+    second.documentAnalysis?.fieldCandidates.find(
+      (candidate) => candidate.field === "referenceCode"
+    )?.id
+  );
 });
 
 test("does not invent reference or invoice date from the filename", async () => {

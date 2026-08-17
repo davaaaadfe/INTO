@@ -12,6 +12,7 @@ import type {
   FieldCandidate,
 } from "./document-analysis";
 import { amountToMinorUnits } from "./invoice-validation";
+import { genericFieldCandidates } from "./generic-candidate-extraction";
 import {
   normalizeSupplierChamberOfCommerce,
   normalizeSupplierIban,
@@ -864,6 +865,27 @@ export async function extractInvoiceData(
     "omschrijving",
     "service",
   ]);
+  const fieldCandidates = genericFieldCandidates(
+    {
+      supplierName,
+      supplierVatNumber,
+      supplierAddress,
+      referenceCode,
+      invoiceDate,
+      dueDate,
+      paymentTerms,
+      currency,
+      companyVatNumber,
+      netAmount,
+      vatAmount,
+      grossAmount,
+      extractionEvidence,
+    },
+    document.analysis.fieldCandidates,
+    document.analysis.provider.modelVersion ??
+      document.analysis.provider.model ??
+      document.analysis.provider.name
+  );
 
   return {
     supplierName,
@@ -907,10 +929,11 @@ export async function extractInvoiceData(
     extractionEvidence,
     documentAnalysis: {
       pages: document.analysis.pages,
-      fieldCandidates: document.analysis.fieldCandidates,
+      fieldCandidates,
       confidence: document.analysis.confidence,
       language: document.analysis.language,
       provider: document.analysis.provider,
+      providerOutcome: document.analysis.providerOutcome,
       sourceMode: document.analysis.sourceMode,
     },
     lineItems:

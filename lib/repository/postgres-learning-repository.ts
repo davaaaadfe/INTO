@@ -7,11 +7,14 @@ import {
   type LearningArtifactAnalysis,
   type LearningArtifactInput,
   type LearningArtifactRecord,
+  type LearningDataMigrationInput,
+  type LearningDataMigrationRecord,
   type LearningEventRecord,
   type LearningExampleInput,
   type LearningExampleRecord,
   type LearningPatternInput,
   type LearningProfileRecord,
+  type ReplaceDerivedPatternsInput,
   type LearningScope,
 } from "./learning-repository";
 import {
@@ -234,11 +237,16 @@ export const POSTGRES_LEARNING_MIGRATIONS = [
     completed_at timestamptz,
     PRIMARY KEY (migration_name, version)
   )`,
+  `ALTER TABLE supplier_learning_examples
+    ADD COLUMN IF NOT EXISTS format_signature text NOT NULL DEFAULT ''`,
+  `ALTER TABLE supplier_learning_examples
+    ADD COLUMN IF NOT EXISTS format_cluster text NOT NULL DEFAULT ''`,
 ] as const;
 
 export const POSTGRES_LEARNING_MIGRATION_STEPS = [
   { version: 1, statements: POSTGRES_LEARNING_MIGRATIONS.slice(1, 10) },
-  { version: 2, statements: POSTGRES_LEARNING_MIGRATIONS.slice(10) },
+  { version: 2, statements: POSTGRES_LEARNING_MIGRATIONS.slice(10, -2) },
+  { version: 3, statements: POSTGRES_LEARNING_MIGRATIONS.slice(-2) },
 ] as const;
 
 type PostgresRows = Array<Record<string, unknown>>;
@@ -262,6 +270,32 @@ function nullableIso(value: unknown) {
   return value === null || value === undefined ? undefined : iso(value);
 }
 
+function dataMigrationFromRow(
+  row: Record<string, unknown>
+): LearningDataMigrationRecord {
+  const rowCounts = row.row_counts_json;
+  return {
+    migrationName: String(row.migration_name),
+    version: Number(row.version),
+    sourceSnapshotRevision:
+      row.source_snapshot_revision === null ||
+      row.source_snapshot_revision === undefined
+        ? undefined
+        : Number(row.source_snapshot_revision),
+    sourceSnapshotHash: row.source_snapshot_hash
+      ? String(row.source_snapshot_hash)
+      : undefined,
+    rowCounts:
+      typeof rowCounts === "string"
+        ? (JSON.parse(rowCounts) as Record<string, number>)
+        : (rowCounts as Record<string, number>),
+    checksum: String(row.checksum),
+    status: "completed",
+    startedAt: iso(row.started_at),
+    completedAt: nullableIso(row.completed_at) ?? iso(row.started_at),
+  };
+}
+
 function profileFromRow(row: Record<string, unknown>): LearningProfileRecord {
   return {
     companyId: String(row.company_id),
@@ -280,6 +314,8 @@ function profileFromRow(row: Record<string, unknown>): LearningProfileRecord {
     lastLearnedAt: nullableIso(row.last_learned_at),
     lastResetAt: nullableIso(row.last_reset_at),
     version: Number(row.version),
+    evidenceRevision: Number(row.evidence_revision ?? 0),
+    derivedEvidenceRevision: Number(row.derived_evidence_revision ?? 0),
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   };
@@ -299,8 +335,15 @@ function exampleFromRow(row: Record<string, unknown>): LearningExampleRecord {
     originalPrediction: row.original_prediction_json,
     finalFields: row.final_fields_json,
     bookingLines: row.booking_lines_json,
+    observationState:
+      (row.observation_state_json as LearningExampleRecord["observationState"]) ??
+      {},
     fingerprint: String(row.fingerprint),
     fingerprintVersion: String(row.fingerprint_version),
+    formatSignature: row.format_signature ? String(row.format_signature) : undefined,
+    formatCluster: row.format_cluster
+      ? String(row.format_cluster)
+      : `fingerprint_${String(row.fingerprint)}`,
     validationResult: row.validation_result_json,
     processingPurpose:
       row.processing_purpose === "learning_only" ? "learning_only" : "booking",
@@ -442,12 +485,16 @@ export class PostgresLearningRepository {
              WHERE examples.company_id = profiles.company_id
                AND examples.division_code = profiles.division_code
                AND examples.supplier_account_id = profiles.supplier_account_id
+               AND examples.generation = profiles.generation
+               AND examples.active = true
            )
            OR EXISTS (
              SELECT 1 FROM supplier_learning_patterns AS patterns
              WHERE patterns.company_id = profiles.company_id
                AND patterns.division_code = profiles.division_code
                AND patterns.supplier_account_id = profiles.supplier_account_id
+               AND patterns.generation = profiles.generation
+               AND patterns.active = true
            )
            OR EXISTS (
              SELECT 1 FROM supplier_identity_aliases AS aliases
@@ -455,6 +502,7 @@ export class PostgresLearningRepository {
                AND aliases.division_code = profiles.division_code
                AND aliases.supplier_account_id = profiles.supplier_account_id
                AND aliases.source <> 'exact'
+               AND aliases.active = true
            )
          )
        ORDER BY profiles.supplier_account_id`,
@@ -493,6 +541,49 @@ export class PostgresLearningRepository {
         "Supplier learning generation changed. Refresh and try again."
       );
     }
+  }
+
+  async completeLegacyMigration(
+    input: LearningScope & { activeGeneration: number; updatedAt: string }
+  ) {
+    const rows = await this.query(
+      `WITH profile AS (
+         UPDATE supplier_learning_profiles
+         SET generation=$4, learned_count=0, confidence_score=35,
+             drift_state='none', last_learned_at=NULL,
+             updated_at=$5, version=version+1
+         WHERE company_id=$1 AND division_code=$2
+           AND supplier_account_id=$3 AND generation=0
+         RETURNING *
+       ), deactivate_examples AS (
+         UPDATE supplier_learning_examples SET active=false
+         WHERE company_id=$1 AND division_code=$2 AND supplier_account_id=$3
+           AND generation=0 AND EXISTS (SELECT 1 FROM profile)
+       ), deactivate_patterns AS (
+         UPDATE supplier_learning_patterns SET active=false
+         WHERE company_id=$1 AND division_code=$2 AND supplier_account_id=$3
+           AND generation=0 AND EXISTS (SELECT 1 FROM profile)
+       ), deactivate_aliases AS (
+         UPDATE supplier_identity_aliases SET active=false
+         WHERE company_id=$1 AND division_code=$2 AND supplier_account_id=$3
+           AND generation=0 AND source <> 'exact'
+           AND EXISTS (SELECT 1 FROM profile)
+       )
+       SELECT * FROM profile`,
+      [
+        input.companyId,
+        input.divisionCode,
+        input.supplierAccountId,
+        input.activeGeneration,
+        input.updatedAt,
+      ]
+    );
+    if (!rows[0]) {
+      throw new LearningGenerationConflictError(
+        "Supplier learning generation changed during legacy migration."
+      );
+    }
+    return profileFromRow(rows[0]);
   }
 
   async saveArtifact(input: LearningArtifactInput) {
@@ -706,14 +797,11 @@ export class PostgresLearningRepository {
         company_id, division_code, supplier_account_id, generation,
         format_cluster, field, pattern_key
       ) DO UPDATE SET
-        support_count = supplier_learning_patterns.support_count + EXCLUDED.support_count,
-        success_count = supplier_learning_patterns.success_count + EXCLUDED.success_count,
-        correction_count = supplier_learning_patterns.correction_count + EXCLUDED.correction_count,
-        confidence = (
-          supplier_learning_patterns.success_count + EXCLUDED.success_count + 1.0
-        ) / (
-          supplier_learning_patterns.support_count + EXCLUDED.support_count + 2.0
-        ),
+        support_count = EXCLUDED.support_count,
+        success_count = EXCLUDED.success_count,
+        correction_count = EXCLUDED.correction_count,
+        confidence = (EXCLUDED.success_count + 1.0) /
+          (EXCLUDED.support_count + 2.0),
         drift_state = EXCLUDED.drift_state,
         model_version = EXCLUDED.model_version,
         label = EXCLUDED.label,
@@ -777,6 +865,100 @@ export class PostgresLearningRepository {
     );
   }
 
+  async replaceDerivedPatterns(input: ReplaceDerivedPatternsInput) {
+    const patterns = input.patterns.map((pattern) => ({
+      id: pattern.id,
+      format_cluster: pattern.formatCluster,
+      field: pattern.field,
+      pattern_key: pattern.patternKey,
+      label: pattern.label ?? null,
+      anchor_json: pattern.anchor ?? null,
+      normalized_region_json: pattern.normalizedRegion ?? null,
+      data_type: pattern.dataType ?? null,
+      booking_mapping_json: pattern.bookingMapping ?? null,
+      support_count: pattern.supportCount,
+      success_count: pattern.successCount,
+      correction_count: pattern.correctionCount,
+      drift_state: pattern.driftState,
+      created_at: pattern.createdAt,
+    }));
+    const rows = await this.query(
+      `WITH profile_ok AS (
+        SELECT evidence_revision FROM supplier_learning_profiles
+        WHERE company_id=$1 AND division_code=$2 AND supplier_account_id=$3
+          AND generation=$4
+        FOR UPDATE
+      ), deactivated AS (
+        UPDATE supplier_learning_patterns SET active=false, updated_at=$6
+        WHERE company_id=$1 AND division_code=$2 AND supplier_account_id=$3
+          AND generation=$4 AND model_version=$5
+          AND EXISTS (SELECT 1 FROM profile_ok)
+        RETURNING id
+      ), upserted AS (
+        INSERT INTO supplier_learning_patterns (
+          id, company_id, division_code, supplier_account_id, generation,
+          format_cluster, field, pattern_key, label, anchor_json,
+          normalized_region_json, data_type, booking_mapping_json,
+          support_count, success_count, correction_count, confidence,
+          drift_state, model_version, active, created_at, updated_at
+        )
+        SELECT pattern.id,$1,$2,$3,$4,pattern.format_cluster,pattern.field,
+          pattern.pattern_key,pattern.label,pattern.anchor_json,
+          pattern.normalized_region_json,pattern.data_type,pattern.booking_mapping_json,
+          pattern.support_count,pattern.success_count,pattern.correction_count,
+          (pattern.success_count + 1.0) / (pattern.support_count + 2.0),
+          pattern.drift_state,$5,true,pattern.created_at,$6
+        FROM jsonb_to_recordset($7::jsonb) AS pattern(
+          id text, format_cluster text, field text, pattern_key text, label text,
+          anchor_json jsonb, normalized_region_json jsonb, data_type text,
+          booking_mapping_json jsonb, support_count double precision,
+          success_count double precision, correction_count double precision,
+          drift_state text, created_at timestamptz
+        ), profile_ok
+        ON CONFLICT(
+          company_id, division_code, supplier_account_id, generation,
+          format_cluster, field, pattern_key
+        ) DO UPDATE SET
+          support_count = EXCLUDED.support_count,
+          success_count = EXCLUDED.success_count,
+          correction_count = EXCLUDED.correction_count,
+          confidence = EXCLUDED.confidence,
+          drift_state = EXCLUDED.drift_state,
+          model_version = EXCLUDED.model_version,
+          label = EXCLUDED.label,
+          anchor_json = EXCLUDED.anchor_json,
+          normalized_region_json = EXCLUDED.normalized_region_json,
+          data_type = EXCLUDED.data_type,
+          booking_mapping_json = EXCLUDED.booking_mapping_json,
+          active = true,
+          updated_at = EXCLUDED.updated_at
+        RETURNING id
+      ), updated AS (
+        UPDATE supplier_learning_profiles AS profiles
+        SET derived_evidence_revision = profile_ok.evidence_revision,
+            updated_at=$6
+        FROM profile_ok
+        WHERE profiles.company_id=$1 AND profiles.division_code=$2
+          AND profiles.supplier_account_id=$3 AND profiles.generation=$4
+        RETURNING profiles.derived_evidence_revision
+      ) SELECT derived_evidence_revision FROM updated`,
+      [
+        input.companyId,
+        input.divisionCode,
+        input.supplierAccountId,
+        input.generation,
+        input.modelVersion,
+        input.updatedAt,
+        JSON.stringify(patterns),
+      ]
+    );
+    if (!rows[0]) {
+      throw new LearningGenerationConflictError(
+        "Supplier learning generation changed. Refresh and try again."
+      );
+    }
+  }
+
   async saveExample(input: LearningExampleInput) {
     const eventId = `event_${randomUUID()}`;
     const rows = await this.query(
@@ -785,6 +967,20 @@ export class PostgresLearningRepository {
         WHERE company_id=$2 AND division_code=$3 AND supplier_account_id=$4
           AND generation=$5
         FOR UPDATE
+      ), existing AS (
+        SELECT * FROM supplier_learning_examples
+        WHERE company_id=$2 AND division_code=$3 AND supplier_account_id=$4
+          AND generation=$5 AND content_hash=$8 AND active=true
+        FOR UPDATE
+      ), same_truth AS (
+        SELECT 1 FROM existing
+        WHERE final_fields_json=$11::jsonb AND booking_lines_json=$12::jsonb
+      ), deactivated AS (
+        UPDATE supplier_learning_examples
+        SET active=false, superseded_by_id=$1, deactivated_at=$23
+        WHERE id IN (SELECT id FROM existing)
+          AND NOT EXISTS (SELECT 1 FROM same_truth)
+        RETURNING id
       ), inserted AS (
         INSERT INTO supplier_learning_examples (
           id, company_id, division_code, supplier_account_id, generation,
@@ -792,18 +988,27 @@ export class PostgresLearningRepository {
           original_prediction_json, final_fields_json, booking_lines_json,
           fingerprint, fingerprint_version, validation_result_json,
           processing_purpose, source, trust_state, trigger, actor_id,
-          session_correlation_id, request_id, active, created_at
+          session_correlation_id, request_id, active, created_at,
+          observation_state_json, format_signature, format_cluster
         )
         SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12::jsonb,
-          $13,$14,$15::jsonb,$16,$17,$18,$19,$20,$21,$22,true,$23
+          $13,$14,$15::jsonb,$16,$17,$18,$19,$20,$21,$22,true,$23,$27::jsonb,
+          $28,$29
         FROM profile_ok
+        WHERE NOT EXISTS (SELECT 1 FROM same_truth)
+          AND (
+            NOT EXISTS (SELECT 1 FROM existing) OR
+            EXISTS (SELECT 1 FROM deactivated)
+          )
         ON CONFLICT(company_id, division_code, supplier_account_id, generation, content_hash)
           DO NOTHING
         RETURNING *
       ), updated AS (
         UPDATE supplier_learning_profiles
-        SET learned_count = learned_count + 1,
+        SET learned_count = learned_count + CASE
+              WHEN EXISTS (SELECT 1 FROM existing) THEN 0 ELSE 1 END,
             last_learned_at = $23, updated_at = $23, version = version + 1
+            , evidence_revision = evidence_revision + 1
         WHERE company_id=$2 AND division_code=$3 AND supplier_account_id=$4
           AND generation=$5 AND EXISTS (SELECT 1 FROM inserted)
       ), event_insert AS (
@@ -815,7 +1020,11 @@ export class PostgresLearningRepository {
         SELECT $24,$2,$3,$4,$5,'learn',$25,$20,$21,$22,$26::jsonb,$23
         FROM inserted
         ON CONFLICT(company_id, idempotency_key) DO NOTHING
-      ) SELECT * FROM inserted`,
+      )
+      SELECT inserted.*, true AS command_created FROM inserted
+      UNION ALL
+      SELECT existing.*, false AS command_created FROM existing
+      WHERE EXISTS (SELECT 1 FROM same_truth)`,
       [
         input.id,
         input.companyId,
@@ -841,21 +1050,27 @@ export class PostgresLearningRepository {
         input.requestId,
         input.createdAt,
         eventId,
-        `learn:${input.supplierAccountId}:${input.generation}:${input.contentHash}`,
+        `learn:${input.supplierAccountId}:${input.generation}:${input.contentHash}:${input.id}`,
         JSON.stringify({
           invoiceId: input.invoiceId,
           exampleId: input.id,
           trigger: input.trigger,
         }),
+        JSON.stringify(input.observationState ?? {}),
+        input.formatSignature ?? "",
+        input.formatCluster ?? `fingerprint_${input.fingerprint}`,
       ]
     );
     if (rows[0]) {
-      return { example: exampleFromRow(rows[0]), created: true };
+      return {
+        example: exampleFromRow(rows[0]),
+        created: Boolean(rows[0].command_created),
+      };
     }
     const existing = await this.query(
       `SELECT * FROM supplier_learning_examples
        WHERE company_id=$1 AND division_code=$2 AND supplier_account_id=$3
-         AND generation=$4 AND content_hash=$5`,
+         AND generation=$4 AND content_hash=$5 AND active=true`,
       [
         input.companyId,
         input.divisionCode,
@@ -907,6 +1122,7 @@ export class PostgresLearningRepository {
         UPDATE supplier_learning_profiles SET
           generation=$4, learned_count=0, confidence_score=35,
           drift_state='none', last_learned_at=NULL,
+          evidence_revision=0, derived_evidence_revision=0,
           last_reset_at=$5, updated_at=$5,
           version=version+1
         WHERE company_id=$1 AND division_code=$2 AND supplier_account_id=$3
@@ -983,5 +1199,72 @@ export class PostgresLearningRepository {
         createdAt: iso(row.created_at),
       })
     );
+  }
+
+  async saveEvent(input: LearningEventRecord) {
+    await this.query(
+      `INSERT INTO supplier_learning_events (
+         id, company_id, division_code, supplier_account_id, generation,
+         type, idempotency_key, actor_id, session_correlation_id, request_id,
+         metadata_json, created_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12)
+       ON CONFLICT (company_id, idempotency_key) DO NOTHING`,
+      [
+        input.id,
+        input.companyId,
+        input.divisionCode,
+        input.supplierAccountId,
+        input.generation,
+        input.type,
+        input.idempotencyKey,
+        input.actorId,
+        input.sessionCorrelationId,
+        input.requestId,
+        JSON.stringify(input.metadata),
+        input.createdAt,
+      ]
+    );
+  }
+
+  async getDataMigration(migrationName: string, version: number) {
+    const rows = await this.query(
+      `SELECT * FROM supplier_learning_data_migrations
+       WHERE migration_name=$1 AND version=$2`,
+      [migrationName, version]
+    );
+    return rows[0] ? dataMigrationFromRow(rows[0]) : null;
+  }
+
+  async recordDataMigration(input: LearningDataMigrationInput) {
+    const rows = await this.query(
+      `INSERT INTO supplier_learning_data_migrations (
+         migration_name, version, source_snapshot_revision,
+         source_snapshot_hash, status, row_counts_json, checksum,
+         started_at, completed_at
+       ) VALUES ($1, $2, $3, $4, 'completed', $5::jsonb, $6, $7, $8)
+       ON CONFLICT (migration_name, version) DO UPDATE SET
+         migration_name = EXCLUDED.migration_name
+       WHERE supplier_learning_data_migrations.checksum = EXCLUDED.checksum
+       RETURNING *, (xmax = 0) AS inserted`,
+      [
+        input.migrationName,
+        input.version,
+        input.sourceSnapshotRevision ?? null,
+        input.sourceSnapshotHash ?? null,
+        JSON.stringify(input.rowCounts),
+        input.checksum,
+        input.startedAt,
+        input.completedAt,
+      ]
+    );
+    if (!rows[0]) {
+      throw new Error(
+        "Learning data migration checksum does not match the recorded input."
+      );
+    }
+    return {
+      record: dataMigrationFromRow(rows[0]),
+      created: Boolean(rows[0].inserted),
+    };
   }
 }

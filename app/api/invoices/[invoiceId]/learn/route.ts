@@ -4,6 +4,7 @@ import type {
 } from "../../../../../lib/domain/invoice";
 import {
   getInvoice,
+  InvoiceLearningPreconditionError,
   InvoiceRevisionConflictError,
   InvoiceRevisionValidationError,
   learnInvoice,
@@ -21,8 +22,10 @@ type RouteContext = {
 
 export async function POST(request: Request, context: RouteContext) {
   return withPersistentStore(async (principal) => {
+    const flags = learningFeatureFlags();
     if (
-      !learningFeatureFlags().learningV2Enabled ||
+      !flags.learningV2Enabled ||
+      !flags.learnWorkflowEnabled ||
       supplierLearningMode() === "off"
     ) {
       return Response.json(
@@ -69,16 +72,34 @@ export async function POST(request: Request, context: RouteContext) {
       const bookingLines = Array.isArray(payload.bookingLines)
         ? payload.bookingLines
         : invoice.bookingLineOverrides ?? invoice.purchaseJournal?.lines ?? [];
+      const previousRevision = invoice.revision;
+      const previousRequestFingerprint = invoice.learningMetadata?.requestFingerprint;
+      const requestKey =
+        request.headers.get("idempotency-key")?.trim() ||
+        (typeof payload.requestKey === "string" ? payload.requestKey : undefined);
       const learned = learnInvoice(
         invoiceId,
         correctedData,
         bookingLines,
         payload.expectedRevision as number,
-        typeof payload.requestKey === "string" ? payload.requestKey : undefined
+        requestKey
+      );
+      const replayed = Boolean(
+        learned?.revision === previousRevision &&
+          previousRequestFingerprint &&
+          learned.learningMetadata?.requestFingerprint === previousRequestFingerprint
       );
       return Response.json({
         message: "Learning saved for this supplier.",
         invoice: learned,
+        learning: learned?.learningMetadata
+          ? {
+              exampleId: learned.learningMetadata.exampleId,
+              generation: learned.learningMetadata.generation,
+              savedAt: learned.learningMetadata.learnedAt,
+              replayed,
+            }
+          : undefined,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Learning failed.";
@@ -95,7 +116,13 @@ export async function POST(request: Request, context: RouteContext) {
       if (error instanceof InvoiceRevisionValidationError) {
         return Response.json({ error: message, code: error.code }, { status: 422 });
       }
-      return Response.json({ error: message, invoice: getInvoice(invoiceId) }, { status: 409 });
+      if (error instanceof InvoiceLearningPreconditionError) {
+        return Response.json({ error: message, code: error.code }, { status: 422 });
+      }
+      if (error instanceof SyntaxError) {
+        return Response.json({ error: "Invalid request data." }, { status: 422 });
+      }
+      throw error;
     }
   }, request);
 }

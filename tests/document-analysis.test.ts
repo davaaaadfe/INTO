@@ -7,8 +7,20 @@ import {
   type DocumentAnalysisProvider,
 } from "../lib/services/document-analysis";
 import { extractDocumentText } from "../lib/services/invoice-document-text";
+import type { DocumentAnalysis as CanonicalDocumentAnalysis } from "../lib/domain/document-analysis";
+import type { DocumentAnalysisArtifact } from "../lib/domain/invoice";
 
 function assertReadonlyAnalysisContract(analysis: DocumentAnalysis) {
+  const canonical: CanonicalDocumentAnalysis = analysis;
+  const artifact: DocumentAnalysisArtifact = {
+    pages: canonical.pages,
+    fieldCandidates: canonical.fieldCandidates,
+    confidence: canonical.confidence,
+    language: canonical.language,
+    provider: canonical.provider,
+    sourceMode: canonical.sourceMode,
+  };
+  void artifact;
   if (false) {
     // @ts-expect-error Document analysis pages are immutable after creation.
     analysis.pages.push(analysis.pages[0]);
@@ -106,6 +118,7 @@ test("document text keeps managed field candidates and token geometry", async ()
     rawText: "Structured Supplier BV",
     confidence: 0.99,
     provider: { name: "test-provider" },
+    providerOutcome: { status: "succeeded", adapter: "test-provider" },
     sourceMode: "ocr",
   });
 
@@ -135,6 +148,7 @@ test("document text keeps managed field candidates and token geometry", async ()
     source: "test-provider",
   });
   assert.deepEqual(document.pages[0].tokens[0].polygon, polygon);
+  assert.equal(document.mode, "ocr");
 });
 
 test("document intelligence stays offline unless enabled and fully configured", async () => {
@@ -163,6 +177,36 @@ test("document intelligence stays offline unless enabled and fully configured", 
   assert.equal(calls, 0);
   assert.equal(analysis.provider.name, "local");
   assert.equal(analysis.rawText, "Invoice number: OFFLINE-1");
+  assert.deepEqual(analysis.providerOutcome, {
+    status: "succeeded",
+    adapter: "local",
+  });
+});
+
+test("scanned input reports OCR unavailable without calling an external provider", async () => {
+  let calls = 0;
+  const analysis = await analyzeDocument(
+    {
+      name: "offline-scan.png",
+      type: "image/png",
+      arrayBuffer: async () => Uint8Array.from([1, 2, 3]).buffer,
+    },
+    {
+      env: { DOCUMENT_INTELLIGENCE_ENABLED: "false" },
+      provider: async () => {
+        calls += 1;
+        throw new Error("must not be called");
+      },
+    }
+  );
+
+  assert.equal(calls, 0);
+  assert.equal(analysis.sourceMode, "unavailable");
+  assert.deepEqual(analysis.providerOutcome, {
+    status: "unavailable",
+    adapter: "local",
+    reason: "ocr_unavailable",
+  });
 });
 
 test("a configured provider failure returns deterministic local analysis", async () => {
@@ -188,7 +232,42 @@ test("a configured provider failure returns deterministic local analysis", async
   });
 
   assert.equal(calls, 1);
-  assert.deepEqual(fallback, local);
+  assert.deepEqual(
+    { ...fallback, providerOutcome: undefined },
+    { ...local, providerOutcome: undefined }
+  );
+  assert.deepEqual(fallback.providerOutcome, {
+    status: "failed",
+    adapter: "managed-document-analysis",
+    reason: "provider_error",
+  });
+});
+
+test("managed OCR timeout is classified without exposing provider error text", async () => {
+  const analysis = await analyzeDocument(
+    {
+      name: "timeout-scan.png",
+      type: "image/png",
+      arrayBuffer: async () => Uint8Array.from([1, 2, 3]).buffer,
+    },
+    {
+      env: {
+        DOCUMENT_INTELLIGENCE_ENABLED: "true",
+        DOCUMENT_INTELLIGENCE_ENDPOINT: "https://example.invalid",
+        DOCUMENT_INTELLIGENCE_KEY: "secret",
+      },
+      provider: async () => {
+        throw new Error("Document intelligence analysis timed out: sensitive detail");
+      },
+    }
+  );
+
+  assert.deepEqual(analysis.providerOutcome, {
+    status: "failed",
+    adapter: "managed-document-analysis",
+    reason: "timeout",
+  });
+  assert.doesNotMatch(JSON.stringify(analysis.providerOutcome), /sensitive/i);
 });
 
 test("text-rich embedded PDFs stay local when managed OCR is enabled", async () => {
@@ -308,6 +387,10 @@ test("Azure v4 uses base64 JSON, bounded polling, and normalized invoice fields"
   assert.equal(clock, 1_000);
   assert.equal(calls[1].url, "https://example.invalid/operations/result-1");
   assert.equal(analysis.provider.model, "prebuilt-invoice");
+  assert.deepEqual(analysis.providerOutcome, {
+    status: "succeeded",
+    adapter: "azure-document-intelligence",
+  });
   assert.deepEqual(
     analysis.fieldCandidates.map(({ field, value, page, confidence, source }) => ({
       field,

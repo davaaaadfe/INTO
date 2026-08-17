@@ -1,4 +1,4 @@
-import type { DocumentTextMode } from "../domain/invoice";
+import type { DocumentAnalysisSourceMode } from "../domain/document-analysis";
 import {
   analyzeDocument,
   type DocumentAnalysisOptions,
@@ -15,7 +15,7 @@ export type DocumentTextPage = {
 };
 
 export type DocumentTextResult = {
-  readonly mode: DocumentTextMode;
+  readonly mode: DocumentAnalysisSourceMode;
   readonly pages: readonly DocumentTextPage[];
   readonly text: string;
   readonly fieldCandidates: readonly FieldCandidate[];
@@ -29,8 +29,7 @@ export async function extractDocumentText(
   options: DocumentAnalysisOptions = {}
 ): Promise<DocumentTextResult> {
   const analysis = await analyzeDocument(input, options);
-  const mode: DocumentTextMode =
-    analysis.sourceMode === "ocr" ? "plain_text" : analysis.sourceMode;
+  const mode = analysis.sourceMode;
   return {
     mode,
     pages: analysis.pages.map((page) => ({

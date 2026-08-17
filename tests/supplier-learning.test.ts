@@ -10,6 +10,7 @@ import {
   formatFingerprint,
   learnSupplierInvoice,
   resetSupplierLearning,
+  structuralFormat,
   supplierConfidence,
 } from "../lib/services/supplier-learning";
 
@@ -152,7 +153,7 @@ test("reset starts a new generation without deleting trusted history", () => {
   assert.equal(relearned.supplierProfiles[0].exampleCount, 1);
 });
 
-test("format fingerprints ignore invoice literals and expose format drift", () => {
+test("format fingerprints ignore invoice literals without treating a new layout as drift", () => {
   const firstDocument = [
     "Invoice number INV-2026-001",
     "Invoice date 2026-07-01",
@@ -186,8 +187,8 @@ test("format fingerprints ignore invoice literals and expose format drift", () =
   );
   const profile = learning.supplierProfiles[0];
 
-  assert.equal(profile.formatDrift, "possible");
-  assert.equal(supplierConfidence(profile).driftPenalty, 10);
+  assert.equal(profile.formatDrift, "none");
+  assert.equal(supplierConfidence(profile).driftPenalty, 0);
 });
 
 test("format fingerprints ignore alphabetic field values and line-item descriptions", () => {
@@ -243,6 +244,61 @@ test("format fingerprints ignore the number of line items", () => {
 
   assert.equal(formatFingerprint(twoItems), formatFingerprint(oneItem));
   assert.notEqual(formatFingerprint(twoItems), formatFingerprint(reorderedHeader));
+});
+
+test("learning assigns multiple format clusters and rebuilds active patterns absolutely", () => {
+  const layoutA = structuralFormat("Invoice number: A-1\nTotal: EUR 10.00");
+  const layoutB = structuralFormat("Document reference: B-1\nAmount due: EUR 20.00");
+  const add = (
+    learning: BookingLearningStore,
+    id: string,
+    layout: ReturnType<typeof structuralFormat>
+  ) => learnSupplierInvoice(learning, {
+    supplierAccountId: "supplier-clusters",
+    invoiceId: `invoice-${id}`,
+    contentHash: `hash-${id}`,
+    formatFingerprint: layout.fingerprint,
+    formatSignature: layout.signature,
+    learnedAt,
+    trustState: "trusted",
+    originalExtractedData: { referenceCode: `${id}-old` } as never,
+    finalExtractedData: { referenceCode: id } as never,
+  });
+
+  let learning = add(createInitialLearningStore(), "a1", layoutA);
+  learning = add(learning, "a2", layoutA);
+  learning = add(learning, "b1", layoutB);
+
+  assert.equal(new Set(learning.supplierExamples.map((item) => item.formatCluster)).size, 2);
+  assert.deepEqual(
+    Object.fromEntries(
+      learning.supplierPatterns.map((pattern) => [
+        pattern.formatCluster,
+        [pattern.field, pattern.attempts],
+      ])
+    ),
+    {
+      [learning.supplierExamples[0].formatCluster!]: ["referenceCode", 2],
+      [learning.supplierExamples[2].formatCluster!]: ["referenceCode", 1],
+    }
+  );
+
+  const reset = resetSupplierLearning(
+    learning,
+    "supplier-clusters",
+    "2026-08-17T11:00:00.000Z"
+  );
+  const relearned = add(reset, "a3", layoutA);
+  const activeGeneration = relearned.supplierProfiles[0].generation;
+  assert.deepEqual(
+    relearned.supplierPatterns.filter((pattern) => pattern.generation === activeGeneration),
+    [
+      {
+        ...relearned.supplierPatterns.at(-1),
+        generation: activeGeneration,
+      },
+    ]
+  );
 });
 
 test("shared learning types expose the approved status, permissions, and revision", () => {

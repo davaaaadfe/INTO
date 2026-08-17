@@ -137,6 +137,46 @@ function learningInvoice() {
   return { invoice: computed, extractedData };
 }
 
+test("Learn assigns close structural layouts to one supplier cluster", () => {
+  const learnLayout = (rawText: string) => {
+    const { invoice, extractedData } = learningInvoice();
+    const finalData = { ...extractedData, rawText };
+    const learned = learnInvoice(
+      invoice.id,
+      finalData,
+      invoice.purchaseJournal!.lines,
+      invoice.revision!
+    )!;
+    return getStore().learning.supplierExamples.find(
+      (example) => example.id === learned.learningMetadata!.exampleId
+    )!;
+  };
+  const first = learnLayout([
+    "Invoice number: A-1",
+    "Invoice date: 2026-08-01",
+    "Description | Quantity | Price",
+    "Chair | 2 | EUR 100.00",
+    "Total: EUR 200.00",
+  ].join("\n"));
+  const close = learnLayout([
+    "Supplier: Noordzee",
+    "Invoice number: A-2",
+    "Invoice date: 2026-08-17",
+    "Description | Quantity | Price",
+    "Cloud subscription | 12 | EUR 50.00",
+    "Total: EUR 600.00",
+  ].join("\n"));
+  const distinct = learnLayout([
+    "Document reference: B-1",
+    "Amount due: EUR 600.00",
+    "Issued: 2026-08-17",
+  ].join("\n"));
+
+  assert.notEqual(first.formatFingerprint, close.formatFingerprint);
+  assert.equal(first.formatCluster, close.formatCluster);
+  assert.notEqual(first.formatCluster, distinct.formatCluster);
+});
+
 test("Learn stores the live corrected draft once and never books it", () => {
   const { invoice, extractedData } = learningInvoice();
   const revisionBefore = invoice.revision ?? 1;
@@ -175,8 +215,11 @@ test("Learn stores the live corrected draft once and never books it", () => {
   assert.equal(learned?.storageKey, invoice.storageKey);
   assert.equal(learned?.revision, revisionBefore + 1);
   assert.equal(learnedAgain?.revision, learned?.revision);
-  assert.equal(getStore().learning.supplierExamples.length, 1);
-  const example = getStore().learning.supplierExamples[0];
+  const invoiceExamples = getStore().learning.supplierExamples.filter(
+    (item) => item.invoiceId === invoice.id
+  );
+  assert.equal(invoiceExamples.length, 1);
+  const example = invoiceExamples[0]!;
   assert.equal(example.originalExtractedData!.expenseDescription, "Office Supplies");
   assert.equal(
     example.finalExtractedData!.expenseDescription,
@@ -248,6 +291,36 @@ test("Learn requires completed source analysis and at least one trainable field"
       ),
     /at least one trainable invoice field/i
   );
+});
+
+test("Learn rejects a synthetic supplier-overview identity", () => {
+  const { invoice, extractedData } = learningInvoice();
+  const cache = getStore().exactMasterDataCaches[0]!.cache;
+  const supplier = cache.suppliers.find(
+    (item) => item.id === invoice.purchaseJournal?.supplierResolution.selectedAccountId
+  )!;
+  const originalId = supplier.id;
+  try {
+    supplier.id = `supplier-overview:${supplier.code}`;
+    const recomputed = recomputeInvoiceState(invoice.id)!;
+    assert.match(
+      recomputed.purchaseJournal?.supplierResolution.selectedAccountId ?? "",
+      /^supplier-overview:/
+    );
+
+    assert.throws(
+      () =>
+        learnInvoice(
+          invoice.id,
+          extractedData,
+          recomputed.purchaseJournal!.lines,
+          recomputed.revision
+        ),
+      /canonical Exact supplier/i
+    );
+  } finally {
+    supplier.id = originalId;
+  }
 });
 
 test("successful booking promotes pending corrections", () => {
@@ -584,6 +657,12 @@ test("same-content invoices replay only their own canonical Learn request", () =
   };
   const firstLines = first.invoice.purchaseJournal!.lines;
   const secondLines = second.invoice.purchaseJournal!.lines;
+  const supplierAccountId = first.invoice.purchaseJournal!.supplierResolution
+    .selectedAccountId!;
+  const exampleCountBefore =
+    getStore().learning.supplierProfiles.find(
+      (profile) => profile.supplierAccountId === supplierAccountId
+    )?.exampleCount ?? 0;
 
   const firstLearned = learnInvoice(
     first.invoice.id,
@@ -597,6 +676,27 @@ test("same-content invoices replay only their own canonical Learn request", () =
     secondLines,
     secondRevision
   )!;
+
+  const versions = getStore().learning.supplierExamples.filter(
+    (example) => example.contentHash === "shared-content-hash"
+  );
+  assert.equal(versions.length, 2);
+  assert.equal(versions.filter((example) => example.active !== false).length, 1);
+  assert.equal(
+    versions.find((example) => example.active === false)?.supersededById,
+    versions.find((example) => example.active !== false)?.id
+  );
+  assert.equal(
+    versions.find((example) => example.active !== false)?.finalExtractedData
+      ?.expenseDescription,
+    "Second correction"
+  );
+  assert.equal(
+    getStore().learning.supplierProfiles.find(
+      (profile) => profile.supplierAccountId === supplierAccountId
+    )?.exampleCount,
+    exampleCountBefore + 1
+  );
 
   assert.notEqual(
     firstLearned.learningMetadata?.requestFingerprint,
@@ -642,6 +742,44 @@ test("learning-only repository booking mutations reject before changing state", 
   );
   assert.throws(() => markInvoiceNeedsReview(learned.id), /Learned invoices/i);
   assert.equal(JSON.stringify(getStore().invoices.find((item) => item.id === learned.id)), before);
+});
+
+test("Learned invoices remain terminal across every review mutation", () => {
+  const { invoice, extractedData } = learningInvoice();
+  const learned = learnInvoice(
+    invoice.id,
+    extractedData,
+    invoice.purchaseJournal!.lines,
+    invoice.revision
+  )!;
+  const revisionBefore = learned.revision;
+
+  assert.throws(
+    () => updateInvoiceExtraction(learned.id, extractedData),
+    /cannot be reprocessed/i
+  );
+  assert.throws(
+    () => saveInvoiceReview(learned.id, extractedData),
+    /cannot be edited/i
+  );
+  assert.throws(
+    () => replaceInvoiceExtractionFromReread(learned.id, extractedData),
+    /cannot be re-read/i
+  );
+  assert.throws(
+    () => approveInvoiceIntelligence(learned.id),
+    /cannot be approved/i
+  );
+  assert.throws(
+    () => selectInvoiceSupplier(learned.id, "supplier_noordzee"),
+    /cannot change supplier/i
+  );
+  const recomputed = recomputeInvoiceState(learned.id)!;
+  assert.equal(recomputed.status, "Learned");
+  assert.equal(recomputed.processingPurpose, "learning_only");
+  assert.equal(recomputed.learningState, "saved");
+  assert.equal(recomputed.revision, revisionBefore);
+  assert.equal(recomputed.exactBookingStatus, "not_booked");
 });
 
 test("Learn rejects a stale invoice revision before mutating any draft or learning state", () => {

@@ -98,6 +98,8 @@ test("SQLite rolls back snapshot and normalized learning together when projectio
     const store = getStore();
     const supplier = createMockExactMasterData().suppliers[0]!;
     const invoice = store.invoices[0]!;
+    delete invoice.analysisArtifactId;
+    invoice.extractedData.rawText = "Atomic rollback source evidence";
     store.exactMasterDataCaches = [{ userId: "company_connection", cache: createMockExactMasterData() }];
     store.learning.supplierProfiles = [{
       supplierAccountId: supplier.id,
@@ -120,6 +122,7 @@ test("SQLite rolls back snapshot and normalized learning together when projectio
       finalExtractedData: structuredClone(invoice.extractedData),
       bookingLines: [],
     }];
+    const previousArtifactId = invoice.analysisArtifactId;
     runtime.__INTO_STORE_TEST_HOOKS = {
       beforeLearningProjection: () => {
         throw new Error("post-CAS projection fault");
@@ -135,6 +138,7 @@ test("SQLite rolls back snapshot and normalized learning together when projectio
       snapshot?.auditEvents.some((event) => event.id === "post-cas-example"),
       false
     );
+    assert.equal(invoice.analysisArtifactId, previousArtifactId);
     const repository = await configuredLearningRepository();
     assert.equal(
       (await repository?.listProfiles("into-company", "unassigned"))?.length,
@@ -152,6 +156,64 @@ test("SQLite rolls back snapshot and normalized learning together when projectio
     else process.env.LEARNING_V2_ENABLED = previous.enabled;
     if (previous.learningMode === undefined) delete process.env.SUPPLIER_LEARNING_MODE;
     else process.env.SUPPLIER_LEARNING_MODE = previous.learningMode;
+    await removeDatabase(databasePath);
+  }
+});
+
+test("a failed persistent Learn-style mutation restores the live server invoice", async () => {
+  const databasePath = testDatabasePath();
+  const previous = {
+    mode: process.env.DATABASE_MODE,
+    path: process.env.LOCAL_DATABASE_PATH,
+    key: process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY,
+    enabled: process.env.LEARNING_V2_ENABLED,
+  };
+  const runtime = globalThis as typeof globalThis & {
+    __INTO_STORE_TEST_HOOKS?: {
+      beforeLearningProjection?: () => void | Promise<void>;
+    };
+  };
+  process.env.DATABASE_MODE = "sqlite";
+  process.env.LOCAL_DATABASE_PATH = databasePath;
+  process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY = "learn-request-rollback-key";
+  process.env.LEARNING_V2_ENABLED = "true";
+
+  try {
+    clearRuntime();
+    await hydrateStoreFromPersistence();
+    const before = structuredClone(getStore().invoices[0]!);
+    runtime.__INTO_STORE_TEST_HOOKS = {
+      beforeLearningProjection: () => {
+        throw new Error("learn transaction failed");
+      },
+    };
+
+    const result = await withPersistentStore(() => {
+      const invoice = getStore().invoices[0]!;
+      invoice.status = "Learned";
+      invoice.processingPurpose = "learning_only";
+      invoice.learningState = "saved";
+      invoice.revision += 1;
+      persistStoreSoon();
+      return Response.json({ invoice });
+    });
+
+    assert.ok(result instanceof Response);
+    assert.equal(result.status, 500);
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(getStore().invoices[0])),
+      JSON.parse(JSON.stringify(before))
+    );
+  } finally {
+    delete runtime.__INTO_STORE_TEST_HOOKS;
+    if (previous.mode === undefined) delete process.env.DATABASE_MODE;
+    else process.env.DATABASE_MODE = previous.mode;
+    if (previous.path === undefined) delete process.env.LOCAL_DATABASE_PATH;
+    else process.env.LOCAL_DATABASE_PATH = previous.path;
+    if (previous.key === undefined) delete process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY;
+    else process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY = previous.key;
+    if (previous.enabled === undefined) delete process.env.LEARNING_V2_ENABLED;
+    else process.env.LEARNING_V2_ENABLED = previous.enabled;
     await removeDatabase(databasePath);
   }
 });
@@ -440,6 +502,32 @@ test("legacy snapshots with missing learning arrays survive migration and the ne
     assert.deepEqual(getStore().learning.supplierProfiles, []);
     assert.deepEqual(getStore().learning.supplierExamples, []);
     assert.deepEqual(getStore().learning.corrections, []);
+    const database = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      const migrations = database
+        .prepare(
+          `SELECT migration_name, status, row_counts_json
+           FROM supplier_learning_data_migrations`
+        )
+        .all() as Array<{
+        migration_name: string;
+        status: string;
+        row_counts_json: string;
+      }>;
+      assert.equal(migrations.length, 1);
+      assert.match(migrations[0]!.migration_name, /^legacy-learning:/);
+      assert.equal(migrations[0]!.status, "completed");
+      assert.deepEqual(JSON.parse(migrations[0]!.row_counts_json), {
+        corrections: 0,
+        examples: 0,
+        mappings: 0,
+        patterns: 0,
+        selections: 0,
+      });
+    } finally {
+      database.close();
+    }
+    assert.ok((await loadSqliteStoreSnapshot(databasePath))?.learningRepositoryMigratedAt);
   } finally {
     if (previous.mode === undefined) delete process.env.DATABASE_MODE;
     else process.env.DATABASE_MODE = previous.mode;
@@ -513,6 +601,189 @@ test("legacy migration skips Exact suppliers without learning evidence", async (
     } else {
       process.env.SUPPLIER_LEARNING_MODE = previous.learningMode;
     }
+    await removeDatabase(databasePath);
+  }
+});
+
+test("legacy migration trusts only corroborated Learn examples and deactivates generation-zero history", async () => {
+  const databasePath = testDatabasePath();
+  const previous = {
+    mode: process.env.DATABASE_MODE,
+    path: process.env.LOCAL_DATABASE_PATH,
+    key: process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY,
+    enabled: process.env.LEARNING_V2_ENABLED,
+    learningMode: process.env.SUPPLIER_LEARNING_MODE,
+  };
+  process.env.DATABASE_MODE = "sqlite";
+  process.env.LOCAL_DATABASE_PATH = databasePath;
+  process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY = "legacy-trust-split-key";
+  process.env.LEARNING_V2_ENABLED = "true";
+  process.env.SUPPLIER_LEARNING_MODE = "apply";
+
+  try {
+    clearRuntime();
+    const snapshot = structuredClone(getStore());
+    const masterData = createMockExactMasterData();
+    const trustedSupplier = masterData.suppliers[0]!;
+    const legacySupplier = masterData.suppliers[1]!;
+    const trustedInvoice = snapshot.invoices[0]!;
+    const legacyInvoice = structuredClone(trustedInvoice);
+    const learnedAt = "2026-08-10T10:00:00.000Z";
+    trustedInvoice.id = "trusted-migrated-invoice";
+    trustedInvoice.checksum = "sha256:trusted-migrated";
+    trustedInvoice.status = "Learned";
+    trustedInvoice.processingPurpose = "learning_only";
+    trustedInvoice.learningState = "saved";
+    trustedInvoice.learningMetadata = {
+      exampleId: "trusted-migrated-example",
+      supplierAccountId: trustedSupplier.id,
+      generation: 1,
+      contentHash: trustedInvoice.checksum,
+      requestFingerprint: "trusted-migrated-request",
+      learnedAt,
+      learnedByUserId: "shared_user",
+    };
+    legacyInvoice.id = "uncorroborated-migrated-invoice";
+    legacyInvoice.checksum = "sha256:uncorroborated-migrated";
+    legacyInvoice.status = "Ready to Book";
+    legacyInvoice.processingPurpose = "booking";
+    legacyInvoice.learningState = "not_saved";
+    delete legacyInvoice.learningMetadata;
+    snapshot.invoices = [trustedInvoice, legacyInvoice];
+    snapshot.exactMasterDataCaches = [{
+      userId: "company_connection",
+      cache: masterData,
+    }];
+    snapshot.learning.supplierProfiles = [trustedSupplier, legacySupplier].map(
+      (supplier) => ({
+        supplierAccountId: supplier.id,
+        generation: 1,
+        exampleCount: 1,
+        lastLearnedAt: learnedAt,
+        formatFingerprint: `layout-${supplier.id}`,
+        formatDrift: "none" as const,
+      })
+    );
+    snapshot.learning.supplierExamples = [
+      {
+        id: "trusted-migrated-example",
+        supplierAccountId: trustedSupplier.id,
+        generation: 1,
+        invoiceId: trustedInvoice.id,
+        contentHash: trustedInvoice.checksum,
+        formatFingerprint: "trusted-layout",
+        learnedAt,
+        learnedByUserId: "shared_user",
+        originalExtractedData: structuredClone(trustedInvoice.extractedData),
+        finalExtractedData: structuredClone(trustedInvoice.extractedData),
+        bookingLines: [],
+      },
+      {
+        id: "uncorroborated-migrated-example",
+        supplierAccountId: legacySupplier.id,
+        generation: 1,
+        invoiceId: legacyInvoice.id,
+        contentHash: legacyInvoice.checksum,
+        formatFingerprint: "legacy-layout",
+        learnedAt,
+        learnedByUserId: "shared_user",
+        originalExtractedData: structuredClone(legacyInvoice.extractedData),
+        finalExtractedData: structuredClone(legacyInvoice.extractedData),
+        bookingLines: [],
+      },
+    ];
+    snapshot.auditEvents.push({
+      id: "trusted-migrated-audit",
+      invoiceId: trustedInvoice.id,
+      type: "invoice_learned",
+      createdAt: learnedAt,
+      userId: "shared_user",
+      userName: "Shared user",
+      message: "Learning saved.",
+      metadata: { exampleId: "trusted-migrated-example" },
+    });
+    await saveSqliteStoreSnapshot(snapshot, databasePath);
+    clearRuntime();
+    closeSqliteStore();
+
+    await hydrateStoreFromPersistence();
+    const interruptedMigration = new DatabaseSync(databasePath);
+    try {
+      interruptedMigration.exec("DELETE FROM supplier_learning_data_migrations");
+    } finally {
+      interruptedMigration.close();
+    }
+    closeConfiguredLearningRepository();
+    closeSqliteStore();
+    clearRuntime();
+    await hydrateStoreFromPersistence();
+    assert.deepEqual(
+      getStore().learning.supplierProfiles.map((profile) => profile.supplierAccountId),
+      [trustedSupplier.id]
+    );
+
+    const database = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      const examples = database
+        .prepare(
+          `SELECT invoice_id, generation, source, trust_state, active
+           FROM supplier_learning_examples ORDER BY invoice_id`
+        )
+        .all() as Array<{
+        invoice_id: string;
+        generation: number;
+        source: string;
+        trust_state: string;
+        active: number;
+      }>;
+      assert.deepEqual(examples.map((example) => ({ ...example })), [
+        {
+          invoice_id: trustedInvoice.id,
+          generation: 1,
+          source: "explicit_learn",
+          trust_state: "trusted",
+          active: 1,
+        },
+        {
+          invoice_id: legacyInvoice.id,
+          generation: 0,
+          source: "legacy",
+          trust_state: "legacy",
+          active: 0,
+        },
+      ]);
+      const events = database
+        .prepare(
+          `SELECT type, metadata_json FROM supplier_learning_events
+           WHERE type = 'migration' ORDER BY supplier_account_id`
+        )
+        .all() as Array<{ type: string; metadata_json: string }>;
+      assert.equal(events.length, 2);
+      assert.ok(
+        events.every((event) => {
+          const metadata = JSON.parse(event.metadata_json) as Record<string, unknown>;
+          return (
+            event.type === "migration" &&
+            metadata.legacyGeneration === 0 &&
+            typeof metadata.trustedExampleCount === "number" &&
+            !event.metadata_json.includes("invoice")
+          );
+        })
+      );
+    } finally {
+      database.close();
+    }
+  } finally {
+    if (previous.mode === undefined) delete process.env.DATABASE_MODE;
+    else process.env.DATABASE_MODE = previous.mode;
+    if (previous.path === undefined) delete process.env.LOCAL_DATABASE_PATH;
+    else process.env.LOCAL_DATABASE_PATH = previous.path;
+    if (previous.key === undefined) delete process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY;
+    else process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY = previous.key;
+    if (previous.enabled === undefined) delete process.env.LEARNING_V2_ENABLED;
+    else process.env.LEARNING_V2_ENABLED = previous.enabled;
+    if (previous.learningMode === undefined) delete process.env.SUPPLIER_LEARNING_MODE;
+    else process.env.SUPPLIER_LEARNING_MODE = previous.learningMode;
     await removeDatabase(databasePath);
   }
 });
@@ -600,6 +871,8 @@ test("persistent supplier learning is normalized, encrypted, and authoritative",
         invoiceId: invoice.id,
         contentHash: invoice.checksum,
         formatFingerprint: "layout-a",
+        formatSignature: "invoice number:<value>\n<text>",
+        formatCluster: "cluster-layout-a",
         learnedAt,
         learnedByUserId: "shared_user",
         originalExtractedData: { ...invoice.extractedData, referenceCode: "wrong" },
@@ -713,6 +986,20 @@ test("persistent supplier learning is normalized, encrypted, and authoritative",
         )
         .get(supplier.id) as { support_count: number };
       assert.equal(glPattern.support_count, 1);
+      const derivedPattern = database
+        .prepare(
+          `SELECT format_cluster, support_count, correction_count
+           FROM supplier_learning_patterns
+           WHERE supplier_account_id = ? AND field = 'referenceCode'`
+        )
+        .get(supplier.id) as {
+        format_cluster: string;
+        support_count: number;
+        correction_count: number;
+      };
+      assert.equal(derivedPattern.format_cluster, "cluster-layout-a");
+      assert.equal(derivedPattern.support_count, 1);
+      assert.equal(derivedPattern.correction_count, 1);
     } finally {
       database.close();
     }
@@ -1167,7 +1454,7 @@ test("persistent requests reuse unchanged normalized learning but refresh artifa
     assert.notEqual(recovered.learning, hydrationRecovered.learning);
     assert.equal(recovered.hasRejectedChange, false);
     assert.equal(recovered.hasRejectedLearning, false);
-    assert.equal(artifactExistenceReads, 2);
+    assert.equal(artifactExistenceReads, 3);
     const persistedAfterRecovery =
       await loadSqliteStoreSnapshot(databasePath);
     assert.ok(persistedAfterRecovery);
@@ -1210,7 +1497,7 @@ test("persistent requests reuse unchanged normalized learning but refresh artifa
     assert.equal(second.documentAnalysis, undefined);
     assert.equal(second.learning, recovered.learning);
     assert.equal(artifactReads, artifactReadsAfterRecovery);
-    assert.equal(artifactExistenceReads, 3);
+    assert.equal(artifactExistenceReads, 4);
     assert.deepEqual(
       {
         profiles: profileReads,
@@ -1301,7 +1588,7 @@ test("persistent requests reuse unchanged normalized learning but refresh artifa
     assert.equal(exampleReads, readsAfterRecovery.examples + 2);
     assert.equal(patternReads, readsAfterRecovery.patterns + 2);
     assert.equal(artifactReads > artifactReadsAfterReenable, true);
-    assert.equal(artifactExistenceReads, 3);
+    assert.equal(artifactExistenceReads, 4);
   } finally {
     delete persistenceRuntime.__INTO_STORE_TEST_HOOKS;
     restoreRepositoryMethods?.();
@@ -1387,7 +1674,9 @@ test("reviewed and booked legacy invoices contribute one immutable trusted examp
     try {
       const example = database
         .prepare(
-          `SELECT source, trigger, trust_state, original_prediction_json,
+          `SELECT source, trigger, trust_state, original_filename,
+                  format_signature, format_cluster,
+                  observation_state_json, original_prediction_json,
                   final_fields_json
            FROM supplier_learning_examples
            WHERE supplier_account_id = ? AND content_hash = ?`
@@ -1396,12 +1685,25 @@ test("reviewed and booked legacy invoices contribute one immutable trusted examp
         source: string;
         trigger: string;
         trust_state: string;
+        original_filename: string;
+        format_signature: string;
+        format_cluster: string;
+        observation_state_json: string;
         original_prediction_json: string;
         final_fields_json: string;
       };
       assert.equal(example.source, "review");
       assert.equal(example.trigger, "review");
       assert.equal(example.trust_state, "trusted");
+      assert.equal(example.original_filename, "*.png");
+      assert.ok(example.format_signature);
+      assert.match(example.format_cluster, /^cluster_[a-f0-9]{16}$/);
+      const observationState = JSON.parse(example.observation_state_json) as Record<
+        string,
+        string
+      >;
+      assert.equal(observationState.referenceCode, "observed");
+      assert.equal(observationState.dueDate, "unknown");
       assert.equal(
         (
           JSON.parse(example.original_prediction_json) as {

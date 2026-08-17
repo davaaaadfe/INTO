@@ -3,11 +3,14 @@ import type {
   LearningArtifactAnalysis,
   LearningArtifactInput,
   LearningArtifactRecord,
+  LearningDataMigrationInput,
+  LearningDataMigrationRecord,
   LearningEventRecord,
   LearningExampleInput,
   LearningExampleRecord,
   LearningPatternInput,
   LearningProfileRecord,
+  ReplaceDerivedPatternsInput,
   LearningScope,
 } from "./learning-repository";
 
@@ -30,6 +33,11 @@ export type ResetLearningSupplierInput = LearningScope & {
   sessionCorrelationId: string;
   requestId: string;
   createdAt: string;
+};
+
+export type CompleteLegacyLearningMigrationInput = LearningScope & {
+  activeGeneration: number;
+  updatedAt: string;
 };
 
 export interface LearningRepository {
@@ -60,11 +68,23 @@ export interface LearningRepository {
     normalizedValue: string
   ): Promise<Array<Record<string, unknown>>>;
   savePattern(input: LearningPatternInput): Promise<void>;
+  replaceDerivedPatterns(input: ReplaceDerivedPatternsInput): Promise<void>;
   listPatterns(
     scope: LearningScope,
     includeInactive?: boolean
   ): Promise<Array<Record<string, unknown>>>;
   listEvents(scope: LearningScope): Promise<LearningEventRecord[]>;
+  saveEvent(input: LearningEventRecord): Promise<void>;
+  getDataMigration(
+    migrationName: string,
+    version: number
+  ): Promise<LearningDataMigrationRecord | null>;
+  recordDataMigration(
+    input: LearningDataMigrationInput
+  ): Promise<{ record: LearningDataMigrationRecord; created: boolean }>;
+  completeLegacyMigration(
+    input: CompleteLegacyLearningMigrationInput
+  ): Promise<LearningProfileRecord>;
   resetSupplier(input: ResetLearningSupplierInput): Promise<LearningProfileRecord>;
   close?(): void;
 }

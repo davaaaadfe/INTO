@@ -53,6 +53,7 @@ function artifactAnalysis(text: string): LearningArtifactAnalysis {
       confidence: 0.99,
       language: "en",
       provider: { name: "test-provider", model: "fixture-v1" },
+      providerOutcome: { status: "succeeded", adapter: "test-provider" },
       sourceMode: "ocr",
     },
   };
@@ -97,7 +98,7 @@ const scope = {
 test("SQLite learning migrations are idempotent and create all normalized tables", async () => {
   await withRepository(async (repository) => {
     await repository.migrate();
-    assert.equal(await repository.schemaVersion(), 2);
+    assert.equal(await repository.schemaVersion(), 3);
     assert.deepEqual(await repository.tableNames(), [
       "document_analysis_artifacts",
       "supplier_identity_aliases",
@@ -122,6 +123,9 @@ test("SQLite upgrades learning schema v1 with correction and evidence-revision s
       const profileColumns = database
         .prepare("PRAGMA table_info(supplier_learning_profiles)")
         .all() as Array<{ name: string }>;
+      const exampleColumns = database
+        .prepare("PRAGMA table_info(supplier_learning_examples)")
+        .all() as Array<{ name: string }>;
       const correctionTable = database
         .prepare(
           "SELECT name FROM sqlite_master WHERE type='table' AND name='supplier_learning_corrections'"
@@ -134,6 +138,8 @@ test("SQLite upgrades learning schema v1 with correction and evidence-revision s
         .get() as { sql: string } | undefined;
       assert.ok(profileColumns.some((column) => column.name === "evidence_revision"));
       assert.ok(profileColumns.some((column) => column.name === "derived_evidence_revision"));
+      assert.ok(exampleColumns.some((column) => column.name === "format_signature"));
+      assert.ok(exampleColumns.some((column) => column.name === "format_cluster"));
       assert.ok(correctionTable);
       assert.match(activeExampleIndex?.sql ?? "", /UNIQUE INDEX[\s\S]+WHERE active = 1/i);
     } finally {
@@ -382,8 +388,15 @@ test("trusted examples are unique per supplier generation and content hash", asy
       originalPrediction: { referenceCode: "wrong" },
       finalFields: { referenceCode: "INV-100" },
       bookingLines: [{ glAccount: "4420", amount: 100 }],
+      observationState: {
+        referenceCode: "observed",
+        dueDate: "unknown",
+        paymentTerms: "reviewed_empty",
+      } as const,
       fingerprint: "layout-a",
       fingerprintVersion: "layout-v1",
+      formatSignature: "invoice number:<value>\ntotal:<value>",
+      formatCluster: "cluster-layout-a",
       validationResult: { valid: true },
       processingPurpose: "learning_only" as const,
       source: "explicit_learn" as const,
@@ -408,7 +421,28 @@ test("trusted examples are unique per supplier generation and content hash", asy
     assert.equal(first.created, true);
     assert.equal(duplicate.created, false);
     assert.equal(duplicate.example.id, first.example.id);
-    assert.equal((await repository.listExamples(scope)).length, 1);
+    const successor = await repository.saveExample({
+      ...input,
+      id: "example-successor",
+      invoiceId: "invoice-corrected",
+      finalFields: { referenceCode: "INV-100-CORRECTED" },
+      requestId: "request-successor",
+    });
+    assert.equal(successor.created, true);
+    assert.equal(successor.example.id, "example-successor");
+    const examples = await repository.listExamples(scope);
+    assert.equal(examples.length, 1);
+    assert.equal(examples[0]?.id, "example-successor");
+    assert.deepEqual(examples[0]?.observationState, input.observationState);
+    assert.equal(examples[0]?.formatSignature, input.formatSignature);
+    assert.equal(examples[0]?.formatCluster, input.formatCluster);
+    const history = await repository.listExamples(scope, true);
+    assert.equal(history.length, 2);
+    assert.equal(history.find((example) => example.id === "example-a")?.active, false);
+    assert.equal(
+      history.find((example) => example.id === "example-a")?.supersededById,
+      "example-successor"
+    );
     assert.equal((await repository.getProfile(scope))?.learnedCount, 1);
   });
 });
@@ -453,7 +487,7 @@ test("aliases may legitimately match more than one supplier", async () => {
   });
 });
 
-test("patterns aggregate by stable supplier, generation, cluster, field, and key", async () => {
+test("patterns store absolute derived counts by supplier, generation, cluster, field, and key", async () => {
   await withRepository(async (repository) => {
     const profile = await repository.ensureProfile({
       ...scope,
@@ -487,12 +521,55 @@ test("patterns aggregate by stable supplier, generation, cluster, field, and key
 
     const rows = await repository.listPatterns(scope);
     assert.equal(rows.length, 1);
-    assert.equal(rows[0]?.support_count, 2);
-    assert.equal(rows[0]?.success_count, 2);
+    assert.equal(rows[0]?.support_count, 1);
+    assert.equal(rows[0]?.success_count, 1);
   });
 });
 
-test("undesirable: replaying one pattern projection from independent writers increments its counters twice", async () => {
+test("derived pattern rebuild deactivates rows absent from the absolute result", async () => {
+  await withRepository(async (repository) => {
+    const profile = await repository.ensureProfile({
+      ...scope,
+      fallbackSupplierCode: "SUP-A",
+      createdAt: "2026-08-17T10:00:00.000Z",
+    });
+    const pattern = {
+      id: "derived-pattern-a",
+      ...scope,
+      generation: profile.generation,
+      formatCluster: "cluster-a",
+      field: "referenceCode",
+      patternKey: "field:referenceCode",
+      supportCount: 2,
+      successCount: 1,
+      correctionCount: 1,
+      driftState: "none" as const,
+      modelVersion: "cluster-pattern-v1",
+      createdAt: "2026-08-17T10:00:00.000Z",
+    };
+
+    await repository.replaceDerivedPatterns({
+      ...scope,
+      generation: profile.generation,
+      modelVersion: pattern.modelVersion,
+      patterns: [pattern],
+      updatedAt: pattern.createdAt,
+    });
+    assert.equal((await repository.listPatterns(scope)).length, 1);
+
+    await repository.replaceDerivedPatterns({
+      ...scope,
+      generation: profile.generation,
+      modelVersion: pattern.modelVersion,
+      patterns: [],
+      updatedAt: "2026-08-17T11:00:00.000Z",
+    });
+    assert.equal((await repository.listPatterns(scope)).length, 0);
+    assert.equal((await repository.listPatterns(scope, true))[0]?.active, 0);
+  });
+});
+
+test("replaying one pattern projection from independent writers is idempotent", async () => {
   const databasePath = testDatabasePath();
   const previousKey = process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY;
   process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY = "independent-pattern-writer-key";
@@ -525,8 +602,8 @@ test("undesirable: replaying one pattern projection from independent writers inc
 
     const stored = await firstWriter.listPatterns(scope);
     assert.equal(stored.length, 1);
-    assert.equal(stored[0]?.support_count, 2);
-    assert.equal(stored[0]?.success_count, 2);
+    assert.equal(stored[0]?.support_count, 1);
+    assert.equal(stored[0]?.success_count, 1);
   } finally {
     firstWriter.close();
     secondWriter.close();
@@ -536,6 +613,36 @@ test("undesirable: replaying one pattern projection from independent writers inc
     await rm(`${databasePath}-shm`, { force: true });
     await rm(`${databasePath}-wal`, { force: true });
   }
+});
+
+test("legacy learning migration ledger replays the same checksum and rejects different input", async () => {
+  await withRepository(async (repository) => {
+    const migration = {
+      migrationName: "legacy-learning:into-company:123456",
+      version: 1,
+      sourceSnapshotRevision: 8,
+      sourceSnapshotHash: "snapshot-hash-a",
+      rowCounts: { examples: 2, corrections: 1 },
+      checksum: "migration-checksum-a",
+      startedAt: "2026-08-17T10:00:00.000Z",
+      completedAt: "2026-08-17T10:00:01.000Z",
+    };
+
+    assert.equal((await repository.recordDataMigration(migration)).created, true);
+    assert.equal((await repository.recordDataMigration(migration)).created, false);
+    assert.deepEqual(
+      await repository.getDataMigration(migration.migrationName, migration.version),
+      { ...migration, status: "completed" }
+    );
+    await assert.rejects(
+      repository.recordDataMigration({
+        ...migration,
+        sourceSnapshotHash: "snapshot-hash-b",
+        checksum: "migration-checksum-b",
+      }),
+      /checksum/i
+    );
+  });
 });
 
 test("reset uses generation CAS and only deactivates the selected supplier", async () => {
@@ -603,6 +710,8 @@ test("reset uses generation CAS and only deactivates the selected supplier", asy
 
     assert.equal(reset.generation, profileA.generation + 1);
     assert.equal(reset.learnedCount, 0);
+    assert.equal(reset.evidenceRevision, 0);
+    assert.equal(reset.derivedEvidenceRevision, 0);
     assert.equal((await repository.listExamples(scope)).length, 0);
     assert.equal(
       (

@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type {
   BookingLearningStore,
   SupplierConfidenceBreakdown,
@@ -6,6 +5,15 @@ import type {
   SupplierLearningPattern,
   SupplierLearningProfile,
 } from "../domain/invoice";
+import {
+  assignFormatCluster,
+  structuralFormat,
+} from "./supplier-format-clustering";
+import {
+  rebuildSupplierPatterns,
+  SUPPLIER_PATTERN_MODEL_VERSION,
+} from "./supplier-pattern-derivation";
+export * from "./supplier-format-clustering";
 export * from "./supplier-reliability";
 export * from "./supplier-reliability-evidence";
 
@@ -78,38 +86,70 @@ export function learnSupplierInvoice(
     (profile) => profile.supplierAccountId === input.supplierAccountId
   );
   const generation = current?.generation ?? 1;
-  const duplicate = examples.some(
+  const duplicate = examples.find(
     (example) =>
       example.supplierAccountId === input.supplierAccountId &&
       example.generation === generation &&
-      example.contentHash === input.contentHash
+      example.contentHash === input.contentHash &&
+      example.active !== false
   );
-  if (duplicate) {
+  const sameTruth =
+    duplicate &&
+    JSON.stringify([
+      duplicate.finalExtractedData,
+      duplicate.bookingLines ?? [],
+    ]) ===
+      JSON.stringify([input.finalExtractedData, input.bookingLines ?? []]);
+  if (sameTruth) {
     return learning;
   }
 
   const { patterns: patternObservations = [], ...exampleInput } = input;
-  const example: SupplierLearningExample = { ...exampleInput, generation };
+  const knownClusters = examples
+    .filter(
+      (item) =>
+        item.supplierAccountId === input.supplierAccountId &&
+        item.generation === generation &&
+        item.active !== false &&
+        item.formatSignature &&
+        item.formatCluster
+    )
+    .map((item) => ({ id: item.formatCluster!, signature: item.formatSignature! }));
+  const formatCluster = input.formatSignature
+    ? assignFormatCluster(input.formatSignature, knownClusters).clusterId
+    : input.formatCluster ?? `fingerprint_${input.formatFingerprint}`;
+  const example: SupplierLearningExample = {
+    ...exampleInput,
+    generation,
+    formatCluster,
+    active: true,
+  };
   const activeExamples = examples.filter(
     (item) =>
       item.supplierAccountId === input.supplierAccountId &&
-      item.generation === generation
+      item.generation === generation &&
+      item.active !== false &&
+      item !== duplicate
   );
-  const baselineFingerprint =
-    current?.formatFingerprint ?? input.formatFingerprint;
-  const driftCount = [...activeExamples, example].filter(
-    (item) => item.formatFingerprint !== baselineFingerprint
-  ).length;
+  const nextExamples = [...activeExamples, example];
+  const baselineFingerprint = current?.formatFingerprint ?? input.formatFingerprint;
   const profile: SupplierLearningProfile = {
     supplierAccountId: input.supplierAccountId,
     generation,
-    exampleCount: activeExamples.length + 1,
+    exampleCount: new Set(
+      [...activeExamples, example].map((item) => item.contentHash)
+    ).size,
     lastLearnedAt: input.learnedAt,
     lastResetAt: current?.lastResetAt,
     formatFingerprint: baselineFingerprint,
-    formatDrift:
-      driftCount >= 2 ? "confirmed" : driftCount === 1 ? "possible" : "none",
+    formatDrift: current?.formatDrift ?? "none",
   };
+
+  const derivedPatterns = rebuildSupplierPatterns(
+    input.supplierAccountId,
+    generation,
+    nextExamples
+  );
 
   return {
     ...learning,
@@ -120,14 +160,27 @@ export function learnSupplierInvoice(
       ),
       profile,
     ],
-    supplierExamples: [...examples, example],
+    supplierExamples: [
+      ...examples.map((item) =>
+        item === duplicate
+          ? { ...item, active: false, supersededById: example.id }
+          : item
+      ),
+      example,
+    ],
     supplierPatterns: [
-      ...patterns,
-      ...patternObservations.map((pattern) => ({
+      ...patterns.filter(
+        (pattern) =>
+          pattern.supplierAccountId !== input.supplierAccountId ||
+          pattern.generation !== generation ||
+          pattern.modelVersion !== SUPPLIER_PATTERN_MODEL_VERSION
+      ),
+      ...(duplicate ? [] : patternObservations).map((pattern) => ({
         ...pattern,
         supplierAccountId: input.supplierAccountId,
         generation,
       })),
+      ...derivedPatterns,
     ],
   };
 }
@@ -163,46 +216,6 @@ export function resetSupplierLearning(
   };
 }
 
-const stableLabel = new RegExp(
-  "^(invoice number|invoice date|document reference|amount due|due date|" +
-    "net amount|vat amount|tax amount|invoice|reference|date|issued|" +
-    "description|total|net|vat|tax|supplier|customer|iban|bic|currency)\\b"
-);
-const numericCell = /^(?:(?:[$€£¥]|eur|usd|gbp|chf|cad|aud|jpy|cny|sek|nok|dkk|pln)\s*)?[+-]?\d[\d\s.,'/-]*(?:\s*(?:%|x|pcs?|pieces?|units?|hours?|days?|[$€£¥]|eur|usd|gbp|chf|cad|aud|jpy|cny|sek|nok|dkk|pln))?$/i;
-
-function fingerprintLine(rawLine: string) {
-  const line = rawLine.normalize("NFKC").trim().toLowerCase();
-  const field = line.match(/^([^:=]{1,80})([:=]).+$/);
-  if (field) {
-    return `${field[1].trim().replace(/\s+/g, " ")}${field[2]}<value>`;
-  }
-
-  if (/[|\t]/.test(line)) {
-    const columns = line.split(/[|\t]/).map((column) => column.trim());
-    return columns.some((column) => numericCell.test(column))
-      ? `<row>${columns
-          .map((column) => (numericCell.test(column) ? "<number>" : "<text>"))
-          .join("|")}`
-      : columns.join("|");
-  }
-
-  const label = line.match(stableLabel)?.[0];
-  if (label) {
-    return line === label ? label : `${label}:<value>`;
-  }
-  return line ? "<text>" : "";
-}
-
 export function formatFingerprint(documentText: string) {
-  const lines = documentText
-    .split(/\r?\n/)
-    .map(fingerprintLine)
-    .filter(Boolean);
-  const normalized = lines
-    .filter(
-      (line, index) =>
-        !line.startsWith("<row>") || line !== lines[index - 1]
-    )
-    .join("\n");
-  return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+  return structuralFormat(documentText).fingerprint;
 }

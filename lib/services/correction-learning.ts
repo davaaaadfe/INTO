@@ -7,6 +7,7 @@ import type {
   PurchaseJournalLine,
   UploadedInvoice,
 } from "../domain/invoice";
+import type { FieldCandidate } from "../domain/document-analysis";
 import { createId } from "../utils/id";
 import { detectInvoiceReference } from "./invoice-extraction-service";
 import { amountToMinorUnits, normalizeText } from "./invoice-validation";
@@ -18,6 +19,10 @@ import {
   supplierIdentityKeys,
 } from "./supplier-identity";
 import { supplierLearningMode } from "./learning-feature-flags";
+import {
+  applySupplierCandidateEvidence,
+  supplierExtractionContext,
+} from "./supplier-specific-extraction";
 
 export const LEARNED_CORRECTION_NOTE =
   "Applied from previous user correction.";
@@ -153,10 +158,8 @@ function invoiceMatchKey(data: ExtractedInvoiceData) {
 
 export function learnedFilenamePattern(fileName: string) {
   const baseName = fileName.split(/[\\/]/).pop() ?? fileName;
-  return baseName
-    .toLowerCase()
-    .replace(/\d+/g, "#")
-    .replace(/[^a-z0-9#._-]+/g, "-");
+  const extension = /\.[a-z0-9]{1,10}$/i.exec(baseName)?.[0].toLowerCase();
+  return extension ? `*${extension}` : "unknown";
 }
 
 function contextAround(data: ExtractedInvoiceData, values: unknown[]) {
@@ -370,6 +373,13 @@ function record(
   const decidedAt = input.correctedAt ?? new Date().toISOString();
   const supplierAccountId =
     input.invoice.purchaseJournal?.supplierResolution.selectedAccountId;
+  const extractionContext = supplierAccountId
+    ? supplierExtractionContext(
+        input.learning,
+        supplierAccountId,
+        originalData.rawText ?? ""
+      )
+    : null;
   const priorRule = matchingCorrections(
     input.invoice,
     originalData,
@@ -406,6 +416,8 @@ function record(
       priorRule?.supplierIdentity ?? primarySupplierIdentity(originalData),
     supplierName: input.nextExtractedData.supplierName || originalData.supplierName,
     supplierAccountId: supplierAccountId ?? priorRule?.supplierAccountId,
+    generation: extractionContext?.generation ?? priorRule?.generation,
+    formatCluster: extractionContext?.clusterId ?? priorRule?.formatCluster,
     matchKey: priorRule?.matchKey ?? invoiceMatchKey(originalData),
     originalValue: priorRule?.originalValue ?? originalValue,
     correctedValue,
@@ -611,16 +623,27 @@ function matchingCorrections(
   field: LearnableCorrectionField
 ) {
   const matchKey = invoiceMatchKey(data);
-  const filePattern = learnedFilenamePattern(invoice.fileName);
   return corrections(learning).filter((item) => {
+    if (item.generation !== undefined) {
+      const profile = item.supplierAccountId
+        ? learning.supplierProfiles.find(
+            (candidate) => candidate.supplierAccountId === item.supplierAccountId
+          )
+        : undefined;
+      if (profile?.generation !== item.generation) return false;
+    }
+    if (item.formatCluster) {
+      if (!item.supplierAccountId) return false;
+      const context = supplierExtractionContext(
+        learning,
+        item.supplierAccountId,
+        data.rawText ?? ""
+      );
+      if (context?.clusterId !== item.formatCluster) return false;
+    }
     const supplierConfidence = supplierMatchConfidence(item, data);
     const contextualMatch =
-      Boolean(item.matchKey && matchKey && item.matchKey === matchKey) ||
-      Boolean(
-        item.filenamePattern &&
-          filePattern &&
-          item.filenamePattern === filePattern
-      );
+      Boolean(item.matchKey && matchKey && item.matchKey === matchKey);
     return (
       item.field === field &&
       item.trustState === "trusted" &&
@@ -743,6 +766,106 @@ function learnedOcrCorrection(
     : null;
 }
 
+function supplierSpecificCandidates(
+  invoice: UploadedInvoice,
+  data: ExtractedInvoiceData,
+  learning: BookingLearningStore
+) {
+  const candidates: FieldCandidate[] = [];
+  const add = (
+    correction: LearnedCorrection | undefined,
+    field: string,
+    value: string | number,
+    label?: string
+  ) => {
+    if (!correction) return;
+    candidates.push({
+      id: `learned_${correction.id}_${field}`,
+      field,
+      value,
+      rawValue: String(value),
+      normalizedValue: value,
+      label,
+      polygon: [],
+      confidence: correction.confidence,
+      source: "supplier_learning",
+      rule: correction.id,
+      model: "correction-candidate-v1",
+      supportingText: label,
+      clusterContext:
+        correction.supplierAccountId &&
+        correction.generation !== undefined &&
+        correction.formatCluster
+          ? {
+              supplierAccountId: correction.supplierAccountId,
+              generation: correction.generation,
+              clusterId: correction.formatCluster,
+            }
+          : undefined,
+    });
+  };
+
+  const supplier = matchingCorrections(invoice, data, learning, "supplier").find(
+    (item) => item.metadata?.correctionKind !== "exactAccount"
+  );
+  if (supplier && typeof supplier.correctedValue === "string") {
+    add(supplier, "supplierName", supplier.correctedValue);
+  }
+
+  const reference = matchingCorrections(invoice, data, learning, "yourRefPattern")[0];
+  const referenceLabel = String(reference?.metadata?.referenceLabel ?? "");
+  const referenceValue = reference && referenceLabel && data.rawText
+    ? referenceFromLearnedLabel(data.rawText, referenceLabel)
+    : "";
+  if (referenceValue) add(reference, "referenceCode", referenceValue, referenceLabel);
+
+  const description = matchingCorrections(
+    invoice,
+    data,
+    learning,
+    "expenseDescription"
+  ).find((item) => item.metadata?.lineIndex === undefined);
+  if (description && typeof description.correctedValue === "string") {
+    add(description, "expenseDescription", description.correctedValue);
+  }
+  const payment = matchingCorrections(invoice, data, learning, "paymentCondition")[0];
+  if (payment && typeof payment.correctedValue === "string") {
+    add(payment, "paymentTerms", payment.correctedValue);
+  }
+
+  const learnedDate = learnedOcrCorrection(invoice, data, learning, "invoiceDate");
+  const date = learnedDate
+    ? dateFromLearnedLabel(learnedDate.rawText, learnedDate.label)
+    : "";
+  if (date) {
+    add(
+      matchingCorrections(invoice, data, learning, "invoiceDate")[0],
+      "invoiceDate",
+      date,
+      learnedDate?.label
+    );
+  }
+  for (const [correctionField, candidateField] of [
+    ["netAmount", "netAmount"],
+    ["vatAmount", "vatAmount"],
+    ["totalAmount", "grossAmount"],
+  ] as const) {
+    const learnedAmount = learnedOcrCorrection(invoice, data, learning, correctionField);
+    const amount = learnedAmount
+      ? amountFromLearnedLabel(learnedAmount.rawText, learnedAmount.label)
+      : null;
+    if (amount !== null) {
+      add(
+        matchingCorrections(invoice, data, learning, correctionField)[0],
+        candidateField,
+        amount,
+        learnedAmount?.label
+      );
+    }
+  }
+  return candidates;
+}
+
 export function applyLearnedExtractedData(
   invoice: UploadedInvoice,
   extractedData: ExtractedInvoiceData,
@@ -750,99 +873,40 @@ export function applyLearnedExtractedData(
 ) {
   const data = { ...extractedData };
   const appliedFields: LearnableCorrectionField[] = [];
-  if (supplierLearningMode() !== "apply") {
-    return { data, appliedFields };
+  const mode = supplierLearningMode();
+  const candidates = mode === "off"
+    ? []
+    : supplierSpecificCandidates(invoice, extractedData, learning);
+  if (mode !== "apply") {
+    const evidence = applySupplierCandidateEvidence(data, candidates, "observe");
+    return {
+      data: evidence.data,
+      appliedFields,
+      candidates,
+    };
   }
-  const apply = (field: LearnableCorrectionField) => {
-    if (!appliedFields.includes(field)) {
-      appliedFields.push(field);
+  const evidence = applySupplierCandidateEvidence(data, candidates, "apply");
+  const correctionField = {
+    supplierName: "supplier",
+    referenceCode: "yourRefPattern",
+    expenseDescription: "expenseDescription",
+    paymentTerms: "paymentCondition",
+    invoiceDate: "invoiceDate",
+    netAmount: "netAmount",
+    vatAmount: "vatAmount",
+    grossAmount: "totalAmount",
+  } as const;
+  for (const field of evidence.appliedFields) {
+    const learnedField = correctionField[field as keyof typeof correctionField];
+    if (learnedField && !appliedFields.includes(learnedField)) {
+      appliedFields.push(learnedField);
     }
+  }
+  return {
+    data: evidence.data,
+    appliedFields,
+    candidates,
   };
-
-  const supplier = matchingCorrections(invoice, data, learning, "supplier").find(
-    (item) => item.metadata?.correctionKind !== "exactAccount"
-  );
-  if (supplier && typeof supplier.correctedValue === "string") {
-    data.supplierName = supplier.correctedValue;
-    apply("supplier");
-  }
-
-  const reference = matchingCorrections(
-    invoice,
-    extractedData,
-    learning,
-    "yourRefPattern"
-  )[0];
-  const learnedLabel = String(reference?.metadata?.referenceLabel ?? "");
-  const learnedReference =
-    reference && learnedLabel && extractedData.rawText
-      ? referenceFromLearnedLabel(extractedData.rawText, learnedLabel)
-      : "";
-  if (learnedReference) {
-    data.referenceCode = learnedReference;
-    data.invoiceNumber = learnedReference;
-    data.referenceCodeConfidence = Math.max(data.referenceCodeConfidence ?? 0, 0.97);
-    apply("yourRefPattern");
-  }
-
-  const description = matchingCorrections(
-    invoice,
-    extractedData,
-    learning,
-    "expenseDescription"
-  ).find((item) => item.metadata?.lineIndex === undefined);
-  if (description && typeof description.correctedValue === "string") {
-    data.expenseDescription = description.correctedValue;
-    apply("expenseDescription");
-  }
-
-  const payment = matchingCorrections(
-    invoice,
-    extractedData,
-    learning,
-    "paymentCondition"
-  )[0];
-  if (payment && typeof payment.correctedValue === "string") {
-    data.paymentTerms = payment.correctedValue;
-    apply("paymentCondition");
-  }
-
-  const learnedDate = learnedOcrCorrection(
-    invoice,
-    extractedData,
-    learning,
-    "invoiceDate"
-  );
-  const invoiceDate = learnedDate
-    ? dateFromLearnedLabel(learnedDate.rawText, learnedDate.label)
-    : "";
-  if (invoiceDate) {
-    data.invoiceDate = invoiceDate;
-    apply("invoiceDate");
-  }
-
-  const amountFields = [
-    ["netAmount", "netAmount"],
-    ["vatAmount", "vatAmount"],
-    ["totalAmount", "grossAmount"],
-  ] as const;
-  for (const [correctionField, dataField] of amountFields) {
-    const learnedAmount = learnedOcrCorrection(
-      invoice,
-      extractedData,
-      learning,
-      correctionField
-    );
-    const amount = learnedAmount
-      ? amountFromLearnedLabel(learnedAmount.rawText, learnedAmount.label)
-      : null;
-    if (amount !== null) {
-      data[dataField] = amount;
-      apply(correctionField);
-    }
-  }
-
-  return { data, appliedFields };
 }
 
 function allocateAmount(total: number, weights: number[]) {

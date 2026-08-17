@@ -1,3 +1,9 @@
+import type {
+  DocumentAnalysisSourceMode,
+  NormalizedPoint,
+  PersistedDocumentAnalysis,
+} from "./document-analysis";
+
 export const INVOICE_STATUSES = [
   "Uploaded",
   "Reading",
@@ -114,11 +120,7 @@ export type InvoiceLineItem = {
   grossAmount: number;
 };
 
-export type DocumentTextMode =
-  | "embedded_pdf_text"
-  | "xml_text"
-  | "plain_text"
-  | "unavailable";
+export type DocumentTextMode = DocumentAnalysisSourceMode;
 
 export type ExtractionEvidenceField =
   | "supplierName"
@@ -134,10 +136,7 @@ export type ExtractionEvidenceField =
   | "vatAmount"
   | "grossAmount";
 
-export type ExtractionEvidencePoint = {
-  readonly x: number;
-  readonly y: number;
-};
+export type ExtractionEvidencePoint = NormalizedPoint;
 
 export type ExtractionFieldEvidence = {
   sourceLabel: string;
@@ -148,56 +147,7 @@ export type ExtractionFieldEvidence = {
   polygon?: readonly ExtractionEvidencePoint[];
 };
 
-export type DocumentAnalysisArtifact = {
-  readonly pages: readonly {
-    readonly pageNumber: number;
-    readonly width: number;
-    readonly height: number;
-    readonly unit: "pixel" | "inch" | "normalized";
-    readonly text: string;
-    readonly tokens: readonly {
-      readonly text: string;
-      readonly polygon: readonly ExtractionEvidencePoint[];
-      readonly confidence: number;
-    }[];
-    readonly language?: string;
-    readonly tables: readonly {
-      readonly rowCount: number;
-      readonly columnCount: number;
-      readonly cells: readonly {
-        readonly rowIndex: number;
-        readonly columnIndex: number;
-        readonly rowSpan: number;
-        readonly columnSpan: number;
-        readonly text: string;
-        readonly polygon: readonly ExtractionEvidencePoint[];
-        readonly confidence: number;
-      }[];
-    }[];
-  }[];
-  readonly fieldCandidates: readonly {
-    readonly value: string | number | boolean | null;
-    readonly field: string;
-    readonly label?: string;
-    readonly page?: number;
-    readonly polygon: readonly ExtractionEvidencePoint[];
-    readonly confidence: number;
-    readonly source: string;
-  }[];
-  readonly confidence: number;
-  readonly language?: string;
-  readonly provider: {
-    readonly name: string;
-    readonly model?: string;
-    readonly modelVersion?: string;
-  };
-  readonly sourceMode:
-    | "embedded_pdf_text"
-    | "xml_text"
-    | "plain_text"
-    | "ocr"
-    | "unavailable";
-};
+export type DocumentAnalysisArtifact = PersistedDocumentAnalysis;
 
 export type ExtractedInvoiceData = {
   supplierName: string;
@@ -751,6 +701,8 @@ export type LearnedCorrection = {
   supplierIdentity: string;
   supplierName: string;
   supplierAccountId?: string;
+  generation?: number;
+  formatCluster?: string;
   matchKey: string;
   originalValue: unknown;
   correctedValue: unknown;
@@ -790,6 +742,8 @@ export type SupplierLearningExample = {
   invoiceId: string;
   contentHash: string;
   formatFingerprint: string;
+  formatSignature?: string;
+  formatCluster?: string;
   learnedAt: string;
   learnedByUserId?: string;
   originalExtractedData?: ExtractedInvoiceData;
@@ -803,6 +757,7 @@ export type SupplierLearningExample = {
   processingPurpose?: "booking" | "learning_only";
   validationResult?: unknown;
   active?: boolean;
+  supersededById?: string;
 };
 
 export type SupplierLearningPattern = {

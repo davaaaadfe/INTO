@@ -265,7 +265,21 @@ test("Learn route saves a reset Learned invoice into the active generation", asy
     { params: { invoiceId: invoice.id } }
   );
   assert.equal(firstResponse.status, 200);
-  const first = (await firstResponse.json()) as { invoice: typeof invoice };
+  const first = (await firstResponse.json()) as {
+    invoice: typeof invoice;
+    message: string;
+    learning: {
+      exampleId: string;
+      generation: number;
+      savedAt: string;
+      replayed: boolean;
+    };
+  };
+  assert.equal(first.message, "Learning saved for this supplier.");
+  assert.equal(first.learning.exampleId, first.invoice.learningMetadata!.exampleId);
+  assert.equal(first.learning.generation, first.invoice.learningMetadata!.generation);
+  assert.equal(first.learning.savedAt, first.invoice.learningMetadata!.learnedAt);
+  assert.equal(first.learning.replayed, false);
   const firstGeneration = first.invoice.learningMetadata!.generation;
 
   resetLearningForSupplier(
@@ -302,7 +316,10 @@ test("Learn route accepts the exact original retry and rejects a changed stale r
     learnInvoiceRoute(
       new Request(`http://localhost/api/invoices/${invoice.id}/learn`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "route-learn-retry-contract",
+        },
         body: JSON.stringify(payload),
       }),
       { params: { invoiceId: invoice.id } }
@@ -310,16 +327,21 @@ test("Learn route accepts the exact original retry and rejects a changed stale r
 
   const firstResponse = await post(requestPayload);
   assert.equal(firstResponse.status, 200);
-  const first = (await firstResponse.json()) as { invoice: typeof invoice };
+  const first = (await firstResponse.json()) as {
+    invoice: typeof invoice;
+    learning: { replayed: boolean };
+  };
+  assert.equal(first.learning.replayed, false);
 
   const retryResponse = await post(requestPayload);
   assert.equal(retryResponse.status, 200);
-  const retry = (await retryResponse.json()) as { invoice: typeof invoice };
+  const retry = (await retryResponse.json()) as typeof first;
   assert.equal(retry.invoice.revision, first.invoice.revision);
   assert.equal(
     retry.invoice.learningMetadata!.exampleId,
     first.invoice.learningMetadata!.exampleId
   );
+  assert.equal(retry.learning.replayed, true);
 
   const changedResponse = await post({
     ...requestPayload,
@@ -329,6 +351,52 @@ test("Learn route accepts the exact original retry and rejects a changed stale r
     },
   });
   assert.equal(changedResponse.status, 409);
+  const changedCurrentRevision = await post({
+    ...requestPayload,
+    expectedRevision: first.invoice.revision,
+    extractedData: {
+      ...requestPayload.extractedData,
+      expenseDescription: "Different current-revision payload",
+    },
+  });
+  assert.equal(changedCurrentRevision.status, 409);
+});
+
+test("Learn route returns 422 when document evidence is not trainable", async () => {
+  const invoice = createUploadedInvoice({
+    fileName: "untrainable.pdf",
+    fileType: "application/pdf",
+    fileSize: 100,
+    storageKey: "storage/tmp-invoices/untrainable.pdf",
+  });
+  const response = await learnInvoiceRoute(
+    new Request(`http://localhost/api/invoices/${invoice.id}/learn`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        expectedRevision: invoice.revision,
+        extractedData: invoice.extractedData,
+        bookingLines: [],
+      }),
+    }),
+    { params: { invoiceId: invoice.id } }
+  );
+
+  assert.equal(response.status, 422);
+});
+
+test("Learn route treats malformed JSON as invalid input", async () => {
+  const invoice = routeLearningInvoice();
+  const response = await learnInvoiceRoute(
+    new Request(`http://localhost/api/invoices/${invoice.id}/learn`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{",
+    }),
+    { params: { invoiceId: invoice.id } }
+  );
+
+  assert.equal(response.status, 422);
 });
 
 test("Learn route keeps retries isolated when invoices share a content hash", async () => {
@@ -458,6 +526,14 @@ test("bulk booking excludes learning-only ready invoices before attempts or conn
   });
   invoice.status = "Ready to Book";
   invoice.processingPurpose = "learning_only";
+  const learnedStatusOnly = createUploadedInvoice({
+    fileName: "bulk-learned-status.pdf",
+    fileType: "application/pdf",
+    fileSize: 100,
+    storageKey: "storage/tmp-invoices/bulk-learned-status.pdf",
+  });
+  learnedStatusOnly.status = "Learned";
+  learnedStatusOnly.processingPurpose = "booking";
   const auditCount = getStore().auditEvents.length;
 
   const response = await bookReadyRoute(
@@ -465,7 +541,13 @@ test("bulk booking excludes learning-only ready invoices before attempts or conn
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        items: [{ invoiceId: invoice.id, expectedRevision: invoice.revision }],
+        items: [
+          { invoiceId: invoice.id, expectedRevision: invoice.revision },
+          {
+            invoiceId: learnedStatusOnly.id,
+            expectedRevision: learnedStatusOnly.revision,
+          },
+        ],
       }),
     })
   );
@@ -476,6 +558,8 @@ test("bulk booking excludes learning-only ready invoices before attempts or conn
   assert.equal(response.status, 200);
   assert.equal(payload.results?.[0]?.invoiceId, invoice.id);
   assert.equal(payload.results?.[0]?.status, "excluded");
+  assert.equal(payload.results?.[1]?.invoiceId, learnedStatusOnly.id);
+  assert.equal(payload.results?.[1]?.status, "excluded");
   assert.deepEqual(invoice.bookingAttempts, []);
   assert.equal(invoice.status, "Ready to Book");
   assert.equal(getStore().auditEvents.length, auditCount);

@@ -63,6 +63,7 @@ import {
   formatFingerprint,
   learnSupplierInvoice,
   resetSupplierLearning,
+  structuralFormat,
   supplierReliability,
   supplierReliabilityEvidenceFromLearningStore,
 } from "../services/supplier-learning";
@@ -72,6 +73,7 @@ import {
   loadStoreRevision,
   loadStoreSnapshot,
   saveStoreSnapshot,
+  withPostgresStoreTransaction,
 } from "./postgres-store";
 import {
   databasePersistenceIdentity,
@@ -84,6 +86,7 @@ import {
 } from "./sqlite-store";
 import { configuredLearningRepository } from "./configured-learning-repository";
 import { SqliteLearningRepository } from "./learning-repository";
+import { PostgresLearningRepository } from "./postgres-learning-repository";
 import { CURRENT_STORE_SCHEMA_VERSION } from "./store-migrations";
 import { currentRequestPrincipal } from "./request-principal-context";
 import {
@@ -524,6 +527,16 @@ async function saveConfiguredStoreSnapshot(
   context = globalStore.__INTO_LEARNING_PERSISTENCE_CONTEXT,
   expectedIdentity?: string
 ) {
+  const artifactIds = new Map(
+    store.invoices.map((invoice) => [invoice.id, invoice.analysisArtifactId])
+  );
+  const restoreArtifactIds = () => {
+    for (const invoice of store.invoices) {
+      const artifactId = artifactIds.get(invoice.id);
+      if (artifactId) invoice.analysisArtifactId = artifactId;
+      else delete invoice.analysisArtifactId;
+    }
+  };
   const identityIsCurrent = () =>
     !expectedIdentity || databasePersistenceIdentity() === expectedIdentity;
   const saveSnapshot = async (snapshot: IntoStore) => {
@@ -570,6 +583,51 @@ async function saveConfiguredStoreSnapshot(
         return;
       } catch (error) {
         store.revision = previousRevision;
+        restoreArtifactIds();
+        throw error;
+      }
+    }
+  }
+
+  if (isPostgresPersistenceEnabled()) {
+    const configuredRepository = await configuredLearningRepository();
+    if (configuredRepository) {
+      if (!identityIsCurrent()) return;
+      const previousRevision = store.revision;
+      try {
+        const committedSnapshot = await withPostgresStoreTransaction(
+          async (query) => {
+            const repository = PostgresLearningRepository.fromQuery(query);
+            const artifactsPrepared = await persistAnalysisArtifacts(
+              store,
+              repository
+            );
+            await globalStore.__INTO_STORE_TEST_HOOKS?.beforeLearningProjection?.();
+            const normalized = await persistLearningState(
+              store,
+              context,
+              repository
+            );
+            if (!identityIsCurrent()) {
+              throw new Error("Persistence configuration changed during save.");
+            }
+            const evidenceSafeSnapshot = artifactsPrepared
+              ? snapshotWithoutDocumentEvidence(store)
+              : store;
+            const snapshot = normalized
+              ? snapshotWithoutActiveLearning(evidenceSafeSnapshot)
+              : evidenceSafeSnapshot;
+            snapshot.revision = previousRevision;
+            await saveStoreSnapshot(snapshot, query);
+            return snapshot;
+          }
+        );
+        store.schemaVersion = committedSnapshot.schemaVersion;
+        store.revision = committedSnapshot.revision;
+        return;
+      } catch (error) {
+        store.revision = previousRevision;
+        restoreArtifactIds();
         throw error;
       }
     }
@@ -848,6 +906,27 @@ export function setLearningPersistenceContext(
   context: LearningPersistenceContext | undefined
 ) {
   globalStore.__INTO_LEARNING_PERSISTENCE_CONTEXT = context;
+}
+
+export function createStoreRequestCheckpoint() {
+  return {
+    store: structuredClone(getStore()),
+    dirty: globalStore.__INTO_STORE_DIRTY,
+    dirtyRevision: globalStore.__INTO_STORE_DIRTY_REVISION,
+    persistedDirtyRevision: globalStore.__INTO_STORE_PERSISTED_DIRTY_REVISION,
+  };
+}
+
+export function restoreStoreRequestCheckpoint(
+  checkpoint: ReturnType<typeof createStoreRequestCheckpoint>
+) {
+  globalStore.__INTO_STORE = checkpoint.store;
+  globalStore.__INTO_STORE_DIRTY = checkpoint.dirty;
+  globalStore.__INTO_STORE_DIRTY_REVISION = checkpoint.dirtyRevision;
+  globalStore.__INTO_STORE_PERSISTED_DIRTY_REVISION =
+    checkpoint.persistedDirtyRevision;
+  delete globalStore.__INTO_STORE_PERSISTENCE_BATCH;
+  delete globalStore.__INTO_STORE_PERSISTENCE_ERROR;
 }
 
 export function listUsers() {
@@ -1571,6 +1650,15 @@ function trustedContentHash(invoice: UploadedInvoice) {
   );
 }
 
+export class InvoiceLearningPreconditionError extends Error {
+  readonly code = "invoice_learning_precondition";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "InvoiceLearningPreconditionError";
+  }
+}
+
 function assertInvoiceCanBeLearned(
   invoice: UploadedInvoice,
   correctedData: ExtractedInvoiceData,
@@ -1586,7 +1674,9 @@ function assertInvoiceCanBeLearned(
         correctedData.documentAnalysis?.fieldCandidates.length)
     );
   if (!hasAnalysis) {
-    throw new Error("Complete document analysis before saving learning.");
+    throw new InvoiceLearningPreconditionError(
+      "Complete document analysis before saving learning."
+    );
   }
   const hasTrainableField = Boolean(
     correctedData.invoiceNumber ||
@@ -1600,7 +1690,9 @@ function assertInvoiceCanBeLearned(
       bookingLines.length
   );
   if (!hasTrainableField) {
-    throw new Error("Add at least one trainable invoice field before saving learning.");
+    throw new InvoiceLearningPreconditionError(
+      "Add at least one trainable invoice field before saving learning."
+    );
   }
 }
 
@@ -1640,7 +1732,8 @@ export function learnInvoice(
     : "";
   const exactRetry =
     activeGenerationSaved &&
-    expectedRevision === (invoice.revision ?? 1) - 1 &&
+    (expectedRevision === invoice.revision ||
+      expectedRevision === (invoice.revision ?? 1) - 1) &&
     Boolean(invoice.learningMetadata?.requestFingerprint) &&
     retryFingerprint === invoice.learningMetadata?.requestFingerprint;
   if (!isExpectedInvoiceRevision(expectedRevision)) {
@@ -1648,18 +1741,18 @@ export function learnInvoice(
       "expectedRevision must be a positive integer."
     );
   }
-  if (invoice.revision !== expectedRevision && !exactRetry) {
+  if (activeGenerationSaved) {
+    if (exactRetry) return invoice;
+    throw new InvoiceRevisionConflictError(invoice);
+  }
+  if (invoice.revision !== expectedRevision) {
     throw new InvoiceRevisionConflictError(invoice);
   }
   if (invoice.status === "Booked" || invoice.exactBookingId) {
-    throw new Error("Booked invoices cannot be used as learning-only drafts.");
+    throw new InvoiceLearningPreconditionError(
+      "Booked invoices cannot be used as learning-only drafts."
+    );
   }
-  if (
-    activeGenerationSaved
-  ) {
-    return invoice;
-  }
-
   assertInvoiceCanBeLearned(invoice, correctedData, bookingLines);
 
   const isGenerationRelearn = invoice.status === "Learned";
@@ -1717,7 +1810,18 @@ export function learnInvoice(
   );
   const supplierAccountId = draftBooking.supplierResolution.selectedAccountId;
   if (!supplierAccountId) {
-    throw new Error("Select one Exact supplier before saving learning.");
+    throw new InvoiceLearningPreconditionError(
+      "Select one Exact supplier before saving learning."
+    );
+  }
+  const canonicalSupplier = exactMasterDataForUser(
+    store,
+    COMPANY_CONNECTION_USER_ID
+  )?.suppliers.find((supplier) => supplier.id === supplierAccountId);
+  if (!canonicalSupplier || supplierAccountId.startsWith("supplier-overview:")) {
+    throw new InvoiceLearningPreconditionError(
+      "Select a canonical Exact supplier before saving learning."
+    );
   }
 
   const saved = isGenerationRelearn
@@ -1732,12 +1836,14 @@ export function learnInvoice(
   promoteInvoiceCorrections(store.learning, invoiceId, "learn", learnedAt);
   const exampleId = createId("supplier_learning_example");
   const contentHash = trustedContentHash(saved);
+  const learnedFormat = structuralFormat(finalExtractedData.rawText ?? "");
   const nextLearning = learnSupplierInvoice(store.learning, {
     id: exampleId,
     supplierAccountId,
     invoiceId,
     contentHash,
-    formatFingerprint: formatFingerprint(finalExtractedData.rawText ?? ""),
+    formatFingerprint: learnedFormat.fingerprint,
+    formatSignature: learnedFormat.signature,
     learnedAt,
     learnedByUserId: mutationUser().id,
     originalExtractedData,
@@ -1767,7 +1873,8 @@ export function learnInvoice(
     (item) =>
       item.supplierAccountId === supplierAccountId &&
       item.generation === profile?.generation &&
-      item.contentHash === contentHash
+      item.contentHash === contentHash &&
+      item.active !== false
   );
   if (!profile || !example) {
     throw new Error("Supplier learning could not be saved.");

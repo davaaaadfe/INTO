@@ -4,7 +4,10 @@ import {
   loadPostgresTemporaryInvoiceFile,
   loadStoreRevision,
   savePostgresTemporaryInvoiceFile,
+  saveStoreSnapshot,
+  withPostgresStoreTransaction,
 } from "../lib/repository/postgres-store";
+import type { IntoStore } from "../lib/repository/invoice-store";
 
 type NeonRequest = {
   connectionString: string;
@@ -306,5 +309,111 @@ test("a late old-URL file call cannot replace newer file-schema readiness", asyn
   assert.equal(
     countSql(fake.requests, newUrl, "CREATE TABLE IF NOT EXISTS into_temp_invoice_files"),
     1
+  );
+});
+
+test("PostgreSQL store transactions commit all work through one client", async () => {
+  const calls: string[] = [];
+  let released = false;
+  let ended = false;
+  const result = await withPostgresStoreTransaction(
+    async (query) => {
+      await query("INSERT INTO normalized_learning VALUES ($1)", ["example-a"]);
+      return "committed";
+    },
+    async () => ({
+      query: async (query: string) => {
+        calls.push(query);
+        return [];
+      },
+      release: () => {
+        released = true;
+      },
+      end: async () => {
+        ended = true;
+      },
+    })
+  );
+
+  assert.equal(result, "committed");
+  assert.deepEqual(calls, [
+    "BEGIN",
+    "INSERT INTO normalized_learning VALUES ($1)",
+    "COMMIT",
+  ]);
+  assert.equal(released, true);
+  assert.equal(ended, true);
+});
+
+test("PostgreSQL store transactions roll back every write when projection fails", async () => {
+  const calls: string[] = [];
+  let released = false;
+  let ended = false;
+
+  await assert.rejects(
+    withPostgresStoreTransaction(
+      async (query) => {
+        await query("INSERT INTO normalized_learning VALUES ($1)", ["example-a"]);
+        throw new Error("projection failed");
+      },
+      async () => ({
+        query: async (query: string) => {
+          calls.push(query);
+          return [];
+        },
+        release: () => {
+          released = true;
+        },
+        end: async () => {
+          ended = true;
+        },
+      })
+    ),
+    /projection failed/
+  );
+
+  assert.deepEqual(calls, [
+    "BEGIN",
+    "INSERT INTO normalized_learning VALUES ($1)",
+    "ROLLBACK",
+  ]);
+  assert.equal(released, true);
+  assert.equal(ended, true);
+});
+
+test("PostgreSQL snapshot CAS failure rolls back normalized writes in the same transaction", async () => {
+  const url = "postgresql://test:test@atomic-cas.example/into";
+  const fake = fakeNeonFetch({ revisions: new Map() });
+  const calls: string[] = [];
+  const store = {
+    schemaVersion: 3,
+    revision: 4,
+    invoices: [],
+  } as unknown as IntoStore;
+
+  await withPostgres(url, fake.fetch, async () => {
+    await assert.rejects(
+      withPostgresStoreTransaction(
+        async (query) => {
+          await query("INSERT INTO normalized_learning VALUES ($1)", ["example-a"]);
+          await saveStoreSnapshot(store, query);
+        },
+        async () => ({
+          query: async (query: string) => {
+            calls.push(query);
+            return [];
+          },
+          release: () => undefined,
+          end: async () => undefined,
+        })
+      ),
+      /changed in another request/i
+    );
+  });
+
+  assert.match(calls[2] ?? "", /UPDATE into_runtime_store/);
+  assert.deepEqual(
+    calls.filter((query) => /^(BEGIN|COMMIT|ROLLBACK)$/.test(query)),
+    ["BEGIN", "ROLLBACK"]
   );
 });

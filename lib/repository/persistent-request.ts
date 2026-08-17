@@ -1,6 +1,8 @@
 import {
+  createStoreRequestCheckpoint,
   flushStoreToPersistence,
   hydrateStoreForPersistentRequest,
+  restoreStoreRequestCheckpoint,
   setLearningPersistenceContext,
 } from "./invoice-store";
 import { randomUUID } from "node:crypto";
@@ -70,10 +72,14 @@ async function runPersistent<T>(
   setLearningPersistenceContext(context);
   try {
     await hydrateStoreForPersistentRequest();
+    const checkpoint = createStoreRequestCheckpoint();
     try {
-      return await handler();
-    } finally {
+      const result = await handler();
       await flushStoreToPersistence(context);
+      return result;
+    } catch (error) {
+      restoreStoreRequestCheckpoint(checkpoint);
+      throw error;
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";

@@ -7,12 +7,14 @@ import {
   encryptLearningArtifact,
 } from "../services/learning-artifact-crypto";
 import type {
-  DocumentAnalysisArtifact,
-  DocumentTextMode,
   ExtractedInvoiceData,
 } from "../domain/invoice";
+import type {
+  DocumentAnalysisSourceMode,
+  PersistedDocumentAnalysis,
+} from "../domain/document-analysis";
 
-export const LEARNING_REPOSITORY_SCHEMA_VERSION = 2;
+export const LEARNING_REPOSITORY_SCHEMA_VERSION = 3;
 
 export class LearningGenerationConflictError extends Error {}
 
@@ -33,14 +35,16 @@ export type LearningProfileRecord = LearningScope & {
   lastLearnedAt?: string;
   lastResetAt?: string;
   version: number;
+  evidenceRevision: number;
+  derivedEvidenceRevision: number;
   createdAt: string;
   updatedAt: string;
 };
 
 export type LearningArtifactAnalysis = {
-  documentTextMode?: DocumentTextMode;
+  documentTextMode?: DocumentAnalysisSourceMode;
   extractionEvidence?: ExtractedInvoiceData["extractionEvidence"];
-  documentAnalysis?: DocumentAnalysisArtifact;
+  documentAnalysis?: PersistedDocumentAnalysis;
 };
 
 export type LearningArtifactInput = {
@@ -74,8 +78,14 @@ export type LearningExampleInput = LearningScope & {
   originalPrediction: unknown;
   finalFields: unknown;
   bookingLines: unknown;
+  observationState?: Record<
+    string,
+    "observed" | "reviewed_empty" | "unknown"
+  >;
   fingerprint: string;
   fingerprintVersion: string;
+  formatSignature?: string;
+  formatCluster?: string;
   validationResult: unknown;
   processingPurpose: "booking" | "learning_only";
   source: "explicit_learn" | "review" | "booking" | "legacy";
@@ -120,6 +130,13 @@ export type LearningPatternInput = LearningScope & {
   createdAt: string;
 };
 
+export type ReplaceDerivedPatternsInput = LearningScope & {
+  generation: number;
+  modelVersion: string;
+  patterns: LearningPatternInput[];
+  updatedAt: string;
+};
+
 export type LearningEventRecord = LearningScope & {
   id: string;
   generation: number;
@@ -142,6 +159,21 @@ export type LearningEventRecord = LearningScope & {
   createdAt: string;
 };
 
+export type LearningDataMigrationInput = {
+  migrationName: string;
+  version: number;
+  sourceSnapshotRevision?: number;
+  sourceSnapshotHash?: string;
+  rowCounts: Record<string, number>;
+  checksum: string;
+  startedAt: string;
+  completedAt: string;
+};
+
+export type LearningDataMigrationRecord = LearningDataMigrationInput & {
+  status: "completed";
+};
+
 type ProfileRow = {
   company_id: string;
   division_code: string;
@@ -158,6 +190,8 @@ type ProfileRow = {
   version: number;
   created_at: string;
   updated_at: string;
+  evidence_revision: number;
+  derived_evidence_revision: number;
 };
 
 type ExampleRow = {
@@ -173,8 +207,11 @@ type ExampleRow = {
   original_prediction_json: string;
   final_fields_json: string;
   booking_lines_json: string;
+  observation_state_json: string;
   fingerprint: string;
   fingerprint_version: string;
+  format_signature: string;
+  format_cluster: string;
   validation_result_json: string;
   processing_purpose: "booking" | "learning_only";
   source: LearningExampleInput["source"];
@@ -443,9 +480,17 @@ const migrationV2 = `
   );
 `;
 
+const migrationV3 = `
+  ALTER TABLE supplier_learning_examples
+    ADD COLUMN format_signature TEXT NOT NULL DEFAULT '';
+  ALTER TABLE supplier_learning_examples
+    ADD COLUMN format_cluster TEXT NOT NULL DEFAULT '';
+`;
+
 export const SQLITE_LEARNING_MIGRATIONS = [
   { version: 1, sql: migration },
   { version: 2, sql: migrationV2 },
+  { version: 3, sql: migrationV3 },
 ] as const;
 
 function profileFromRow(row: ProfileRow): LearningProfileRecord {
@@ -463,6 +508,8 @@ function profileFromRow(row: ProfileRow): LearningProfileRecord {
     lastLearnedAt: row.last_learned_at ?? undefined,
     lastResetAt: row.last_reset_at ?? undefined,
     version: row.version,
+    evidenceRevision: row.evidence_revision,
+    derivedEvidenceRevision: row.derived_evidence_revision,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -482,8 +529,11 @@ function exampleFromRow(row: ExampleRow): LearningExampleRecord {
     originalPrediction: JSON.parse(row.original_prediction_json),
     finalFields: JSON.parse(row.final_fields_json),
     bookingLines: JSON.parse(row.booking_lines_json),
+    observationState: JSON.parse(row.observation_state_json || "{}"),
     fingerprint: row.fingerprint,
     fingerprintVersion: row.fingerprint_version,
+    formatSignature: row.format_signature || undefined,
+    formatCluster: row.format_cluster || `fingerprint_${row.fingerprint}`,
     validationResult: JSON.parse(row.validation_result_json),
     processingPurpose: row.processing_purpose,
     source: row.source,
@@ -663,12 +713,16 @@ export class SqliteLearningRepository {
                WHERE examples.company_id = profiles.company_id
                  AND examples.division_code = profiles.division_code
                  AND examples.supplier_account_id = profiles.supplier_account_id
+                 AND examples.generation = profiles.generation
+                 AND examples.active = 1
              )
              OR EXISTS (
                SELECT 1 FROM supplier_learning_patterns AS patterns
                WHERE patterns.company_id = profiles.company_id
                  AND patterns.division_code = profiles.division_code
                  AND patterns.supplier_account_id = profiles.supplier_account_id
+                 AND patterns.generation = profiles.generation
+                 AND patterns.active = 1
              )
              OR EXISTS (
                SELECT 1 FROM supplier_identity_aliases AS aliases
@@ -676,6 +730,7 @@ export class SqliteLearningRepository {
                  AND aliases.division_code = profiles.division_code
                  AND aliases.supplier_account_id = profiles.supplier_account_id
                  AND aliases.source <> 'exact'
+                 AND aliases.active = 1
              )
            )
          ORDER BY profiles.supplier_account_id`
@@ -921,7 +976,8 @@ export class SqliteLearningRepository {
         .prepare(
           `SELECT * FROM supplier_learning_examples
            WHERE company_id = ? AND division_code = ?
-             AND supplier_account_id = ? AND generation = ? AND content_hash = ?`
+             AND supplier_account_id = ? AND generation = ? AND content_hash = ?
+             AND active = 1`
         )
         .get(
           input.companyId,
@@ -930,8 +986,23 @@ export class SqliteLearningRepository {
           input.generation,
           input.contentHash
         ) as ExampleRow | undefined;
-      if (existing) {
+      const sameTruth =
+        existing &&
+        JSON.stringify(JSON.parse(existing.final_fields_json)) ===
+          JSON.stringify(input.finalFields) &&
+        JSON.stringify(JSON.parse(existing.booking_lines_json)) ===
+          JSON.stringify(input.bookingLines);
+      if (sameTruth) {
         return { example: exampleFromRow(existing), created: false };
+      }
+      if (existing) {
+        this.database
+          .prepare(
+            `UPDATE supplier_learning_examples
+             SET active = 0, superseded_by_id = ?, deactivated_at = ?
+             WHERE id = ? AND active = 1`
+          )
+          .run(input.id, input.createdAt, existing.id);
       }
 
       this.database
@@ -942,9 +1013,10 @@ export class SqliteLearningRepository {
             original_prediction_json, final_fields_json, booking_lines_json,
             fingerprint, fingerprint_version, validation_result_json,
             processing_purpose, source, trust_state, trigger, actor_id,
-            session_correlation_id, request_id, active, created_at
+            session_correlation_id, request_id, active, created_at,
+            observation_state_json, format_signature, format_cluster
           ) VALUES (
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?
           )`
         )
         .run(
@@ -970,17 +1042,22 @@ export class SqliteLearningRepository {
           input.actorId,
           input.sessionCorrelationId,
           input.requestId,
-          input.createdAt
+          input.createdAt,
+          JSON.stringify(input.observationState ?? {}),
+          input.formatSignature ?? "",
+          input.formatCluster ?? `fingerprint_${input.fingerprint}`
         );
       this.database
         .prepare(
           `UPDATE supplier_learning_profiles
-           SET learned_count = learned_count + 1,
-               last_learned_at = ?, updated_at = ?, version = version + 1
+           SET learned_count = learned_count + ?,
+               last_learned_at = ?, updated_at = ?, version = version + 1,
+               evidence_revision = evidence_revision + 1
            WHERE company_id = ? AND division_code = ?
              AND supplier_account_id = ? AND generation = ?`
         )
         .run(
+          existing ? 0 : 1,
           input.createdAt,
           input.createdAt,
           input.companyId,
@@ -992,7 +1069,7 @@ export class SqliteLearningRepository {
         ...input,
         id: `event_${randomUUID()}`,
         type: "learn",
-        idempotencyKey: `learn:${input.supplierAccountId}:${input.generation}:${input.contentHash}`,
+        idempotencyKey: `learn:${input.supplierAccountId}:${input.generation}:${input.contentHash}:${input.id}`,
         metadata: {
           invoiceId: input.invoiceId,
           exampleId: input.id,
@@ -1097,14 +1174,11 @@ export class SqliteLearningRepository {
           company_id, division_code, supplier_account_id, generation,
           format_cluster, field, pattern_key
         ) DO UPDATE SET
-          support_count = support_count + excluded.support_count,
-          success_count = success_count + excluded.success_count,
-          correction_count = correction_count + excluded.correction_count,
-          confidence = (
-            success_count + excluded.success_count + 1.0
-          ) / (
-            support_count + excluded.support_count + 2.0
-          ),
+          support_count = excluded.support_count,
+          success_count = excluded.success_count,
+          correction_count = excluded.correction_count,
+          confidence = (excluded.success_count + 1.0) /
+            (excluded.support_count + 2.0),
           drift_state = excluded.drift_state,
           model_version = excluded.model_version,
           label = excluded.label,
@@ -1167,6 +1241,41 @@ export class SqliteLearningRepository {
         scope.divisionCode,
         scope.supplierAccountId
       ) as Array<Record<string, unknown>>;
+  }
+
+  async replaceDerivedPatterns(input: ReplaceDerivedPatternsInput) {
+    await this.inTransaction(async () => {
+      this.requireCurrentGeneration(input);
+      this.database
+        .prepare(
+          `UPDATE supplier_learning_patterns SET active = 0, updated_at = ?
+           WHERE company_id = ? AND division_code = ? AND supplier_account_id = ?
+             AND generation = ? AND model_version = ?`
+        )
+        .run(
+          input.updatedAt,
+          input.companyId,
+          input.divisionCode,
+          input.supplierAccountId,
+          input.generation,
+          input.modelVersion
+        );
+      for (const pattern of input.patterns) await this.savePattern(pattern);
+      this.database
+        .prepare(
+          `UPDATE supplier_learning_profiles
+           SET derived_evidence_revision = evidence_revision, updated_at = ?
+           WHERE company_id = ? AND division_code = ? AND supplier_account_id = ?
+             AND generation = ?`
+        )
+        .run(
+          input.updatedAt,
+          input.companyId,
+          input.divisionCode,
+          input.supplierAccountId,
+          input.generation
+        );
+    });
   }
 
   private insertEvent(input: LearningEventRecord) {
@@ -1237,6 +1346,140 @@ export class SqliteLearningRepository {
     );
   }
 
+  async saveEvent(input: LearningEventRecord) {
+    this.insertEvent(input);
+  }
+
+  async getDataMigration(migrationName: string, version: number) {
+    const row = this.database
+      .prepare(
+        `SELECT * FROM supplier_learning_data_migrations
+         WHERE migration_name = ? AND version = ?`
+      )
+      .get(migrationName, version) as
+      | {
+          migration_name: string;
+          version: number;
+          source_snapshot_revision: number | null;
+          source_snapshot_hash: string | null;
+          row_counts_json: string;
+          checksum: string;
+          started_at: string;
+          completed_at: string | null;
+        }
+      | undefined;
+    if (!row) return null;
+    return {
+      migrationName: row.migration_name,
+      version: row.version,
+      sourceSnapshotRevision: row.source_snapshot_revision ?? undefined,
+      sourceSnapshotHash: row.source_snapshot_hash ?? undefined,
+      rowCounts: JSON.parse(row.row_counts_json) as Record<string, number>,
+      checksum: row.checksum,
+      status: "completed" as const,
+      startedAt: row.started_at,
+      completedAt: row.completed_at ?? row.started_at,
+    };
+  }
+
+  async recordDataMigration(input: LearningDataMigrationInput) {
+    return this.inTransaction(async () => {
+      const existing = await this.getDataMigration(
+        input.migrationName,
+        input.version
+      );
+      if (existing) {
+        if (existing.checksum !== input.checksum) {
+          throw new Error(
+            "Learning data migration checksum does not match the recorded input."
+          );
+        }
+        return { record: existing, created: false };
+      }
+      this.database
+        .prepare(
+          `INSERT INTO supplier_learning_data_migrations (
+            migration_name, version, source_snapshot_revision,
+            source_snapshot_hash, status, row_counts_json, checksum,
+            started_at, completed_at
+          ) VALUES (?, ?, ?, ?, 'completed', ?, ?, ?, ?)`
+        )
+        .run(
+          input.migrationName,
+          input.version,
+          input.sourceSnapshotRevision ?? null,
+          input.sourceSnapshotHash ?? null,
+          JSON.stringify(input.rowCounts),
+          input.checksum,
+          input.startedAt,
+          input.completedAt
+        );
+      return {
+        record: { ...input, status: "completed" as const },
+        created: true,
+      };
+    });
+  }
+
+  async completeLegacyMigration(
+    input: LearningScope & { activeGeneration: number; updatedAt: string }
+  ) {
+    return this.inTransaction(() => {
+      const update = this.database
+        .prepare(
+          `UPDATE supplier_learning_profiles
+           SET generation = ?, learned_count = 0, confidence_score = 35,
+               drift_state = 'none', last_learned_at = NULL,
+               updated_at = ?, version = version + 1
+           WHERE company_id = ? AND division_code = ?
+             AND supplier_account_id = ? AND generation = 0`
+        )
+        .run(
+          input.activeGeneration,
+          input.updatedAt,
+          input.companyId,
+          input.divisionCode,
+          input.supplierAccountId
+        );
+      if (update.changes !== 1) {
+        throw new LearningGenerationConflictError(
+          "Supplier learning generation changed during legacy migration."
+        );
+      }
+      for (const table of [
+        "supplier_learning_examples",
+        "supplier_learning_patterns",
+      ]) {
+        this.database
+          .prepare(
+            `UPDATE ${table} SET active = 0
+             WHERE company_id = ? AND division_code = ?
+               AND supplier_account_id = ? AND generation = 0`
+          )
+          .run(input.companyId, input.divisionCode, input.supplierAccountId);
+      }
+      this.database
+        .prepare(
+          `UPDATE supplier_identity_aliases SET active = 0
+           WHERE company_id = ? AND division_code = ?
+             AND supplier_account_id = ? AND generation = 0
+             AND source <> 'exact'`
+        )
+        .run(input.companyId, input.divisionCode, input.supplierAccountId);
+      const row = this.database
+        .prepare(
+          `SELECT * FROM supplier_learning_profiles
+           WHERE company_id = ? AND division_code = ? AND supplier_account_id = ?`
+        )
+        .get(
+          input.companyId,
+          input.divisionCode,
+          input.supplierAccountId
+        ) as ProfileRow;
+      return profileFromRow(row);
+    });
+  }
+
   async resetSupplier(
     input: LearningScope & {
       expectedGeneration: number;
@@ -1257,6 +1500,7 @@ export class SqliteLearningRepository {
           `UPDATE supplier_learning_profiles
            SET generation = ?, learned_count = 0, confidence_score = 35,
                 drift_state = 'none', last_learned_at = NULL,
+                evidence_revision = 0, derived_evidence_revision = 0,
                 last_reset_at = ?, updated_at = ?,
                version = version + 1
            WHERE company_id = ? AND division_code = ?

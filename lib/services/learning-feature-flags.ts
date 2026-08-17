@@ -30,6 +30,11 @@ export function learningFeatureFlags(
       "LEARNING_V2_ENABLED",
       !production
     ),
+    learnWorkflowEnabled: booleanSetting(
+      environment,
+      "LEARN_WORKFLOW_ENABLED",
+      !production
+    ),
     documentIntelligenceEnabled: booleanSetting(
       environment,
       "DOCUMENT_INTELLIGENCE_ENABLED",

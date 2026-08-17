@@ -164,7 +164,7 @@ test("stores correction provenance and replaces an older rule", () => {
   assert.equal(glCorrection.correctedValue, "4420");
   assert.equal(glCorrection.supplierName, "Noordzee Office Supplies");
   assert.match(glCorrection.invoiceTextContext ?? "", /Office Supplies/i);
-  assert.equal(glCorrection.filenamePattern, "ah-invoice-#.pdf");
+  assert.equal(glCorrection.filenamePattern, "*.pdf");
   assert.equal(glCorrection.correctedAt, "2026-06-16T10:00:00.000Z");
   assert.equal(glCorrection.correctedByUserId, "user-accountant");
   assert.equal(glCorrection.trustState, "pending");
@@ -351,7 +351,7 @@ test("stores invoice field corrections with complete provenance and confidence",
     assert.equal(correction.confidenceBefore, 0.72);
     assert.equal(correction.confidenceAfter, 1);
     assert.match(correction.invoiceTextContext ?? "", /amount|date/i);
-    assert.equal(correction.filenamePattern, "ah-invoice-#.pdf");
+    assert.equal(correction.filenamePattern, "*.pdf");
   }
 });
 
@@ -535,6 +535,70 @@ test("observe mode records corrections but does not apply trusted extraction lea
 
     assert.equal(result.data.supplierName, "Misspelled Supplier");
     assert.deepEqual(result.appliedFields, []);
+    assert.equal(result.candidates[0]?.field, "supplierName");
+    assert.equal(result.candidates[0]?.value, "Correct Supplier");
+    assert.equal(result.candidates[0]?.source, "supplier_learning");
+    assert.equal(result.candidates[0]?.rule, learning.corrections[0]?.id);
+  });
+});
+
+test("supplier correction candidates require the active generation and recognized cluster", () => {
+  withSupplierLearningMode("observe", () => {
+    const learning = createInitialLearningStore();
+    const rawText = "Invoice number: INV-001\nTotal: EUR 121.00";
+    const original = invoice({}, { expenseDescription: "Old", rawText });
+    captureUserCorrections({
+      invoice: original,
+      nextExtractedData: { ...original.extractedData, expenseDescription: "Learned" },
+      nextBookingLines: [],
+      learning,
+      user: { id: "shared_user", name: "Shared INTO User" },
+    });
+    promoteInvoiceCorrections(learning, original.id, "learn");
+    const correction = learning.corrections[0]!;
+    correction.supplierAccountId = "supplier-a";
+    correction.generation = 1;
+    correction.formatCluster = "cluster-a";
+    learning.supplierProfiles = [{
+      supplierAccountId: "supplier-a",
+      generation: 2,
+      exampleCount: 1,
+      formatDrift: "none",
+    }];
+    learning.supplierExamples = [{
+      supplierAccountId: "supplier-a",
+      generation: 2,
+      invoiceId: "trusted-layout",
+      contentHash: "trusted-layout-hash",
+      formatFingerprint: "layout-a",
+      formatSignature: "invoice number:<value>\ntotal:<value>",
+      formatCluster: "cluster-a",
+      learnedAt: "2026-08-17T10:00:00.000Z",
+      trustState: "trusted",
+    }];
+    const future = invoice({ id: "future" }, { expenseDescription: "Old", rawText });
+
+    assert.deepEqual(
+      applyLearnedExtractedData(future, future.extractedData, learning).candidates,
+      []
+    );
+    correction.generation = 2;
+    const activeCandidate = applyLearnedExtractedData(
+      future,
+      future.extractedData,
+      learning
+    ).candidates[0];
+    assert.equal(activeCandidate?.value, "Learned");
+    assert.deepEqual(activeCandidate?.clusterContext, {
+      supplierAccountId: "supplier-a",
+      generation: 2,
+      clusterId: "cluster-a",
+    });
+    future.extractedData.rawText = "Document reference: B-1\nAmount due: EUR 121.00";
+    assert.deepEqual(
+      applyLearnedExtractedData(future, future.extractedData, learning).candidates,
+      []
+    );
   });
 });
 
@@ -670,6 +734,31 @@ test("does not apply a contextless rule to an unrelated invoice", () => {
     unrelated.extractedData,
     learning
   );
+  assert.equal(result.data.paymentTerms, "7 days");
+  assert.deepEqual(result.appliedFields, []);
+});
+
+test("does not activate a correction from a matching filename pattern", () => {
+  const learning = createInitialLearningStore();
+  const original = invoice(
+    { fileName: "monthly-invoice-001.pdf" },
+    { expenseDescription: "", lineItems: [], paymentTerms: "7 days" }
+  );
+  captureUserCorrections({
+    invoice: original,
+    nextExtractedData: { ...original.extractedData, paymentTerms: "30 days" },
+    nextBookingLines: [],
+    learning,
+    user: { id: "shared_user", name: "Shared INTO User" },
+  });
+  promoteInvoiceCorrections(learning, original.id, "learn");
+
+  const later = invoice(
+    { id: "invoice-later", fileName: "monthly-invoice-002.pdf" },
+    { expenseDescription: "", lineItems: [], paymentTerms: "7 days" }
+  );
+  const result = applyLearnedExtractedData(later, later.extractedData, learning);
+
   assert.equal(result.data.paymentTerms, "7 days");
   assert.deepEqual(result.appliedFields, []);
 });

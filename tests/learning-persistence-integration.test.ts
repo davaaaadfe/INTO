@@ -367,6 +367,17 @@ test("storage cleanup prunes only expired encrypted learning artifacts", async (
 test("booking attempt snapshots omit nested document evidence without losing audit data", () => {
   const store = structuredClone(getStore());
   const invoice = store.invoices[0]!;
+  store.learning.supplierOutcomeEvents = [{
+    id: "transient-outcome",
+    supplierAccountId: "supplier-a",
+    generation: 1,
+    invoiceId: invoice.id,
+    invoiceRevision: invoice.revision,
+    type: "correction",
+    candidateIds: ["candidate-a"],
+    fields: ["referenceCode"],
+    createdAt: "2026-08-17T10:00:00.000Z",
+  }];
   invoice.bookingAttempts = [{
     id: "attempt-privacy-regression",
     invoiceId: invoice.id,
@@ -414,6 +425,7 @@ test("booking attempt snapshots omit nested document evidence without losing aud
 
   const snapshot = snapshotWithoutDocumentEvidence(store);
   const attempt = snapshot.invoices[0]!.bookingAttempts[0]!;
+  assert.equal(snapshot.learning.supplierOutcomeEvents, undefined);
 
   assert.deepEqual(
     {
@@ -601,6 +613,63 @@ test("legacy migration skips Exact suppliers without learning evidence", async (
     } else {
       process.env.SUPPLIER_LEARNING_MODE = previous.learningMode;
     }
+    await removeDatabase(databasePath);
+  }
+});
+
+test("supplier candidate outcome events project idempotently without values", async () => {
+  const databasePath = testDatabasePath();
+  const repository = new SqliteLearningRepository(databasePath);
+  try {
+    await repository.migrate();
+    const store = structuredClone(getStore());
+    const supplier = createMockExactMasterData().suppliers[0]!;
+    store.invoices = [];
+    store.exactMasterDataCaches = [{
+      userId: "company_connection",
+      cache: createMockExactMasterData(),
+    }];
+    store.learning.supplierProfiles = [{
+      supplierAccountId: supplier.id,
+      generation: 1,
+      exampleCount: 1,
+      formatDrift: "none",
+    }];
+    store.learning.supplierOutcomeEvents = [{
+      id: "outcome-application-a",
+      supplierAccountId: supplier.id,
+      generation: 1,
+      invoiceId: "invoice-a",
+      invoiceRevision: 4,
+      type: "application",
+      candidateIds: ["candidate-a"],
+      fields: ["referenceCode"],
+      createdAt: "2026-08-17T10:00:00.000Z",
+    }];
+
+    const context = {
+      actorId: "verified-a",
+      requestId: "request-a",
+      sessionCorrelationId: "session-a",
+    };
+    await persistLearningState(store, context, repository);
+    await persistLearningState(store, context, repository);
+
+    const events = await repository.listEvents({
+      companyId: process.env.INTO_COMPANY_ID?.trim() || "into-company",
+      divisionCode: store.exactMasterDataCaches[0]!.cache.divisionCode,
+      supplierAccountId: supplier.id,
+    });
+    assert.equal(events.filter((event) => event.type === "application").length, 1);
+    assert.deepEqual(events.find((event) => event.type === "application")?.metadata, {
+      invoiceId: "invoice-a",
+      invoiceRevision: 4,
+      candidateIds: ["candidate-a"],
+      fields: ["referenceCode"],
+    });
+    assert.doesNotMatch(JSON.stringify(events), /SECRET|rawValue|correctedValue/);
+  } finally {
+    repository.close();
     await removeDatabase(databasePath);
   }
 });

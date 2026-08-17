@@ -581,6 +581,7 @@ export type UploadedInvoice = {
   extractionHistory: ExtractionVersion[];
   bookingLineOverrides?: PurchaseJournalLine[];
   learnedFieldsApplied?: LearnableCorrectionField[];
+  supplierLearningApplication?: SupplierLearningApplication;
   purchaseJournal: PurchaseJournalBooking | null;
   validationErrors: ValidationError[];
   bookingAttempts: BookingAttempt[];
@@ -669,6 +670,29 @@ export type SupplierLearningDecision = {
   trustState?: "pending" | "trusted" | "legacy";
 };
 
+export type SupplierLearningApplication = {
+  id: string;
+  supplierAccountId: string;
+  generation: number;
+  clusterId: string;
+  invoiceRevision: number;
+  candidates: Array<{ id: string; field: string }>;
+  createdAt: string;
+};
+
+export type SupplierLearningOutcomeEvent = {
+  id: string;
+  supplierAccountId: string;
+  generation: number;
+  invoiceId: string;
+  invoiceRevision: number;
+  type: "application" | "acceptance" | "correction" | "rejection" | "validation";
+  candidateIds: string[];
+  fields: string[];
+  validation?: { passed: boolean; issueCount: number };
+  createdAt: string;
+};
+
 export type GlAccountLearningDecision = {
   supplierAccountId: string;
   descriptionKey: string;
@@ -731,6 +755,8 @@ export type SupplierLearningProfile = {
   exampleCount: number;
   lastLearnedAt?: string;
   lastResetAt?: string;
+  lastResetRequestKey?: string;
+  lastResetExpectedGeneration?: number;
   formatFingerprint?: string;
   formatDrift: SupplierLearningFormatDrift;
 };
@@ -849,6 +875,7 @@ export type BookingLearningStore = {
     decidedAt: string;
   }>;
   corrections: LearnedCorrection[];
+  supplierOutcomeEvents?: SupplierLearningOutcomeEvent[];
 };
 
 export const emptyExtractedInvoiceData = (): ExtractedInvoiceData => ({

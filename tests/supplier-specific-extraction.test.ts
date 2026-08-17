@@ -130,6 +130,7 @@ test("supplier candidate outcomes retain classifications without learned values"
       id: "learned-reference-a",
       field: "referenceCode",
       value: "SECRET-REFERENCE",
+      polygon: [],
       confidence: 0.94,
       source: "supplier_learning",
       clusterContext: {
@@ -142,6 +143,7 @@ test("supplier candidate outcomes retain classifications without learned values"
       id: "learned-total-a",
       field: "grossAmount",
       value: 1234.56,
+      polygon: [],
       confidence: 0.93,
       source: "supplier_learning",
       clusterContext: {
@@ -150,20 +152,19 @@ test("supplier candidate outcomes retain classifications without learned values"
         clusterId: "cluster-a",
       },
     },
-  ] as Parameters<typeof recordSupplierCandidateApplication>[2];
+  ];
 
   recordSupplierCandidateApplication(
     learning,
     invoice,
     candidates,
-    ["referenceCode"],
     "2026-08-17T10:00:00.000Z"
   );
-  recordSupplierCandidateOutcome(
+  recordSupplierCandidateApplication(
     learning,
     invoice,
-    ["grossAmount"],
-    "2026-08-17T10:01:00.000Z"
+    candidates,
+    "2026-08-17T10:00:30.000Z"
   );
   recordSupplierValidationOutcome(
     learning,
@@ -172,15 +173,21 @@ test("supplier candidate outcomes retain classifications without learned values"
     2,
     "2026-08-17T10:01:00.000Z"
   );
+  recordSupplierCandidateOutcome(
+    learning,
+    invoice,
+    ["grossAmount"],
+    "2026-08-17T10:01:00.000Z"
+  );
 
   assert.deepEqual(
     learning.supplierOutcomeEvents?.map((event) => event.type),
-    ["application", "correction", "acceptance", "validation"]
+    ["application", "validation", "correction", "acceptance"]
   );
   assert.equal(invoice.supplierLearningApplication, undefined);
-  assert.deepEqual(learning.supplierOutcomeEvents?.[1]?.fields, ["grossAmount"]);
-  assert.deepEqual(learning.supplierOutcomeEvents?.[2]?.fields, ["referenceCode"]);
-  assert.deepEqual(learning.supplierOutcomeEvents?.[3]?.validation, {
+  assert.deepEqual(learning.supplierOutcomeEvents?.[2]?.fields, ["grossAmount"]);
+  assert.deepEqual(learning.supplierOutcomeEvents?.[3]?.fields, ["referenceCode"]);
+  assert.deepEqual(learning.supplierOutcomeEvents?.[1]?.validation, {
     passed: false,
     issueCount: 2,
   });
@@ -199,16 +206,12 @@ test("needs-review classifies every pending supplier candidate as rejected", () 
     [{
       id: "learned-date-b",
       field: "invoiceDate",
-      value: "2026-08-17",
-      confidence: 0.92,
-      source: "supplier_learning",
       clusterContext: {
         supplierAccountId: "supplier-b",
         generation: 4,
         clusterId: "cluster-b",
       },
-    }] as Parameters<typeof recordSupplierCandidateApplication>[2],
-    [],
+    }],
     "2026-08-17T10:00:00.000Z"
   );
 

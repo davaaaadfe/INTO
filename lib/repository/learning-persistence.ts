@@ -184,6 +184,9 @@ function learningAccountIds(store: IntoStore) {
   for (const correction of store.learning.corrections) {
     add(correctionAccountId(store, correction, identities));
   }
+  for (const event of store.learning.supplierOutcomeEvents ?? []) {
+    add(event.supplierAccountId);
+  }
   for (const invoice of store.invoices) {
     const supplierAccountId =
       invoice.purchaseJournal?.supplierResolution.selectedAccountId;
@@ -397,6 +400,7 @@ function extractedDataWithoutDocumentEvidence(
 
 function rollbackLearningStore(learning: BookingLearningStore) {
   const rollback = structuredClone(learning);
+  delete rollback.supplierOutcomeEvents;
   rollback.supplierExamples = (rollback.supplierExamples ?? []).map((example) => ({
     ...example,
     originalExtractedData: extractedDataWithoutDocumentEvidence(
@@ -1150,6 +1154,37 @@ export async function persistLearningState(
           artifactInput(input.contentHash, invoice.extractedData, input.createdAt)
         ));
       await repository.saveExample({ ...input, artifactId: artifact.id });
+    }
+  }
+
+  if (!legacyMigration) {
+    for (const event of store.learning.supplierOutcomeEvents ?? []) {
+      const supplierAccountId = canonicalAccount(
+        store,
+        event.supplierAccountId
+      ).accountId;
+      const profile = profilesByAccount.get(supplierAccountId);
+      if (!profile || profile.generation !== event.generation) continue;
+      await repository.saveEvent({
+        id: event.id,
+        companyId: profile.companyId,
+        divisionCode: profile.divisionCode,
+        supplierAccountId,
+        generation: event.generation,
+        type: event.type,
+        idempotencyKey: `supplier-outcome:${event.id}`,
+        actorId: context.actorId ?? "shared_user",
+        sessionCorrelationId: context.sessionCorrelationId || "session_unavailable",
+        requestId: context.requestId || event.id,
+        metadata: {
+          invoiceId: event.invoiceId,
+          invoiceRevision: event.invoiceRevision,
+          candidateIds: event.candidateIds,
+          fields: event.fields,
+          ...(event.validation ? { validation: event.validation } : {}),
+        },
+        createdAt: event.createdAt,
+      });
     }
   }
 

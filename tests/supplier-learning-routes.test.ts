@@ -5,6 +5,7 @@ import { POST as bookInvoiceRoute } from "../app/api/invoices/[invoiceId]/book/r
 import { POST as bookReadyRoute } from "../app/api/invoices/book-ready/route";
 import { POST as intelligenceRoute } from "../app/api/invoices/[invoiceId]/intelligence/route";
 import { GET as listSupplierLearningRoute } from "../app/api/suppliers/learning/route";
+import { GET as supplierLearningDetailRoute } from "../app/api/suppliers/[accountId]/learning/route";
 import { POST as resetSupplierLearningRoute } from "../app/api/suppliers/[accountId]/learning/reset/route";
 import {
   emptyExtractedInvoiceData,
@@ -120,6 +121,113 @@ test("supplier learning routes return stable not-found and list responses", asyn
   assert.equal(listResponse.status, 200);
   const payload = (await listResponse.json()) as { suppliers?: unknown[] };
   assert.ok(Array.isArray(payload.suppliers));
+});
+
+test("supplier learning list paginates and detail returns sanitized cluster outcomes", async () => {
+  const invoice = routeLearningInvoice();
+  const supplierAccountId = invoice.purchaseJournal!.supplierResolution.selectedAccountId!;
+  getStore().learning.supplierProfiles = [{
+    supplierAccountId,
+    generation: 2,
+    exampleCount: 1,
+    formatDrift: "none",
+  }];
+  getStore().learning.supplierExamples = [{
+    id: "detail-example",
+    supplierAccountId,
+    generation: 2,
+    invoiceId: invoice.id,
+    contentHash: "detail-hash",
+    formatFingerprint: "detail-fingerprint",
+    formatSignature: "detail-signature",
+    formatCluster: "cluster-detail",
+    learnedAt: "2026-08-17T10:00:00.000Z",
+    trustState: "trusted",
+  }];
+  getStore().learning.supplierOutcomeEvents = [{
+    id: "detail-event",
+    supplierAccountId,
+    generation: 2,
+    invoiceId: invoice.id,
+    invoiceRevision: invoice.revision,
+    type: "acceptance",
+    candidateIds: ["candidate-detail"],
+    fields: ["referenceCode"],
+    createdAt: "2026-08-17T10:01:00.000Z",
+  }];
+
+  const listResponse = await listSupplierLearningRoute(
+    new Request("http://localhost/api/suppliers/learning?page=1&pageSize=1&q=noordzee")
+  );
+  const list = (await listResponse.json()) as {
+    suppliers: unknown[];
+    pagination: { page: number; pageSize: number; total: number; totalPages: number };
+  };
+  assert.equal(listResponse.status, 200);
+  assert.equal(list.suppliers.length, 1);
+  assert.equal(list.pagination.pageSize, 1);
+  assert.ok(list.pagination.total >= 1);
+
+  const detailResponse = await supplierLearningDetailRoute(
+    new Request(`http://localhost/api/suppliers/${supplierAccountId}/learning`),
+    { params: { accountId: supplierAccountId } }
+  );
+  const detail = (await detailResponse.json()) as {
+    profile: { generation: number };
+    clusters: Array<{ id: string; exampleCount: number }>;
+    recentEvents: Array<{ type: string; fields: string[] }>;
+  };
+  assert.equal(detailResponse.status, 200);
+  assert.equal(detail.profile.generation, 2);
+  assert.deepEqual(detail.clusters, [{ id: "cluster-detail", exampleCount: 1 }]);
+  assert.deepEqual(detail.recentEvents[0], {
+    type: "acceptance",
+    fields: ["referenceCode"],
+    createdAt: "2026-08-17T10:01:00.000Z",
+  });
+  assert.doesNotMatch(JSON.stringify(detail), /candidate-detail|detail-hash|detail-signature/);
+});
+
+test("supplier reset replays one request and rejects changed or synthetic targets", async () => {
+  const invoice = routeLearningInvoice();
+  const supplierAccountId = invoice.purchaseJournal!.supplierResolution.selectedAccountId!;
+  getStore().learning.supplierProfiles = [{
+    supplierAccountId,
+    generation: 1,
+    exampleCount: 1,
+    formatDrift: "none",
+  }];
+  getStore().learning.supplierExamples = [];
+  getStore().learning.corrections = [];
+  const post = (accountId: string, expectedGeneration: number, key: string) =>
+    resetSupplierLearningRoute(
+      new Request(`http://localhost/api/suppliers/${accountId}/learning/reset`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": key,
+        },
+        body: JSON.stringify({ expectedGeneration }),
+      }),
+      { params: { accountId } }
+    );
+
+  const first = await post(supplierAccountId, 1, "reset-route-a");
+  const firstPayload = (await first.json()) as {
+    profile: { generation: number };
+    replayed: boolean;
+    summary: { confidence: { score: number } };
+  };
+  assert.equal(first.status, 200);
+  assert.equal(firstPayload.profile.generation, 2);
+  assert.equal(firstPayload.replayed, false);
+  assert.equal(firstPayload.summary.confidence.score, 35);
+
+  const replay = await post(supplierAccountId, 1, "reset-route-a");
+  assert.equal(replay.status, 200);
+  assert.equal(((await replay.json()) as { replayed: boolean }).replayed, true);
+  assert.equal((await post(supplierAccountId, 2, "reset-route-a")).status, 409);
+  assert.equal((await post("supplier-overview:fake", 1, "reset-synthetic")).status, 422);
 });
 
 test("supplier learning read state stays off until both rollout flags are enabled", async () => {

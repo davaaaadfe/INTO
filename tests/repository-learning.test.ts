@@ -24,6 +24,7 @@ import {
 } from "../lib/repository/invoice-store";
 import { createMockExactMasterData } from "../lib/services/exact-master-data-service";
 import { supplierReliabilityEvidenceFromLearningStore } from "../lib/services/supplier-reliability-evidence";
+import { recordSupplierCandidateApplication } from "../lib/services/supplier-specific-extraction";
 
 test("the active review save path persists booking-line corrections", () => {
   const invoice = createUploadedInvoice({
@@ -460,6 +461,55 @@ test("re-read and supplier selection each invalidate an earlier Learn draft", ()
         beforeSelectionRevision
       ),
     /revision changed/i
+  );
+});
+
+test("review and needs-review classify pending supplier candidate outcomes", () => {
+  const { invoice, extractedData } = learningInvoice();
+  const learning = getStore().learning;
+  const candidateContext = {
+    supplierAccountId: invoice.purchaseJournal!.supplierResolution.selectedAccountId!,
+    generation: 1,
+    clusterId: "cluster-review",
+  };
+  recordSupplierCandidateApplication(
+    learning,
+    invoice,
+    [
+      { id: "candidate-description", field: "expenseDescription", clusterContext: candidateContext },
+      { id: "candidate-date", field: "invoiceDate", clusterContext: candidateContext },
+    ]
+  );
+
+  const saved = saveInvoiceReview(
+    invoice.id,
+    { ...extractedData, expenseDescription: "Reviewed description" },
+    invoice.purchaseJournal!.lines
+  )!;
+
+  assert.deepEqual(
+    learning.supplierOutcomeEvents
+      ?.filter((event) => event.invoiceId === invoice.id)
+      .map((event) => [event.type, event.fields]),
+    [
+      ["application", ["expenseDescription", "invoiceDate"]],
+      ["validation", ["expenseDescription", "invoiceDate"]],
+      ["correction", ["expenseDescription"]],
+      ["acceptance", ["invoiceDate"]],
+    ]
+  );
+
+  recordSupplierCandidateApplication(
+    learning,
+    saved,
+    [{ id: "candidate-payment", field: "paymentTerms", clusterContext: candidateContext }]
+  );
+  markInvoiceNeedsReview(saved.id);
+  assert.equal(
+    learning.supplierOutcomeEvents
+      ?.filter((event) => event.invoiceId === invoice.id)
+      .at(-1)?.type,
+    "rejection"
   );
 });
 

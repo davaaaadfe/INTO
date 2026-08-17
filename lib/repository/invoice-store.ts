@@ -58,6 +58,11 @@ import {
   promoteInvoiceCorrections,
 } from "../services/correction-learning";
 import { refreshExactTokenIfNeeded } from "../services/exact-online-service";
+import {
+  recordSupplierCandidateApplication,
+  recordSupplierCandidateOutcome,
+  recordSupplierValidationOutcome,
+} from "../services/supplier-specific-extraction";
 import { mergeSupplierOverviewWithExactSuppliers } from "../services/supplier-overview-import";
 import {
   formatFingerprint,
@@ -1556,7 +1561,7 @@ export function updateInvoiceExtraction(
   }
 
   const learned = options.applyLearning === false
-    ? { data: extractedData, appliedFields: [] }
+    ? { data: extractedData, appliedFields: [], candidates: [] }
     : applyLearnedExtractedData(invoice, extractedData, getStore().learning);
   invoice.extractedData = learned.data;
   invoice.learnedFieldsApplied = learned.appliedFields;
@@ -1564,7 +1569,22 @@ export function updateInvoiceExtraction(
   invoice.purchaseJournal = null;
   invoice.revision = (invoice.revision ?? 1) + 1;
   invoice.updatedAt = now();
+  recordSupplierCandidateApplication(
+    getStore().learning,
+    invoice,
+    learned.candidates,
+    invoice.updatedAt
+  );
   return invoice;
+}
+
+function supplierCandidateField(field: string) {
+  return ({
+    supplier: "supplierName",
+    yourRefPattern: "referenceCode",
+    description: "expenseDescription",
+    totalAmount: "grossAmount",
+  } as Record<string, string>)[field] ?? field;
 }
 
 export function saveInvoiceReview(
@@ -1634,8 +1654,24 @@ export function saveInvoiceReview(
     invoice.revision += 1;
   }
   invoice.updatedAt = now();
+  const updated = recomputeInvoiceState(invoiceId, { incrementRevision: false });
+  if (updated) {
+    recordSupplierValidationOutcome(
+      getStore().learning,
+      updated,
+      !updated.validationErrors.some((error) => error.severity === "error"),
+      updated.validationErrors.length,
+      updated.updatedAt
+    );
+    recordSupplierCandidateOutcome(
+      getStore().learning,
+      updated,
+      captured.map((correction) => supplierCandidateField(correction.field)),
+      updated.updatedAt
+    );
+  }
   persistStoreSoon();
-  return recomputeInvoiceState(invoiceId, { incrementRevision: false });
+  return updated;
 }
 
 function trustedContentHash(invoice: UploadedInvoice) {
@@ -2007,6 +2043,54 @@ export function listSupplierLearningSummaries(): SupplierLearningSummary[] {
   });
 }
 
+export function getSupplierLearningDetail(accountId: string) {
+  const store = getStore();
+  const supplier = exactMasterDataForUser(
+    store,
+    COMPANY_CONNECTION_USER_ID
+  )?.suppliers.find(
+    (item) => item.id === accountId && !item.id.startsWith("supplier-overview:")
+  );
+  const profile = store.learning.supplierProfiles.find(
+    (item) => item.supplierAccountId === accountId
+  );
+  if (!supplier || !profile) {
+    throw new SupplierLearningNotFoundError("Supplier learning profile not found.");
+  }
+  const summary = listSupplierLearningSummaries().find(
+    (item) => item.supplierAccountId === accountId
+  )!;
+  const clusters = new Map<string, number>();
+  for (const example of store.learning.supplierExamples) {
+    if (
+      example.supplierAccountId === accountId &&
+      example.generation === profile.generation &&
+      example.active !== false &&
+      example.formatCluster
+    ) {
+      clusters.set(example.formatCluster, (clusters.get(example.formatCluster) ?? 0) + 1);
+    }
+  }
+  return {
+    profile: summary,
+    clusters: [...clusters].map(([id, exampleCount]) => ({ id, exampleCount })),
+    recentEvents: (store.learning.supplierOutcomeEvents ?? [])
+      .filter(
+        (event) =>
+          event.supplierAccountId === accountId &&
+          event.generation === profile.generation
+      )
+      .slice(-20)
+      .reverse()
+      .map((event) => ({
+        type: event.type,
+        fields: event.fields,
+        createdAt: event.createdAt,
+        ...(event.validation ? { validation: event.validation } : {}),
+      })),
+  };
+}
+
 function exactSupplierIdentityKeys(accountId: string) {
   const supplier = exactMasterDataForUser(
     getStore(),
@@ -2027,12 +2111,41 @@ export function resetLearningForSupplier(
   accountId: string,
   expectedGeneration: number
 ) {
+  return resetLearningForSupplierCommand(
+    accountId,
+    expectedGeneration
+  ).profile;
+}
+
+export function resetLearningForSupplierCommand(
+  accountId: string,
+  expectedGeneration: number,
+  requestKey?: string
+) {
   const store = getStore();
+  const canonicalSupplier = exactMasterDataForUser(
+    store,
+    COMPANY_CONNECTION_USER_ID
+  )?.suppliers.find(
+    (supplier) =>
+      supplier.id === accountId && !supplier.id.startsWith("supplier-overview:")
+  );
+  if (accountId.startsWith("supplier-overview:")) {
+    throw new TypeError("A canonical Exact supplier account is required.");
+  }
   const profile = store.learning.supplierProfiles.find(
     (item) => item.supplierAccountId === accountId
   );
-  if (!profile) {
+  if (!profile || !canonicalSupplier) {
     throw new SupplierLearningNotFoundError("Supplier learning profile not found.");
+  }
+  if (requestKey && profile.lastResetRequestKey === requestKey) {
+    if (profile.lastResetExpectedGeneration !== expectedGeneration) {
+      throw new SupplierLearningGenerationConflictError(
+        "The idempotency key was already used with different reset data."
+      );
+    }
+    return { profile, replayed: true };
   }
   if (profile.generation !== expectedGeneration) {
     throw new SupplierLearningGenerationConflictError(
@@ -2053,6 +2166,13 @@ export function resetLearningForSupplier(
     store.learning,
     resetSupplierLearning(store.learning, accountId, resetAt)
   );
+  const resetProfile = store.learning.supplierProfiles.find(
+    (item) => item.supplierAccountId === accountId
+  )!;
+  resetProfile.lastResetRequestKey = requestKey;
+  resetProfile.lastResetExpectedGeneration = requestKey
+    ? expectedGeneration
+    : undefined;
   store.learning.supplierSelections = store.learning.supplierSelections.filter(
     (item) => item.accountId !== accountId
   );
@@ -2086,9 +2206,7 @@ export function resetLearningForSupplier(
     },
   });
   persistStoreSoon();
-  return store.learning.supplierProfiles.find(
-    (item) => item.supplierAccountId === accountId
-  )!;
+  return { profile: resetProfile, replayed: false };
 }
 
 export function applyValidation(
@@ -2207,6 +2325,12 @@ export function replaceInvoiceExtractionFromReread(
   invoice.lastError = undefined;
   invoice.revision += 1;
   invoice.updatedAt = now();
+  recordSupplierCandidateApplication(
+    getStore().learning,
+    invoice,
+    learned.candidates,
+    invoice.updatedAt
+  );
   addAuditEvent({
     invoiceId,
     type: "invoice_reread",
@@ -2318,6 +2442,14 @@ export function markInvoiceBooked(
   invoice.exactBookingStatus = "booked";
   invoice.lastError = undefined;
   invoice.revision += 1;
+  recordSupplierValidationOutcome(
+    getStore().learning,
+    invoice,
+    true,
+    0,
+    now()
+  );
+  recordSupplierCandidateOutcome(getStore().learning, invoice, [], now());
   promoteInvoiceCorrections(getStore().learning, invoiceId, "booking", now());
   rememberDecisionsFromInvoice(invoice, getStore().learning);
   invoice.updatedAt = now();
@@ -2481,6 +2613,12 @@ export function markInvoiceNeedsReview(
     },
   ]);
   invoice.updatedAt = now();
+  recordSupplierCandidateOutcome(
+    getStore().learning,
+    invoice,
+    "rejection",
+    invoice.updatedAt
+  );
   addAuditEvent({
     invoiceId,
     type: "invoice_field_edited",
@@ -2515,6 +2653,19 @@ export function approveInvoiceIntelligence(
 
   if (updatedInvoice) {
     updatedInvoice.revision += 1;
+    recordSupplierValidationOutcome(
+      getStore().learning,
+      updatedInvoice,
+      !updatedInvoice.validationErrors.some((error) => error.severity === "error"),
+      updatedInvoice.validationErrors.length,
+      updatedInvoice.updatedAt
+    );
+    recordSupplierCandidateOutcome(
+      getStore().learning,
+      updatedInvoice,
+      [],
+      updatedInvoice.updatedAt
+    );
     promoteInvoiceCorrections(
       getStore().learning,
       invoiceId,

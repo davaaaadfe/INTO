@@ -1,5 +1,7 @@
 import {
-  resetLearningForSupplier,
+  getSupplierLearningDetail,
+  listSupplierLearningSummaries,
+  resetLearningForSupplierCommand,
   requirePermission,
   SupplierLearningGenerationConflictError,
   SupplierLearningNotFoundError,
@@ -43,11 +45,27 @@ export async function POST(request: Request, context: RouteContext) {
           { status: 400 }
         );
       }
-      const profile = resetLearningForSupplier(
+      getSupplierLearningDetail(accountId);
+      const requestKey =
+        request.headers.get("idempotency-key")?.trim() ||
+        (typeof (payload as { requestKey?: unknown }).requestKey === "string"
+          ? (payload as { requestKey: string }).requestKey.trim()
+          : "");
+      if (!requestKey) {
+        return Response.json(
+          { error: "Idempotency-Key is required." },
+          { status: 422 }
+        );
+      }
+      const result = resetLearningForSupplierCommand(
         accountId,
-        payload.expectedGeneration as number
+        payload.expectedGeneration as number,
+        requestKey
       );
-      return Response.json({ profile });
+      const summary = listSupplierLearningSummaries().find(
+        (item) => item.supplierAccountId === accountId
+      );
+      return Response.json({ ...result, summary });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Reset failed.";
       const status =
@@ -55,7 +73,9 @@ export async function POST(request: Request, context: RouteContext) {
           ? 404
           : error instanceof SupplierLearningGenerationConflictError
             ? 409
-            : 500;
+            : error instanceof TypeError
+              ? 422
+              : 500;
       return Response.json({ error: message }, { status });
     }
   }, request);

@@ -11,9 +11,11 @@ import {
   createInitialLearningStore,
   generatePurchaseJournalBooking,
   purchaseJournalValidationErrors,
+  supplierIdentityForInvoice,
   statusFromPurchaseJournal,
   SUPPLIER_RESOLUTION_V2_POLICY,
 } from "../lib/services/purchase-journal-intelligence";
+import { formatFingerprint } from "../lib/services/supplier-learning";
 import { createMockExactMasterData } from "../lib/services/exact-master-data-service";
 import {
   bookInvoiceInExact,
@@ -154,11 +156,42 @@ function uploadedInvoice(
   return invoice;
 }
 
-function buildBooking(invoice: UploadedInvoice) {
+function confirmedLearning(invoice: UploadedInvoice, accountId: string) {
+  const learning = createInitialLearningStore();
+  const layout = formatFingerprint(invoice.extractedData.rawText ?? "");
+  learning.supplierProfiles.push({
+    supplierAccountId: accountId,
+    generation: 1,
+    exampleCount: 1,
+    formatFingerprint: layout,
+    formatDrift: "none",
+  });
+  learning.supplierExamples.push({
+    id: `confirmed-${accountId}`,
+    supplierAccountId: accountId,
+    generation: 1,
+    invoiceId: "confirmed-invoice",
+    contentHash: `confirmed-hash-${accountId}`,
+    formatFingerprint: layout,
+    learnedAt: "2026-06-15T00:00:00.000Z",
+    trustState: "trusted",
+    active: true,
+  });
+  learning.supplierSelections.push({
+    supplierIdentity: supplierIdentityForInvoice(invoice),
+    accountId,
+    decidedAt: "2026-06-15T00:00:00.000Z",
+    formatFingerprint: layout,
+    trustState: "trusted",
+  });
+  return learning;
+}
+
+function buildBooking(invoice: UploadedInvoice, accountId = "supplier_noordzee") {
   return generatePurchaseJournalBooking(
     invoice,
     [invoice],
-    createInitialLearningStore(),
+    confirmedLearning(invoice, accountId),
     exactMasterData
   );
 }
@@ -444,7 +477,7 @@ test("reports an unresolved supplier warning only once", () => {
   assert.equal(supplierWarnings[0]?.field, "supplier");
 });
 
-test("uses a unique VAT match before conflicting historical evidence", () => {
+test("keeps a first unique VAT match manual before supplier and format confirmation", () => {
   const invoice = uploadedInvoice(
     {},
     {
@@ -478,9 +511,10 @@ test("uses a unique VAT match before conflicting historical evidence", () => {
     masterData
   );
 
-  assert.equal(booking.supplierResolution.reviewRequired, false);
-  assert.equal(booking.supplierResolution.selectedAccountId, "supplier_noordzee");
-  assert.equal(booking.supplierResolution.method, "VAT number");
+  assert.equal(booking.supplierResolution.reviewRequired, true);
+  assert.equal(booking.supplierResolution.selectedAccountId, undefined);
+  assert.equal(booking.supplierResolution.manualReason, "unfamiliar_supplier");
+  assert.equal(booking.supplierResolution.candidates.length, 0);
 });
 
 test("shows the required guidance when no Exact supplier can be matched", () => {
@@ -512,7 +546,7 @@ test("shows the required guidance when no Exact supplier can be matched", () => 
   );
 });
 
-test("matches an Exact supplier name despite legal suffix punctuation", () => {
+test("uses a normalized Exact name to constrain first manual selection", () => {
   const invoice = uploadedInvoice(
     {},
     {
@@ -528,12 +562,12 @@ test("matches an Exact supplier name despite legal suffix punctuation", () => {
   );
   const booking = buildBooking(invoice);
 
-  assert.equal(booking.supplierResolution.reviewRequired, false);
-  assert.equal(booking.supplierResolution.selectedAccountId, "supplier_booking");
-  assert.equal(booking.supplierResolution.method, "Evidence fusion");
+  assert.equal(booking.supplierResolution.reviewRequired, true);
+  assert.equal(booking.supplierResolution.selectedAccountId, undefined);
+  assert.equal(booking.supplierResolution.manualReason, "unfamiliar_supplier");
 });
 
-test("matches an Exact supplier IBAN despite invoice spacing", () => {
+test("uses a normalized Exact IBAN to constrain first manual selection", () => {
   const invoice = uploadedInvoice(
     {},
     {
@@ -547,9 +581,9 @@ test("matches an Exact supplier IBAN despite invoice spacing", () => {
   );
   const booking = buildBooking(invoice);
 
-  assert.equal(booking.supplierResolution.reviewRequired, false);
-  assert.equal(booking.supplierResolution.selectedAccountId, "supplier_delta_it");
-  assert.equal(booking.supplierResolution.method, "IBAN");
+  assert.equal(booking.supplierResolution.reviewRequired, true);
+  assert.equal(booking.supplierResolution.selectedAccountId, undefined);
+  assert.equal(booking.supplierResolution.manualReason, "unfamiliar_supplier");
 });
 
 test("prioritizes an imported supplier IBAN over a conflicting supplier name", () => {
@@ -589,10 +623,9 @@ test("prioritizes an imported supplier IBAN over a conflicting supplier name", (
     masterData
   );
 
-  assert.equal(booking.supplierResolution.selectedAccountId, "supplier_iban_match");
-  assert.equal(booking.supplierResolution.selectedAccountCode, "90002");
-  assert.equal(booking.supplierResolution.selectedAccountName, "Exact Legal Supplier Name");
-  assert.equal(booking.supplierResolution.method, "IBAN");
+  assert.equal(booking.supplierResolution.selectedAccountId, undefined);
+  assert.equal(booking.supplierResolution.manualReason, "unfamiliar_supplier");
+  assert.equal(booking.supplierResolution.candidates.length, 0);
 });
 
 test("uses BIC only as supporting evidence and never auto-selects from BIC alone", () => {
@@ -664,7 +697,8 @@ test("conflicting hard supplier identifiers block automatic selection", () => {
 
   assert.equal(booking.supplierResolution.selectedAccountId, undefined);
   assert.equal(booking.supplierResolution.reasonCode, "supplier_ambiguous");
-  assert.equal(booking.supplierResolution.candidates.length, 2);
+  assert.equal(booking.supplierResolution.manualReason, "hard_identifier_conflict");
+  assert.equal(booking.supplierResolution.candidates.length, 0);
 });
 
 test("an unmatched hard supplier identifier blocks a contradictory soft match", () => {
@@ -687,20 +721,14 @@ test("an unmatched hard supplier identifier blocks a contradictory soft match", 
 
 test("low supplier reliability requests field review without overriding a unique identity", () => {
   const invoice = uploadedInvoice();
-  const learning = createInitialLearningStore();
-  learning.supplierProfiles.push({
-    supplierAccountId: "supplier_noordzee",
-    generation: 1,
-    exampleCount: 1,
-    formatDrift: "none",
-  });
-  learning.supplierExamples.push({
+  const learning = confirmedLearning(invoice, "supplier_noordzee");
+  learning.supplierExamples = [{
     id: "low-reliability-example",
     supplierAccountId: "supplier_noordzee",
     generation: 1,
     invoiceId: "previous-invoice",
     contentHash: "low-reliability-hash",
-    formatFingerprint: "format-a",
+    formatFingerprint: formatFingerprint(invoice.extractedData.rawText ?? ""),
     learnedAt: "2026-07-20T00:00:00.000Z",
     originalExtractedData: structuredClone(invoice.extractedData),
     finalExtractedData: structuredClone(invoice.extractedData),
@@ -709,7 +737,7 @@ test("low supplier reliability requests field review without overriding a unique
     trigger: "review",
     validationResult: { valid: true },
     active: true,
-  });
+  }];
 
   const booking = generatePurchaseJournalBooking(
     invoice,
@@ -879,8 +907,47 @@ test("applies V2 supplier auto-selection only when enabled outside shadow mode",
       "supplier_noordzee"
     );
     assert.equal(booking.supplierResolution.reviewRequired, false);
+    assert.equal(booking.supplierResolution.selectionOrigin, "automatic");
     assert.equal(booking.supplierResolution.shadowEvaluation, undefined);
   });
+});
+
+test("learned auto-selection rollout is scoped to the confirmed supplier", () => {
+  const previous = {
+    enabled: process.env.SUPPLIER_LEARNED_AUTO_SELECTION_ENABLED,
+    allowlist: process.env.SUPPLIER_LEARNED_AUTO_SELECTION_ALLOWLIST,
+    percentage: process.env.SUPPLIER_LEARNED_AUTO_SELECTION_PERCENTAGE,
+  };
+  process.env.SUPPLIER_LEARNED_AUTO_SELECTION_ENABLED = "true";
+  process.env.SUPPLIER_LEARNED_AUTO_SELECTION_PERCENTAGE = "0";
+  try {
+    withSupplierResolutionFlags(true, false, () => {
+      process.env.SUPPLIER_LEARNED_AUTO_SELECTION_ALLOWLIST = "supplier_delta_it";
+      assert.equal(
+        buildBooking(uploadedInvoice()).supplierResolution.selectedAccountId,
+        undefined
+      );
+
+      process.env.SUPPLIER_LEARNED_AUTO_SELECTION_ALLOWLIST = "supplier_noordzee";
+      assert.equal(
+        buildBooking(uploadedInvoice()).supplierResolution.selectedAccountId,
+        "supplier_noordzee"
+      );
+    });
+  } finally {
+    setEnvironmentValue(
+      "SUPPLIER_LEARNED_AUTO_SELECTION_ENABLED",
+      previous.enabled
+    );
+    setEnvironmentValue(
+      "SUPPLIER_LEARNED_AUTO_SELECTION_ALLOWLIST",
+      previous.allowlist
+    );
+    setEnvironmentValue(
+      "SUPPLIER_LEARNED_AUTO_SELECTION_PERCENTAGE",
+      previous.percentage
+    );
+  }
 });
 
 test("a narrow score margin remains ambiguous even with multiple soft signals", () => {
@@ -924,12 +991,8 @@ test("a narrow score margin remains ambiguous even with multiple soft signals", 
 
   assert.equal(booking.supplierResolution.selectedAccountId, undefined);
   assert.equal(booking.supplierResolution.reasonCode, "supplier_ambiguous");
-  assert.ok(booking.supplierResolution.candidates.length >= 2);
-  assert.ok(
-    booking.supplierResolution.candidates[0].confidence -
-      booking.supplierResolution.candidates[1].confidence <
-      0.12
-  );
+  assert.equal(booking.supplierResolution.manualReason, "unfamiliar_supplier");
+  assert.equal(booking.supplierResolution.candidates.length, 0);
 });
 
 test("matches an imported supplier by a labeled supplier code", () => {
@@ -958,8 +1021,8 @@ test("matches an imported supplier by a labeled supplier code", () => {
     masterData
   );
 
-  assert.equal(booking.supplierResolution.selectedAccountId, "supplier_code_match");
-  assert.equal(booking.supplierResolution.method, "Supplier code");
+  assert.equal(booking.supplierResolution.selectedAccountId, undefined);
+  assert.equal(booking.supplierResolution.manualReason, "unfamiliar_supplier");
 });
 
 test("combines supplier name and address before automatic selection", () => {
@@ -992,8 +1055,8 @@ test("combines supplier name and address before automatic selection", () => {
     masterData
   );
 
-  assert.equal(booking.supplierResolution.selectedAccountId, "supplier_address_match");
-  assert.equal(booking.supplierResolution.method, "Evidence fusion");
+  assert.equal(booking.supplierResolution.selectedAccountId, undefined);
+  assert.equal(booking.supplierResolution.manualReason, "unfamiliar_supplier");
 });
 
 test("treats city-and-country-only supplier matches as low confidence", () => {
@@ -1110,13 +1173,7 @@ test("uses learned supplier decisions to unblock future ambiguous matches", () =
     iban: "",
     invoiceNumber: "INV-ACME-002",
   });
-  const learning = createInitialLearningStore();
-  learning.supplierSelections.push({
-    supplierIdentity: "name:acme-supplies",
-    accountId: "supplier_ambiguous_a",
-    decidedAt: "2026-06-16T00:00:00.000Z",
-    trustState: "trusted",
-  });
+  const learning = confirmedLearning(invoice, "supplier_ambiguous_a");
   const booking = generatePurchaseJournalBooking(
     invoice,
     [invoice],
@@ -1194,6 +1251,7 @@ test("observe mode still honors the supplier manually selected for this invoice"
       "supplier_ambiguous_a"
     );
     assert.equal(booking.supplierResolution.reviewRequired, false);
+    assert.equal(booking.supplierResolution.selectionOrigin, "manual");
   });
 });
 
@@ -1203,6 +1261,13 @@ test("observe mode does not apply learned journal account, VAT, or cost mappings
       invoiceNumber: "INV-OBSERVE-MAPPINGS-1",
     });
     const learning = createInitialLearningStore();
+    learning.supplierSelections.push({
+      supplierIdentity: supplierIdentityForInvoice(invoice),
+      accountId: "supplier_noordzee",
+      decidedAt: "2026-06-16T00:00:00.000Z",
+      invoiceId: invoice.id,
+      trustState: "pending",
+    });
     learning.glAccountSelections.push({
       supplierAccountId: "supplier_noordzee",
       descriptionKey: "office-supplies",
@@ -1359,7 +1424,7 @@ test("suggests booking fields from the most similar previous Exact purchase entr
   const booking = generatePurchaseJournalBooking(
     invoice,
     [invoice],
-    createInitialLearningStore(),
+    confirmedLearning(invoice, "supplier_delta_it"),
     masterData
   );
 
@@ -1457,7 +1522,7 @@ test("reuses a previous Exact booking line split while preserving current totals
   const booking = generatePurchaseJournalBooking(
     invoice,
     [invoice],
-    createInitialLearningStore(),
+    confirmedLearning(invoice, "supplier_delta_it"),
     masterData
   );
 
@@ -1965,7 +2030,7 @@ test("blocks booking when Exact already has the same supplier reference with a d
     fileType: invoice.fileType,
     content: "Google duplicate invoice",
   });
-  const booking = buildBooking(invoice);
+  const booking = buildBooking(invoice, "supplier_google_ireland");
   invoice.purchaseJournal = {
     ...booking,
     autoBookAllowed: true,

@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   evaluateLearningCorpus,
+  learningEvaluationHoldoutReport,
   runLearningCorpusCase,
   type LearningEvaluationCase,
   type LearningGoldenCorpusCase,
@@ -267,4 +268,31 @@ test("does not round a 95% lower confidence bound up to the production threshold
   assert.equal(result.supplier.precision, 559 / 560);
   assert.equal(result.supplier.confidenceLowerBound, 0.99);
   assert.equal(result.supplier.recommendedGatePassed, false);
+});
+
+test("supplier and format holdouts fail closed on training leakage", () => {
+  const report = learningEvaluationHoldoutReport(
+    [
+      { supplierAccountId: "supplier-a", formatId: "format-1" },
+      { supplierAccountId: "supplier-b", formatId: "format-2" },
+    ],
+    [
+      { supplierAccountId: "supplier-a", formatId: "format-3" },
+      { supplierAccountId: "supplier-c", formatId: "format-2" },
+      { supplierAccountId: "supplier-d", formatId: "format-4" },
+    ]
+  );
+
+  assert.deepEqual(report, {
+    valid: false,
+    supplierLeakage: ["supplier-a"],
+    formatLeakage: ["format-2"],
+  });
+  assert.deepEqual(
+    learningEvaluationHoldoutReport(
+      [{ supplierAccountId: "supplier-a", formatId: "format-1" }],
+      [{ supplierAccountId: "supplier-b", formatId: "format-2" }]
+    ),
+    { valid: true, supplierLeakage: [], formatLeakage: [] }
+  );
 });

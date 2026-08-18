@@ -396,3 +396,97 @@ test("derives the same evidence from the active runtime supplier generation", ()
     ]
   );
 });
+
+test("active normalized candidate outcomes contribute reliability without values", () => {
+  const learning: BookingLearningStore = {
+    revision: 1,
+    supplierProfiles: [{
+      supplierAccountId: "supplier-a",
+      generation: 2,
+      exampleCount: 0,
+      formatDrift: "none",
+    }],
+    supplierExamples: [],
+    supplierPatterns: [],
+    supplierSelections: [],
+    glAccountSelections: [],
+    vatCodeSelections: [],
+    costCentreSelections: [],
+    costUnitSelections: [],
+    corrections: [],
+    supplierOutcomeEvents: [
+      {
+        id: "accepted-reference",
+        supplierAccountId: "supplier-a",
+        generation: 2,
+        invoiceId: "invoice-a",
+        invoiceRevision: 3,
+        type: "acceptance",
+        candidateIds: [],
+        fields: ["referenceCode"],
+        createdAt: occurredAt,
+      },
+      {
+        id: "corrected-date-and-total",
+        supplierAccountId: "supplier-a",
+        generation: 2,
+        invoiceId: "invoice-b",
+        invoiceRevision: 4,
+        type: "correction",
+        candidateIds: [],
+        fields: ["invoiceDate", "grossAmount"],
+        createdAt: occurredAt,
+      },
+      {
+        id: "validated",
+        supplierAccountId: "supplier-a",
+        generation: 2,
+        invoiceId: "invoice-b",
+        invoiceRevision: 4,
+        type: "validation",
+        candidateIds: [],
+        fields: [],
+        validation: { passed: false, issueCount: 2 },
+        createdAt: occurredAt,
+      },
+      {
+        id: "ignored-application",
+        supplierAccountId: "supplier-a",
+        generation: 2,
+        invoiceId: "invoice-c",
+        invoiceRevision: 1,
+        type: "application",
+        candidateIds: [],
+        fields: ["referenceCode"],
+        createdAt: occurredAt,
+      },
+      {
+        id: "ignored-old-generation",
+        supplierAccountId: "supplier-a",
+        generation: 1,
+        invoiceId: "invoice-old",
+        invoiceRevision: 1,
+        type: "rejection",
+        candidateIds: [],
+        fields: ["referenceCode"],
+        createdAt: occurredAt,
+      },
+    ],
+  };
+
+  const evidence = supplierLearning.supplierReliabilityEvidenceFromLearningStore(
+    learning,
+    learning.supplierProfiles[0]!
+  );
+  assert.deepEqual(
+    evidence.outcomes.map(({ metric, success }) => ({ metric, success })),
+    [
+      { metric: "your_ref", success: true },
+      { metric: "inverse_correction", success: true },
+      { metric: "invoice_date", success: false },
+      { metric: "amounts", success: false },
+      { metric: "inverse_correction", success: false },
+      { metric: "validation", success: false },
+    ]
+  );
+});

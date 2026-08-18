@@ -9,7 +9,6 @@ import {
   InvoiceRevisionValidationError,
   listInvoices,
   replaceInvoiceExtractionFromReread,
-  requirePermission,
   resolveDuplicateDecision,
 } from "../../../../../lib/repository/invoice-store";
 import { withPersistentStore } from "../../../../../lib/repository/persistent-request";
@@ -27,19 +26,12 @@ async function invoiceIdFromContext(context: RouteContext) {
 }
 
 export async function POST(request: Request, context: RouteContext) {
-  return withPersistentStore(async (principal) => {
+  return withPersistentStore(async () => {
     const invoiceId = await invoiceIdFromContext(context);
     const invoice = getInvoice(invoiceId);
 
     if (!invoice) {
       return Response.json({ error: "Invoice not found." }, { status: 404 });
-    }
-
-    try {
-      requirePermission("edit", principal);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Not allowed.";
-      return Response.json({ error: message }, { status: 403 });
     }
 
     try {

@@ -53,6 +53,7 @@ import {
 } from "./supplier-learning";
 import {
   learningFeatureFlags,
+  supplierLearnedAutoSelectionEnabledFor,
   supplierLearningMode,
 } from "./learning-feature-flags";
 
@@ -535,6 +536,7 @@ function resolveSupplier(
       method: "Exact master data missing",
       reviewRequired: true,
       reasonCode: "supplier_low_confidence" as const,
+      manualReason: "exact_master_data_unavailable" as const,
       candidates: [],
       reasoning: ["Sync Exact Online master data before supplier matching."],
     };
@@ -557,6 +559,7 @@ function resolveSupplier(
       threshold: SUPPLIER_RESOLUTION_V2_POLICY.minimumConfidence,
       method: "Learned decision",
       reviewRequired: false,
+      selectionOrigin: "manual",
       candidates: [],
       reasoning: ["Applied the supplier explicitly selected for this invoice."],
     };
@@ -569,12 +572,6 @@ function resolveSupplier(
           identities.includes(decision.supplierIdentity)
       )
     : [];
-  const trustedSelection =
-    trustedSelections.find(
-      (decision) =>
-        Boolean(decision.formatFingerprint) &&
-        decision.formatFingerprint === layout
-    ) ?? trustedSelections.find((decision) => !decision.formatFingerprint);
 
   type Evidence = {
     account: ExactSupplierAccount;
@@ -664,31 +661,6 @@ function resolveSupplier(
     "Clearly labelled supplier code matched the Exact supplier overview."
   );
   if (hardAccountIds.size > 1) hardConflict = true;
-
-  const trustedAccount = trustedSelection
-    ? suppliers.find((supplier) => supplier.id === trustedSelection.accountId)
-    : undefined;
-  if (
-    trustedAccount &&
-    !unmatchedHardIdentifier &&
-    hardMatchGroups.every((matches) => matches.has(trustedAccount.id))
-  ) {
-    return {
-      selectedAccountId: trustedAccount.id,
-      selectedAccountCode: trustedAccount.code,
-      selectedAccountName: trustedAccount.name,
-      matchConfidence: 1,
-      threshold: SUPPLIER_RESOLUTION_V2_POLICY.minimumConfidence,
-      method: "Learned decision",
-      reviewRequired: false,
-      candidates: [],
-      reasoning: [
-        trustedSelection?.formatFingerprint
-          ? "Matched a supplier explicitly selected for this invoice layout."
-          : "Matched a previously trusted supplier resolution.",
-      ],
-    };
-  }
 
   const dataBic = invoiceBic(data);
   if (dataBic) {
@@ -872,9 +844,21 @@ function resolveSupplier(
     ? hardAccountIds.size === 1 && hardAccountIds.has(best.item.account.id)
     : false;
   const bestSoftFamilies = best?.item.familyScores.size ?? 0;
+  const priorSupplierConfirmation = best
+    ? trustedSelections.find((decision) => decision.accountId === best.item.account.id)
+    : undefined;
+  const formatConfirmation = priorSupplierConfirmation?.formatFingerprint === layout
+    ? priorSupplierConfirmation
+    : undefined;
+  // A trusted, format-scoped manual choice is the confirmation that makes this
+  // supplier/format pair familiar. Reset removes these decisions, so an old
+  // generation cannot silently reactivate automatic selection.
+  const recognizedFormat = Boolean(formatConfirmation);
   const autoSelect = Boolean(
     best &&
       !hardConflict &&
+      formatConfirmation &&
+      recognizedFormat &&
       best.confidence >= SUPPLIER_RESOLUTION_V2_POLICY.minimumConfidence &&
       margin >= SUPPLIER_RESOLUTION_V2_POLICY.minimumMargin &&
       (bestHasUniqueHard ||
@@ -894,13 +878,25 @@ function resolveSupplier(
   const reasonCode = ambiguous
     ? ("supplier_ambiguous" as const)
     : ("supplier_low_confidence" as const);
+  const manualReason: NonNullable<SupplierResolution["manualReason"]> =
+    hardConflict
+      ? "hard_identifier_conflict"
+      : !priorSupplierConfirmation
+        ? "unfamiliar_supplier"
+        : !formatConfirmation || !recognizedFormat
+          ? "unfamiliar_format"
+          : (best?.confidence ?? 0) < SUPPLIER_RESOLUTION_V2_POLICY.minimumConfidence
+            ? "insufficient_confidence"
+            : margin < SUPPLIER_RESOLUTION_V2_POLICY.minimumMargin
+              ? "insufficient_margin"
+              : "insufficient_evidence";
   const flags = learningFeatureFlags();
   const shadowEvaluation =
     flags.learningShadowMode
       ? {
           ...(best && autoSelect
             ? { selectedAccountId: best.item.account.id }
-            : { reasonCode }),
+            : { reasonCode, manualReason }),
           matchConfidence: roundMoney(best?.confidence ?? 0),
           reviewRequired: !autoSelect,
         }
@@ -909,6 +905,7 @@ function resolveSupplier(
     best &&
     autoSelect &&
     flags.supplierResolutionV2Enabled &&
+    supplierLearnedAutoSelectionEnabledFor(best.item.account.id) &&
     !flags.learningShadowMode
   ) {
     return {
@@ -919,7 +916,8 @@ function resolveSupplier(
       threshold: SUPPLIER_RESOLUTION_V2_POLICY.minimumConfidence,
       method: bestHasUniqueHard ? best.item.preferredMethod : "Evidence fusion",
       reviewRequired: false,
-      candidates,
+      selectionOrigin: "automatic",
+      candidates: [],
       reasoning: [...new Set(best.item.reasoning)],
     };
   }
@@ -933,7 +931,8 @@ function resolveSupplier(
     method: ambiguous ? "Multiple matches" : "No match",
     reviewRequired: true,
     reasonCode,
-    candidates,
+    manualReason,
+    candidates: [],
     reasoning: [
       ambiguous ? MULTIPLE_EXACT_SUPPLIERS_MESSAGE : SUPPLIER_NOT_MATCHED_MESSAGE,
       ...candidates.flatMap((candidate) => candidate.reasoning),
@@ -2114,6 +2113,7 @@ export function generatePurchaseJournalBooking(
       )
     : false;
   const supplierReliabilityScore =
+    learningFeatureFlags().supplierReliabilityEnabled &&
     supplierLearningProfile && supplierHasTrustedExamples
       ? supplierReliability({
           ...supplierReliabilityEvidenceFromLearningStore(

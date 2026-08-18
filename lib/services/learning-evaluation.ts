@@ -57,6 +57,34 @@ export type LearningGoldenCorpusCase = {
   expected: LearningEvaluationResult;
 };
 
+export type LearningEvaluationHoldout = {
+  supplierAccountId: string;
+  formatId: string;
+};
+
+export function learningEvaluationHoldoutReport(
+  training: readonly LearningEvaluationHoldout[],
+  evaluation: readonly LearningEvaluationHoldout[]
+) {
+  const trainedSuppliers = new Set(training.map((item) => item.supplierAccountId));
+  const trainedFormats = new Set(training.map((item) => item.formatId));
+  const supplierLeakage = [...new Set(
+    evaluation
+      .map((item) => item.supplierAccountId)
+      .filter((supplier) => trainedSuppliers.has(supplier))
+  )].sort();
+  const formatLeakage = [...new Set(
+    evaluation
+      .map((item) => item.formatId)
+      .filter((format) => trainedFormats.has(format))
+  )].sort();
+  return {
+    valid: supplierLeakage.length === 0 && formatLeakage.length === 0,
+    supplierLeakage,
+    formatLeakage,
+  };
+}
+
 function ratio(correct: number, attempts: number) {
   return attempts ? correct / attempts : 0;
 }
@@ -221,11 +249,15 @@ export async function runLearningCorpusCase(
       purchaseJournalValidationErrors,
     },
     { learnSupplierInvoice, resetSupplierLearning },
+    { structuralFormat },
+    { supplierIdentityKeys },
   ] = await Promise.all([
     import("./invoice-extraction-service"),
     import("./invoice-validation"),
     import("./purchase-journal-intelligence"),
     import("./supplier-learning"),
+    import("./supplier-format-clustering"),
+    import("./supplier-identity"),
   ]);
   const extracted = await extractInvoiceData({
     name: item.fileName ?? `${item.id}.txt`,
@@ -237,6 +269,7 @@ export async function runLearningCorpusCase(
     ...extracted,
     ...(item.correctedFields ?? {}),
   };
+  const currentFormat = structuralFormat(corrected.rawText ?? "");
   let learning = createInitialLearningStore();
   const learningInput = item.learning;
   if (learningInput) {
@@ -248,7 +281,10 @@ export async function runLearningCorpusCase(
         invoiceId: `${item.id}-training-${index + 1}`,
         contentHash: `${item.id}-hash-${index + 1}`,
         formatFingerprint:
-          learningInput.formatFingerprints?.[index] ?? "stable-layout",
+          learningInput.formatFingerprints?.[index] ?? currentFormat.fingerprint,
+        formatSignature: learningInput.formatFingerprints?.[index]
+          ? undefined
+          : currentFormat.signature,
         learnedAt: `2026-07-${String(index + 1).padStart(2, "0")}T00:00:00.000Z`,
         originalExtractedData: structuredClone(corrected),
         finalExtractedData: structuredClone(corrected),
@@ -276,6 +312,20 @@ export async function runLearningCorpusCase(
         descriptionKey: learningInput.descriptionKey ?? "",
         glAccount: learningInput.learnedGlAccount,
         decidedAt: "2026-07-20T00:00:00.000Z",
+      });
+    }
+    if (
+      item.supplierSelectionOutcome === "eligible_automatic_selection" &&
+      !learningInput.reset
+    ) {
+      learning.supplierSelections.unshift({
+        supplierIdentity:
+          supplierIdentityKeys(corrected)[0] ?? `account:${learningInput.supplierAccountId}`,
+        accountId: learningInput.supplierAccountId,
+        decidedAt: "2026-07-20T00:00:00.000Z",
+        invoiceId: `${item.id}-confirmed-format`,
+        formatFingerprint: currentFormat.fingerprint,
+        trustState: "trusted",
       });
     }
   }
@@ -307,12 +357,29 @@ export async function runLearningCorpusCase(
     createdAt: timestamp,
     updatedAt: timestamp,
   };
-  const booking = generatePurchaseJournalBooking(
+  const initialBooking = generatePurchaseJournalBooking(
     invoice,
     [invoice],
     learning,
     exactMasterData
   );
+  const manualExpected =
+    item.supplierSelectionOutcome === "manual_selection" &&
+    item.expected.supplierAccountId !== null;
+  if (manualExpected) {
+    learning.supplierSelections.unshift({
+      supplierIdentity:
+        supplierIdentityKeys(corrected)[0] ?? `account:${item.expected.supplierAccountId}`,
+      accountId: item.expected.supplierAccountId!,
+      decidedAt: timestamp,
+      invoiceId: invoice.id,
+      formatFingerprint: currentFormat.fingerprint,
+      trustState: "trusted",
+    });
+  }
+  const booking = manualExpected
+    ? generatePurchaseJournalBooking(invoice, [invoice], learning, exactMasterData)
+    : initialBooking;
   const validationErrors = [
     ...validateInvoiceData(invoice.id, corrected, []),
     ...purchaseJournalValidationErrors(booking, corrected),
@@ -321,11 +388,17 @@ export async function runLearningCorpusCase(
     supplierAccountId:
       booking.supplierResolution.selectedAccountId ?? null,
     selectionOutcome:
-      item.supplierSelectionOutcome ??
-      (booking.supplierResolution.selectedAccountId &&
-      !booking.supplierResolution.reviewRequired
-        ? "eligible_automatic_selection"
-        : "manual_selection"),
+      item.supplierSelectionOutcome === "eligible_automatic_selection"
+        ? booking.supplierResolution.selectionOrigin === "automatic"
+          ? "eligible_automatic_selection"
+          : "manual_selection"
+        : item.supplierSelectionOutcome ??
+          (booking.supplierResolution.selectionOrigin === "automatic"
+            ? "eligible_automatic_selection"
+            : "manual_selection"),
+    policyViolation:
+      item.supplierSelectionOutcome === "manual_selection" &&
+      initialBooking.supplierResolution.selectionOrigin === "automatic",
     fields: {
       referenceCode: corrected.referenceCode,
       invoiceDate: corrected.invoiceDate,

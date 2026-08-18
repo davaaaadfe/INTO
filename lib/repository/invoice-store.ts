@@ -2,13 +2,11 @@ import { createHash } from "node:crypto";
 import {
   assertInvoiceBookingAllowed,
   emptyExtractedInvoiceData,
-  SHARED_ACCESS_PERMISSIONS,
 } from "../domain/invoice";
 import type {
   AuditEvent,
   BookingAttempt,
   BookingLearningStore,
-  CurrentUserContext,
   DuplicateCandidate,
   DuplicateDecisionLog,
   DuplicateDetectionOutcome,
@@ -21,7 +19,6 @@ import type {
   IntoUser,
   InvoiceArchiveFilters,
   InvoiceArchiveResult,
-  PermissionAction,
   PurchaseJournalLine,
   PublicExactConnection,
   SupplierOverviewImport,
@@ -72,7 +69,10 @@ import {
   supplierReliability,
   supplierReliabilityEvidenceFromLearningStore,
 } from "../services/supplier-learning";
+import { learningFeatureFlags } from "../services/learning-feature-flags";
+import { supplierResolutionShadowTelemetry } from "../services/supplier-resolution-telemetry";
 import { createId } from "../utils/id";
+import { logger } from "../utils/logger";
 import {
   isPostgresPersistenceEnabled,
   loadStoreRevision,
@@ -103,10 +103,6 @@ import {
   snapshotWithoutDocumentEvidence,
   type LearningPersistenceContext,
 } from "./learning-persistence";
-
-const sharedUserPermissions: PermissionAction[] = [
-  ...SHARED_ACCESS_PERMISSIONS,
-];
 
 export const SHARED_USER_ID = "shared_user";
 
@@ -362,10 +358,9 @@ function createInitialStore(): IntoStore {
       userId: invoice.uploadedByUserId,
       userName: invoice.uploadedByName,
       type: "invoice_uploaded",
-      message: `${invoice.uploadedByName} added ${invoice.fileName}.`,
+      message: "Audit event: invoice uploaded.",
       metadata: {
         source: invoice.source,
-        fileName: invoice.fileName,
         status: invoice.status,
       },
       createdAt: invoice.createdAt,
@@ -946,48 +941,6 @@ export function getCurrentUser() {
   );
 }
 
-export function permissionsForUser(user = getCurrentUser()) {
-  if (user.status !== "active") {
-    return [];
-  }
-
-  return [...sharedUserPermissions];
-}
-
-export function canUser(action: PermissionAction, user = getCurrentUser()) {
-  return permissionsForUser(user).includes(action);
-}
-
-export function currentUserContext(): CurrentUserContext {
-  const user = getCurrentUser();
-  return {
-    user,
-    permissions: permissionsForUser(user),
-  };
-}
-
-export function requirePermission(action: PermissionAction, principal?: { accessLevel: string }) {
-  if (principal?.accessLevel === "verified_user") return getCurrentUser();
-  const user = getCurrentUser();
-  if (!canUser(action, user)) {
-    throw new Error(`This INTO account is not allowed to ${action.replace(/_/g, " ")}.`);
-  }
-
-  return user;
-}
-
-export function requireSystemOwner(principal?: { accessLevel: string }) {
-  if (principal?.accessLevel === "verified_user") return getCurrentUser();
-  const user = getCurrentUser();
-  if (user.status !== "active" || !user.isSystemOwner) {
-    throw new Error(
-      "This INTO account is not allowed to manage shared Exact Online settings. Only the system owner can do this."
-    );
-  }
-
-  return user;
-}
-
 export function getDemoUserId() {
   return getCurrentUser().id;
 }
@@ -1399,6 +1352,9 @@ function recomputeInvoiceInStore(
   }
 
   const previousLearnInputs = recomputedLearnInputs(invoice);
+  const previousShadowEvaluation = canonicalJson(
+    invoice.purchaseJournal?.supplierResolution.shadowEvaluation ?? null
+  );
   const baseValidationErrors = validateInvoiceData(
     invoice.id,
     invoice.extractedData,
@@ -1421,6 +1377,16 @@ function recomputeInvoiceInStore(
   );
 
   invoice.purchaseJournal = purchaseJournal;
+  const shadowTelemetry = supplierResolutionShadowTelemetry(
+    purchaseJournal.supplierResolution
+  );
+  if (
+    shadowTelemetry &&
+    previousShadowEvaluation !==
+      canonicalJson(purchaseJournal.supplierResolution.shadowEvaluation)
+  ) {
+    logger.info("supplier.resolution_shadow", shadowTelemetry);
+  }
   invoice.validationErrors = uniqueValidationErrors([
     ...baseValidationErrors,
     ...purchaseErrors,
@@ -1844,7 +1810,12 @@ export function learnInvoice(
     store.learning,
     exactMasterDataForUser(store, COMPANY_CONNECTION_USER_ID)
   );
-  const supplierAccountId = draftBooking.supplierResolution.selectedAccountId;
+  const supplierAccountId =
+    draftBooking.supplierResolution.selectedAccountId ??
+    (isGenerationRelearn
+      ? previousExample?.supplierAccountId ??
+        invoice.learningMetadata?.supplierAccountId
+      : undefined);
   if (!supplierAccountId) {
     throw new InvoiceLearningPreconditionError(
       "Select one Exact supplier before saving learning."
@@ -2011,6 +1982,7 @@ function supplierReliabilityForProfile(
 
 export function listSupplierLearningSummaries(): SupplierLearningSummary[] {
   const store = getStore();
+  const reliabilityEnabled = learningFeatureFlags().supplierReliabilityEnabled;
   const suppliers = exactMasterDataForUser(store, COMPANY_CONNECTION_USER_ID)?.suppliers ?? [];
   const profiles = new Map(
     store.learning.supplierProfiles.map((profile) => [
@@ -2037,6 +2009,7 @@ export function listSupplierLearningSummaries(): SupplierLearningSummary[] {
     return {
       ...profile,
       confidence: supplierReliabilityForProfile(store, profile),
+      reliabilityEnabled,
       supplierCode: supplier?.code ?? "",
       supplierName: supplier?.name ?? supplierAccountId,
     };

@@ -3,7 +3,6 @@ import {
   getSupplierOverviewImportStatus,
   listInvoices,
   replaceSupplierOverviewImport,
-  requireSystemOwner,
 } from "../../../../../lib/repository/invoice-store";
 import { withPersistentStore } from "../../../../../lib/repository/persistent-request";
 import { parseSupplierOverviewWorkbook } from "../../../../../lib/services/supplier-overview-import";
@@ -12,9 +11,8 @@ import { logger } from "../../../../../lib/utils/logger";
 const maximumWorkbookSize = 10 * 1024 * 1024;
 
 export async function POST(request: Request) {
-  return withPersistentStore(async (principal) => {
+  return withPersistentStore(async () => {
     try {
-      requireSystemOwner(principal);
       const formData = await request.formData();
       const file = formData.get("file");
       if (!(file instanceof File)) {
@@ -45,7 +43,6 @@ export async function POST(request: Request) {
       });
       const status = getSupplierOverviewImportStatus();
       logger.info("exact.supplier_overview_imported", {
-        sourceFileName: file.name,
         supplierCount: status?.supplierCount ?? suppliers.length,
         importedAt: status?.importedAt,
       });

@@ -7,13 +7,11 @@ const activeReviewSource = readFileSync(
   "utf8"
 );
 
-test("renders unresolved supplier choices inside Required data", () => {
+test("renders user-initiated Exact supplier search inside Required data", () => {
   const requiredData = activeReviewSource.indexOf(
     '<ReviewSection title="Required data">'
   );
-  const supplierChoices = activeReviewSource.indexOf(
-    "duplicateSupplierCandidates.map"
-  );
+  const supplierChoices = activeReviewSource.indexOf("options={supplierSearchOptions}");
   const intelligence = activeReviewSource.indexOf(
     "<span>Purchase Journal intelligence</span>"
   );
@@ -85,21 +83,20 @@ test("adds a Supplier learning view with separate reliability copy", () => {
   );
 });
 
-test("shows only real duplicate supplier matches without an all-supplier chooser", () => {
-  assert.doesNotMatch(activeReviewSource, />\s*Supplier review required\s*</);
-  assert.doesNotMatch(activeReviewSource, />\s*Choose the Exact supplier\s*</);
-  assert.doesNotMatch(activeReviewSource, /Search all Exact suppliers/);
+test("searches canonical Exact accounts only after input and hides resolver rankings", () => {
+  assert.doesNotMatch(activeReviewSource, /options=\{\[\]\}/);
+  assert.doesNotMatch(activeReviewSource, /duplicateSupplierCandidates\.map/);
+  assert.match(activeReviewSource, /supplierSearchStarted/);
+  assert.match(activeReviewSource, /options=\{supplierSearchOptions\}/);
+  assert.match(activeReviewSource, /exactSupplierAccounts/);
+  assert.match(activeReviewSource, /\.slice\(0, 10\)/);
+  assert.match(activeReviewSource, />\s*Supplier selection required\s*</);
+  assert.match(activeReviewSource, /supplierResolution\.manualReason/);
   assert.match(
     activeReviewSource,
-    /supplierResolution\.reasonCode\s*===\s*"supplier_ambiguous"/
+    /supplierResolution\.method\.toLowerCase\(\)/
   );
-  assert.match(activeReviewSource, /duplicateSupplierCandidates\.length > 1/);
-  assert.match(activeReviewSource, /duplicateSupplierCandidates\.map/);
   assert.match(activeReviewSource, /\{contextualSupplierReviewVisible\s*\?\s*\(/);
-  assert.doesNotMatch(
-    activeReviewSource,
-    /\{selectedPurchaseJournal\?\.supplierResolution\.reviewRequired\s*\?\s*\(/
-  );
 });
 
 test("lets users switch between PDF panning and selectable text and copy image OCR", () => {
@@ -203,5 +200,12 @@ test("hides every supplier-learning surface behind the public enabled state", ()
   assert.match(
     activeReviewSource,
     /state\.supplierLearningEnabled\s*\?\s*\(\s*<dialog/
+  );
+});
+
+test("the verified-user workbench has no client permission model", () => {
+  assert.doesNotMatch(
+    activeReviewSource,
+    /SHARED_ACCESS_PERMISSIONS|PermissionAction|hasPermission\(/
   );
 });

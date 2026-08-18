@@ -2,6 +2,7 @@ import type { LearningExampleRecord } from "../repository/learning-repository";
 import type {
   BookingLearningStore,
   SupplierLearningProfile,
+  SupplierLearningOutcomeEvent,
 } from "../domain/invoice";
 import type {
   SupplierReliabilityExample,
@@ -12,6 +13,67 @@ export type SupplierReliabilityEvidence = {
   examples: SupplierReliabilityExample[];
   outcomes: SupplierReliabilityOutcome[];
 };
+
+const OUTCOME_FIELD_METRICS = new Map<string, SupplierReliabilityOutcome["metric"]>([
+  ["supplier", "supplier_match"],
+  ["supplierName", "supplier_match"],
+  ["supplierAccountId", "supplier_match"],
+  ["referenceCode", "your_ref"],
+  ["invoiceNumber", "your_ref"],
+  ["invoiceDate", "invoice_date"],
+  ["netAmount", "amounts"],
+  ["vatAmount", "amounts"],
+  ["grossAmount", "amounts"],
+  ["vatCode", "vat"],
+  ["bookingSplit", "booking_split"],
+  ["bookingLines", "booking_split"],
+  ["glAccount", "accounting"],
+  ["costCentre", "accounting"],
+  ["costUnit", "accounting"],
+  ["paymentCondition", "accounting"],
+  ["dueDate", "accounting"],
+  ["expenseDescription", "accounting"],
+  ["accrual", "accounting"],
+  ["duplicateDecision", "duplicate_decision"],
+]);
+
+export function supplierReliabilityEvidenceFromOutcomeEvents(
+  events: readonly SupplierLearningOutcomeEvent[]
+): SupplierReliabilityOutcome[] {
+  const outcomes: SupplierReliabilityOutcome[] = [];
+  const seen = new Set<string>();
+  for (const event of events) {
+    if (seen.has(event.id) || event.type === "application") continue;
+    seen.add(event.id);
+    const context = {
+      occurredAt: event.createdAt,
+      evidence: "trusted" as const,
+      trigger: "review" as const,
+    };
+    if (event.type === "validation") {
+      if (event.validation) {
+        outcomes.push({
+          metric: "validation",
+          success: event.validation.passed,
+          ...context,
+        });
+      }
+      continue;
+    }
+    const success = event.type === "acceptance";
+    const metrics = new Set(
+      event.fields.flatMap((field) => {
+        const metric = OUTCOME_FIELD_METRICS.get(field);
+        return metric ? [metric] : [];
+      })
+    );
+    for (const metric of metrics) {
+      outcomes.push({ metric, success, ...context });
+    }
+    outcomes.push({ metric: "inverse_correction", success, ...context });
+  }
+  return outcomes;
+}
 
 type UnknownRecord = Record<string, unknown>;
 type Comparison = { observed: boolean; success: boolean };
@@ -327,5 +389,15 @@ export function supplierReliabilityEvidenceFromLearningStore(
         active: example.active ?? true,
       };
     });
-  return supplierReliabilityEvidenceFromExamples(records);
+  const evidence = supplierReliabilityEvidenceFromExamples(records);
+  evidence.outcomes.push(
+    ...supplierReliabilityEvidenceFromOutcomeEvents(
+      (learning.supplierOutcomeEvents ?? []).filter(
+        (event) =>
+          event.supplierAccountId === profile.supplierAccountId &&
+          event.generation === profile.generation
+      )
+    )
+  );
+  return evidence;
 }

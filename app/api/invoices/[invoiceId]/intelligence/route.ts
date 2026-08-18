@@ -5,7 +5,6 @@ import {
   InvoiceRevisionConflictError,
   InvoiceRevisionValidationError,
   listInvoices,
-  requirePermission,
   saveInvoiceReview,
   selectInvoiceSupplier,
 } from "../../../../../lib/repository/invoice-store";
@@ -26,9 +25,8 @@ async function invoiceIdFromContext(context: RouteContext) {
 }
 
 export async function POST(request: Request, context: RouteContext) {
-  return withPersistentStore(async (principal) => {
+  return withPersistentStore(async () => {
     try {
-      requirePermission("approve", principal);
       const invoiceId = await invoiceIdFromContext(context);
       const invoice = getInvoice(invoiceId);
 

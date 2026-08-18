@@ -51,8 +51,6 @@ async function invoiceFileResponse(
     if (!storedFile) {
       logger.error("invoice.file_missing", {
         invoiceId,
-        fileName: invoice.fileName,
-        storageKey: invoice.storageKey,
         localFileStatus: invoice.localFileStatus,
       });
       return missingInvoiceFileResponse();

@@ -21,6 +21,7 @@ import {
   getCompanyConnectionUserId,
   getStore,
   hydrateStoreFromPersistence,
+  selectInvoiceSupplier,
   setExactConnection,
   updateInvoiceExtraction,
 } from "../lib/repository/invoice-store";
@@ -376,6 +377,11 @@ test("a failed Exact booking remains retryable with its original file after rest
         companyVatNumber: "NL857017263B01",
       });
       assert.ok(reviewed);
+      const selected = selectInvoiceSupplier(
+        uploadedInvoice.id,
+        "supplier-restart"
+      );
+      assert.ok(selected);
       const invoice = approveInvoiceIntelligence(uploadedInvoice.id);
       assert.ok(invoice);
       assert.equal(invoice.status, "Ready to Book");

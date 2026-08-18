@@ -4,7 +4,6 @@ import type {
   InvoiceSource,
 } from "../../../../lib/domain/invoice";
 import {
-  requirePermission,
   searchInvoiceArchive,
 } from "../../../../lib/repository/invoice-store";
 import { withPersistentStore } from "../../../../lib/repository/persistent-request";
@@ -20,9 +19,8 @@ function numberParam(params: URLSearchParams, key: string) {
 }
 
 export async function GET(request: Request) {
-  return withPersistentStore((principal) => {
+  return withPersistentStore(() => {
     try {
-      requirePermission("search_archive", principal);
       const params = new URL(request.url).searchParams;
       const filters: InvoiceArchiveFilters = {
         keyword: params.get("keyword") ?? undefined,

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { SHARED_ACCESS_PERMISSIONS } from "../lib/domain/invoice";
+import { readFileSync } from "node:fs";
 import {
   createUploadedInvoice,
   disconnectExactConnection,
@@ -9,21 +9,21 @@ import {
   getExactConnection,
   listUsers,
   listAuditEvents,
-  permissionsForUser,
   publicExactConnection,
-  requirePermission,
-  requireSystemOwner,
   searchInvoiceArchive,
   setExactConnection,
 } from "../lib/repository/invoice-store";
 import { createMockExactConnection } from "../lib/services/exact-online-service";
 
-test("uses one shared internal user with access to all INTO functions", () => {
+test("keeps the shared internal user only for transition attribution", () => {
   const user = getCurrentUser();
 
   assert.equal(user.id, "shared_user");
   assert.deepEqual(listUsers().map((item) => item.id), ["shared_user"]);
-  assert.deepEqual(permissionsForUser(user), [...SHARED_ACCESS_PERMISSIONS]);
+  assert.doesNotMatch(
+    JSON.stringify(listAuditEvents()),
+    /missing-due-date-invoice\.png|seed-invoice\.pdf/
+  );
 });
 
 test("stores Exact credentials as a shared company connection", () => {
@@ -53,14 +53,6 @@ test("disconnect removes stored company Exact connection", () => {
   assert.equal(publicExactConnection(), null);
 });
 
-test("shared access includes invoice and connection management permissions", () => {
-  assert.doesNotThrow(() => requirePermission("book"));
-  assert.doesNotThrow(() => requirePermission("upload"));
-  assert.doesNotThrow(() => requirePermission("edit"));
-  assert.doesNotThrow(() => requirePermission("search_archive"));
-  assert.doesNotThrow(() => requireSystemOwner());
-});
-
 test("archive search can retrieve invoices uploaded by the shared user", () => {
   const result = searchInvoiceArchive({
     uploadedByUserId: "shared_user",
@@ -88,4 +80,11 @@ test("invoice creation records uploader metadata and audit event", () => {
   assert.equal(auditEvents[0]?.type, "invoice_uploaded");
   assert.equal(auditEvents[0]?.message, "Audit event: invoice uploaded.");
   assert.doesNotMatch(JSON.stringify(auditEvents[0]), /audit-test\.pdf/);
+});
+
+test("structured upload telemetry omits document filenames", () => {
+  const source = readFileSync("app/api/invoices/route.ts", "utf8");
+  const start = source.indexOf('logger.info("invoice.uploaded"');
+  assert.notEqual(start, -1);
+  assert.doesNotMatch(source.slice(start, start + 180), /fileName/);
 });

@@ -6,6 +6,7 @@ import type {
   LearnedCorrection,
   UploadedInvoice,
   SupplierLearningDecision,
+  SupplierLearningOutcomeEvent,
   SupplierLearningPattern,
 } from "../domain/invoice";
 import type { IntoStore } from "./invoice-store";
@@ -13,6 +14,7 @@ import type {
   LearningAliasInput,
   LearningArtifactInput,
   LearningExampleInput,
+  LearningEventRecord,
   LearningPatternInput,
   LearningScope,
 } from "./learning-repository";
@@ -33,10 +35,13 @@ import {
 } from "../services/supplier-identity";
 import {
   assignFormatCluster,
+  deriveSupplierDrift,
   structuralFormat,
   supplierReliability,
   supplierReliabilityEvidenceFromExamples,
+  supplierReliabilityEvidenceFromOutcomeEvents,
 } from "../services/supplier-learning";
+import { learningFeatureFlags } from "../services/learning-feature-flags";
 import {
   createInitialLearningStore,
   generatePurchaseJournalBooking,
@@ -48,6 +53,13 @@ import {
 
 const COMPANY_CONNECTION_USER_ID = "company_connection";
 const RUNTIME_PATTERN_VERSION = "runtime-pattern-v1";
+const OUTCOME_EVENT_TYPES = new Set<SupplierLearningOutcomeEvent["type"]>([
+  "application",
+  "acceptance",
+  "correction",
+  "rejection",
+  "validation",
+]);
 
 function companyId() {
   return process.env.INTO_COMPANY_ID?.trim() || "into-company";
@@ -59,6 +71,52 @@ export type LearningPersistenceContext = {
   requestId?: string;
   sessionCorrelationId?: string;
 };
+
+function restoredSupplierOutcomeEvent(
+  event: LearningEventRecord,
+  supplierAccountId: string,
+  generation: number
+): SupplierLearningOutcomeEvent | null {
+  if (
+    event.generation !== generation ||
+    !OUTCOME_EVENT_TYPES.has(event.type as SupplierLearningOutcomeEvent["type"])
+  ) return null;
+  const invoiceId = event.metadata.invoiceId;
+  const invoiceRevision = event.metadata.invoiceRevision;
+  const fields = event.metadata.fields;
+  if (
+    typeof invoiceId !== "string" ||
+    !Number.isInteger(invoiceRevision) ||
+    (invoiceRevision as number) < 1 ||
+    !Array.isArray(fields)
+  ) return null;
+  const restored: SupplierLearningOutcomeEvent = {
+    id: event.id,
+    supplierAccountId,
+    generation: event.generation,
+    invoiceId,
+    invoiceRevision: invoiceRevision as number,
+    type: event.type as SupplierLearningOutcomeEvent["type"],
+    candidateIds: [],
+    fields: fields.filter((field): field is string => typeof field === "string").slice(0, 32),
+    createdAt: event.createdAt,
+  };
+  const validation = event.metadata.validation as {
+    passed?: unknown;
+    issueCount?: unknown;
+  } | undefined;
+  if (
+    validation &&
+    typeof validation.passed === "boolean" &&
+    Number.isInteger(validation.issueCount)
+  ) {
+    restored.validation = {
+      passed: validation.passed,
+      issueCount: Math.max(0, validation.issueCount as number),
+    };
+  }
+  return restored;
+}
 
 type PatternRow = Record<string, unknown>;
 
@@ -1196,10 +1254,58 @@ export async function persistLearningState(
       supplierAccountId,
     };
     const examples = await repository.listExamples(scope);
+    const events = await repository.listEvents(scope);
     const runtimeProfile = runtimeProfileForAccount(store, supplierAccountId);
-    const driftState = runtimeProfile?.formatDrift ?? profile.driftState;
+    const restoredOutcomes = events.flatMap((event) => {
+      const restored = restoredSupplierOutcomeEvent(
+        event,
+        supplierAccountId,
+        profile.generation
+      );
+      return restored ? [restored] : [];
+    });
+    const drift = deriveSupplierDrift({
+      events: restoredOutcomes,
+      supplierAccountId,
+      generation: profile.generation,
+    });
+    const driftState = learningFeatureFlags().supplierDriftEnabled
+      ? drift.state
+      : (runtimeProfile?.formatDrift ?? profile.driftState);
+    if (driftState !== profile.driftState) {
+      const driftKey = stableId("drift", [
+        scope,
+        profile.generation,
+        profile.driftState,
+        driftState,
+        drift.policyVersion,
+      ]);
+      await repository.saveEvent({
+        id: stableId("event", [driftKey]),
+        ...scope,
+        generation: profile.generation,
+        type: "drift",
+        idempotencyKey: driftKey,
+        actorId: context.actorId ?? "shared_user",
+        sessionCorrelationId: context.sessionCorrelationId || "session_unavailable",
+        requestId: context.requestId || driftKey,
+        metadata: {
+          from: profile.driftState,
+          to: driftState,
+          policyVersion: drift.policyVersion,
+          evaluatedCount: drift.evaluatedCount,
+          adverseCount: drift.adverseCount,
+        },
+        createdAt,
+      });
+    }
+    if (runtimeProfile) runtimeProfile.formatDrift = driftState;
+    const evidence = supplierReliabilityEvidenceFromExamples(examples);
+    evidence.outcomes.push(
+      ...supplierReliabilityEvidenceFromOutcomeEvents(restoredOutcomes)
+    );
     const confidence = supplierReliability({
-      ...supplierReliabilityEvidenceFromExamples(examples),
+      ...evidence,
       drift: driftState,
     });
     if (
@@ -1416,7 +1522,8 @@ export async function hydrateLearningState(
     };
     const examples = await repository.listExamples(scope);
     const patterns = await repository.listPatterns(scope);
-    const resetEvent = (await repository.listEvents(scope)).findLast(
+    const events = await repository.listEvents(scope);
+    const resetEvent = events.findLast(
       (event) => event.type === "reset" && event.generation === profile.generation
     );
     const baselineExample = examples[0];
@@ -1434,6 +1541,14 @@ export async function hydrateLearningState(
       formatFingerprint: baselineExample?.fingerprint,
       formatDrift: profile.driftState,
     });
+    for (const event of events) {
+      const restored = restoredSupplierOutcomeEvent(
+        event,
+        profile.supplierAccountId,
+        profile.generation
+      );
+      if (restored) (learning.supplierOutcomeEvents ??= []).push(restored);
+    }
     for (const example of examples) {
       const originalPayload = example.originalPrediction as {
         extractedData?: BookingLearningStore["supplierExamples"][number]["originalExtractedData"];
@@ -1513,6 +1628,12 @@ export async function hydrateLearningState(
         }
       }
     }
+  }
+  if (learning.supplierOutcomeEvents) {
+    learning.supplierOutcomeEvents.sort((left, right) =>
+      left.createdAt.localeCompare(right.createdAt)
+    );
+    learning.supplierOutcomeEvents = learning.supplierOutcomeEvents.slice(-512);
   }
   store.learning = learning;
   return true;

@@ -15,7 +15,6 @@ import {
 import type { PDFDocumentLoadingTask, RenderTask } from "pdfjs-dist";
 import {
   INTO_PURCHASE_VAT_CODE_LABELS,
-  SHARED_ACCESS_PERMISSIONS,
   UNSUPPORTED_VAT_CODE_WARNING,
   intoPurchaseVatCodeOrFallback,
   isIntoPurchaseVatCode,
@@ -27,7 +26,6 @@ import type {
   ExtractedInvoiceData,
   InvoiceArchiveResult,
   LearnableCorrectionField,
-  PermissionAction,
   PurchaseJournalLine,
   PublicExactConnection,
   SupplierLearningProfile,
@@ -57,7 +55,6 @@ import { readApiJson } from "../lib/utils/api-response";
 import { IntoUsersPanel } from "./into-users-panel";
 
 type ApiState = {
-  permissions: PermissionAction[];
   invoices: UploadedInvoice[];
   exactConnection: PublicExactConnection | null;
   exactMasterData: ExactMasterDataCache | null;
@@ -194,11 +191,27 @@ function supplierReliabilityCopy(band: SupplierLearningSummary["confidence"]["ba
   return "More training invoices needed.";
 }
 
+function supplierManualReasonCopy(
+  reason: NonNullable<UploadedInvoice["purchaseJournal"]>["supplierResolution"]["manualReason"]
+) {
+  const copy = {
+    unfamiliar_supplier: "This supplier has not been confirmed before.",
+    unfamiliar_format: "This invoice format has not been confirmed for the supplier.",
+    hard_identifier_conflict: "Supplier identifiers conflict with Exact master data.",
+    insufficient_confidence: "Supplier evidence is below the confidence threshold.",
+    insufficient_margin: "Multiple suppliers are too close to select automatically.",
+    insufficient_evidence: "More independent supplier evidence is required.",
+    exact_master_data_unavailable: "Exact supplier master data is unavailable or stale.",
+  };
+  return reason ? copy[reason] : "Select the canonical Exact supplier for this invoice.";
+}
+
 function SupplierReliabilityBadge({
   summary,
 }: {
-  summary: Pick<SupplierLearningSummary, "confidence">;
+  summary: Pick<SupplierLearningSummary, "confidence" | "reliabilityEnabled">;
 }) {
+  if (summary.reliabilityEnabled === false) return null;
   const tone =
     summary.confidence.band === "High"
       ? "border-emerald-200 bg-emerald-50 text-emerald-900"
@@ -1285,7 +1298,6 @@ export function IntoWorkbench() {
     scrollTop: number;
   } | null>(null);
   const [state, setState] = useState<ApiState>({
-    permissions: [...SHARED_ACCESS_PERMISSIONS],
     invoices: [],
     exactConnection: null,
     exactMasterData: null,
@@ -1299,6 +1311,7 @@ export function IntoWorkbench() {
   });
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<string>("");
   const [draft, setDraft] = useState<ExtractedInvoiceData | null>(null);
+  const [supplierSearchStarted, setSupplierSearchStarted] = useState(false);
   const [bookingLineDrafts, setBookingLineDrafts] = useState<BookingLineDraft[]>([]);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState("");
@@ -1382,6 +1395,33 @@ export function IntoWorkbench() {
     .filter((supplier) => supplier.name && supplier.isSupplier !== false)
     .slice()
     .sort((left, right) => left.name.localeCompare(right.name));
+  const supplierSearchQuery = draft?.supplierName.trim().toLowerCase() ?? "";
+  const compactSupplierSearchQuery = supplierSearchQuery.replace(/\s+/g, "");
+  const supplierSearchOptions: SelectOption[] =
+    supplierSearchStarted && supplierSearchQuery
+      ? exactSupplierAccounts
+          .filter((supplier) => {
+            const searchable = [
+              supplier.code,
+              supplier.name,
+              supplier.vatNumber,
+              supplier.iban,
+              supplier.chamberOfCommerceNumber,
+            ]
+              .filter(Boolean)
+              .join(" ")
+              .toLowerCase();
+            return (
+              searchable.includes(supplierSearchQuery) ||
+              searchable.replace(/\s+/g, "").includes(compactSupplierSearchQuery)
+            );
+          })
+          .slice(0, 10)
+          .map((supplier) => ({
+            value: `${supplier.code} - ${supplier.name}`,
+            label: `${supplier.code} - ${supplier.name}`,
+          }))
+      : [];
   const recordedSupplierLearningByAccount = new Map(
     state.supplierLearning.map((summary) => [summary.supplierAccountId, summary])
   );
@@ -1406,6 +1446,7 @@ export function IntoWorkbench() {
                   quality: 0,
                   driftPenalty: 0,
                 },
+                reliabilityEnabled: true,
               }
           ),
           ...state.supplierLearning.filter(
@@ -1428,12 +1469,6 @@ export function IntoWorkbench() {
         selectedPurchaseJournal.supplierResolution.selectedAccountId
       )
     : undefined;
-  const duplicateSupplierCandidates =
-    selectedPurchaseJournal?.supplierResolution.reasonCode ===
-      "supplier_ambiguous" &&
-    selectedPurchaseJournal.supplierResolution.candidates.length > 1
-      ? selectedPurchaseJournal.supplierResolution.candidates
-      : [];
   const paymentConditionOptions: SelectOption[] = (
     state.exactMasterData?.paymentConditions ?? []
   )
@@ -1491,8 +1526,6 @@ export function IntoWorkbench() {
       (JSON.stringify(draft) !== JSON.stringify(selectedInvoice.extractedData) ||
         hasBookingLineChanges)
   );
-  const hasPermission = (permission: PermissionAction) =>
-    state.permissions.includes(permission);
   const hasFieldValidationWarning = (fields: (keyof ExtractedInvoiceData)[]) =>
     Boolean(
       selectedInvoice?.validationErrors.some((error) =>
@@ -1528,7 +1561,8 @@ export function IntoWorkbench() {
       ? getRequiredBookingDataIssues(draft, selectedPurchaseJournal)
       : [];
   const contextualSupplierReviewVisible = Boolean(
-    duplicateSupplierCandidates.length > 1
+    selectedPurchaseJournal?.supplierResolution.reviewRequired &&
+      selectedPurchaseJournal.supplierResolution.manualReason
   );
   const requiredIssueFor = (
     fields: ValidationError["field"][]
@@ -2091,7 +2125,6 @@ export function IntoWorkbench() {
       setLearningResetTarget(null);
     }
     setState((current) => ({
-      permissions: [...SHARED_ACCESS_PERMISSIONS],
       invoices,
       exactConnection: exactData.connection,
       exactMasterData: exactData.masterData,
@@ -2300,6 +2333,7 @@ export function IntoWorkbench() {
           : [fallbackBookingLineDraft(nextDraft)];
       const timeoutId = window.setTimeout(() => {
         setDraft(nextDraft);
+        setSupplierSearchStarted(false);
         setBookingLineDrafts(nextBookingLines);
         setPreviewPage(1);
         setPreviewPageCount(1);
@@ -2315,6 +2349,7 @@ export function IntoWorkbench() {
 
     const timeoutId = window.setTimeout(() => {
       setDraft(null);
+      setSupplierSearchStarted(false);
       setBookingLineDrafts([]);
     }, 0);
 
@@ -2374,11 +2409,6 @@ export function IntoWorkbench() {
   }, [learningResetTarget]);
 
   async function processFiles(fileList: FileList | File[]) {
-    if (!hasPermission("upload")) {
-      setMessage("Your INTO account is not verified for invoice uploads.");
-      return;
-    }
-
     const files = Array.from(fileList);
     if (!files.length) {
       return;
@@ -2696,11 +2726,6 @@ export function IntoWorkbench() {
 
   async function saveDraft() {
     if (!selectedInvoice || !draft) {
-      return;
-    }
-
-    if (!hasPermission("edit")) {
-      setMessage("Your INTO account is not verified for invoice edits.");
       return;
     }
 
@@ -3400,6 +3425,15 @@ export function IntoWorkbench() {
     link.remove();
   }
 
+  function updateSupplierSearch(value: string) {
+    setSupplierSearchStarted(true);
+    updateDraft("supplierName", value);
+    const selected = exactSupplierAccounts.find(
+      (supplier) => `${supplier.code} - ${supplier.name}` === value
+    );
+    if (selected) void applyIntelligenceAction("selectSupplier", selected.id);
+  }
+
   async function showSupplierLearningDetail(accountId: string) {
     if (learningDetailAccountId === accountId) {
       setLearningDetailAccountId("");
@@ -3444,10 +3478,6 @@ export function IntoWorkbench() {
       return busyReason;
     }
 
-    if (!hasPermission("edit")) {
-      return "Your INTO account is not verified for invoice edits.";
-    }
-
     if (!hasUnsavedChanges) {
       return "Save changes is disabled because there are no unsaved changes.";
     }
@@ -3459,10 +3489,6 @@ export function IntoWorkbench() {
     const busyReason = busyDisabledReason("learn");
     if (busyReason) {
       return busyReason;
-    }
-
-    if (!hasPermission("train")) {
-      return "Your INTO account is not verified for supplier training.";
     }
 
     const activeSupplierGeneration = invoice.learningMetadata
@@ -3519,10 +3545,6 @@ export function IntoWorkbench() {
       return busyReason;
     }
 
-    if (!hasPermission("edit")) {
-      return "Your INTO account is not verified to re-read invoices.";
-    }
-
     if (invoice.status === "Reading") {
       return "Re-read invoice is disabled while extraction is already running.";
     }
@@ -3542,10 +3564,6 @@ export function IntoWorkbench() {
     const busyReason = busyDisabledReason("approve-intelligence");
     if (busyReason) {
       return busyReason;
-    }
-
-    if (!hasPermission("approve")) {
-      return "Your INTO account is not verified for review approval.";
     }
 
     if (hasUnsavedChanges) {
@@ -3604,10 +3622,6 @@ export function IntoWorkbench() {
   }
 
   function bookDisabledReason(invoice: UploadedInvoice) {
-    if (!hasPermission("book")) {
-      return "Your INTO account is not verified for invoice booking.";
-    }
-
     if (requiredBookingIssuesForInvoice(invoice).length > 0) {
       return REQUIRED_BOOKING_DISABLED_REASON;
     }
@@ -3657,10 +3671,6 @@ export function IntoWorkbench() {
       return busyReason;
     }
 
-    if (!hasPermission("review")) {
-      return "Your INTO account is not verified to mark invoices as needing review.";
-    }
-
     if (invoice.status === "Booked") {
       return "Booked invoices cannot be rejected or moved back to review.";
     }
@@ -3707,7 +3717,7 @@ export function IntoWorkbench() {
           label={label}
           value={reviewInputValue(field)}
           onChange={(value) => updateDraft(field, value)}
-          disabled={!hasPermission("edit")}
+          disabled={false}
           issue={issue}
         />
       );
@@ -3721,7 +3731,7 @@ export function IntoWorkbench() {
           value={draft?.[field] as number | null}
           currency={currentCurrency}
           onChange={(value) => updateDraft(field, value)}
-          disabled={!hasPermission("edit")}
+          disabled={false}
           issue={issue}
           emphasized={options.emphasized}
         />
@@ -3734,7 +3744,7 @@ export function IntoWorkbench() {
         label={label}
         value={reviewInputValue(field)}
         onChange={(value) => updateDraft(field, value)}
-        disabled={!hasPermission("edit")}
+        disabled={false}
         issue={issue}
         helper={options.helper}
       />
@@ -3794,9 +3804,7 @@ export function IntoWorkbench() {
           <div className="rounded-lg border border-stone-300 bg-white p-4">
             <div
               onClick={() => {
-                if (hasPermission("upload")) {
-                  fileInputRef.current?.click();
-                }
+                fileInputRef.current?.click();
               }}
               onDragEnter={(event) => {
                 event.preventDefault();
@@ -3808,9 +3816,7 @@ export function IntoWorkbench() {
               }}
               onDragLeave={() => setIsDragging(false)}
               onDrop={handleDrop}
-              className={`flex min-h-36 flex-col justify-center rounded-md border-2 border-dashed p-5 transition ${
-                hasPermission("upload") ? "cursor-pointer" : "cursor-not-allowed"
-              } ${
+              className={`flex min-h-36 cursor-pointer flex-col justify-center rounded-md border-2 border-dashed p-5 transition ${
                 isDragging
                   ? "border-emerald-500 bg-emerald-50"
                   : "border-stone-300 bg-stone-50 hover:border-emerald-400 hover:bg-emerald-50/50"
@@ -3830,12 +3836,8 @@ export function IntoWorkbench() {
                   onClick={() => fileInputRef.current?.click()}
                   loading={busy === "upload"}
                   feedback={buttonFeedbackFor("upload", "upload")}
-                  disabled={busy === "upload" || !hasPermission("upload")}
-                  disabledReason={
-                    !hasPermission("upload")
-                      ? "Your INTO account is not verified for invoice uploads."
-                      : "Upload is already running."
-                  }
+                  disabled={busy === "upload"}
+                  disabledReason="Upload is already running."
                 >
                   Browse files
                 </ActionButton>
@@ -3853,7 +3855,6 @@ export function IntoWorkbench() {
             <UploadProgressList items={uploadItems} />
           </div>
 
-          {hasPermission("manage_connections") ? (
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-1">
                 <div className="rounded-lg border border-stone-300 bg-white p-4">
                   <h2 className="text-lg font-semibold">Company Exact Online</h2>
@@ -4039,7 +4040,6 @@ export function IntoWorkbench() {
                   </div>
                 </div>
             </div>
-          ) : null}
         </section>
 
         {message ? (
@@ -4170,8 +4170,6 @@ export function IntoWorkbench() {
                   );
                 }
               }}
-              disabled={view === "archive" && !hasPermission("search_archive")}
-              disabledReason="Your INTO account is not verified for archive search."
             >
               {view === "queue"
                 ? "Processing queue"
@@ -4210,8 +4208,6 @@ export function IntoWorkbench() {
                       )
                   }
                   loading={busy === "archive-search"}
-                  disabled={!hasPermission("search_archive")}
-                  disabledReason="Your INTO account is not verified for archive search."
                 >
                   Search archive
                 </ActionButton>
@@ -4555,10 +4551,14 @@ export function IntoWorkbench() {
                         </td>
                         <td className="px-3 py-3">
                           <SupplierReliabilityBadge summary={summary} />
-                          <div className="mt-1 text-xs text-stone-500">
-                            Evidence {Math.round(summary.confidence.volume * 100)}% ·
-                            quality {Math.round(summary.confidence.quality * 100)}%
-                          </div>
+                          {summary.reliabilityEnabled !== false ? (
+                            <div className="mt-1 text-xs text-stone-500">
+                              Evidence {Math.round(summary.confidence.volume * 100)}% ·
+                              quality {Math.round(summary.confidence.quality * 100)}%
+                            </div>
+                          ) : (
+                            <span className="text-xs text-stone-500">Not enabled</span>
+                          )}
                         </td>
                         <td className="px-3 py-3">{summary.exampleCount}</td>
                         <td className="px-3 py-3 capitalize">
@@ -4593,14 +4593,11 @@ export function IntoWorkbench() {
                               loading={busy === actionKey}
                               feedback={buttonFeedbackFor(actionKey, actionKey)}
                               disabled={
-                                !hasPermission("manage_learning") ||
                                 summary.exampleCount === 0 ||
                                 Boolean(busy)
                               }
                               disabledReason={
-                                !hasPermission("manage_learning")
-                                  ? "Your INTO account cannot reset supplier learning."
-                                  : summary.exampleCount === 0
+                                summary.exampleCount === 0
                                     ? "This supplier has no active learning to reset."
                                     : "Another action is already running."
                               }
@@ -4637,20 +4634,22 @@ export function IntoWorkbench() {
                     </h3>
                     <p className="text-xs text-stone-600">
                       Generation {learningDetail.generation} ·{" "}
-                      {learningDetail.confidence.copy ??
-                        supplierReliabilityCopy(learningDetail.confidence.band)}
+                      {learningDetail.reliabilityEnabled === false
+                        ? "Supplier reliability is not enabled."
+                        : learningDetail.confidence.copy ??
+                          supplierReliabilityCopy(learningDetail.confidence.band)}
                     </p>
                   </div>
-                  <div className="text-right text-sm">
+                  {learningDetail.reliabilityEnabled !== false ? <div className="text-right text-sm">
                     <div className="font-semibold text-stone-950">
                       {learningDetail.confidence.score}% {learningDetail.confidence.band}
                     </div>
                     <div className="text-xs text-stone-500">
                       Drift penalty {learningDetail.confidence.driftPenalty} points
                     </div>
-                  </div>
+                  </div> : null}
                 </div>
-                {learningDetail.confidence.metrics?.length ? (
+                {learningDetail.reliabilityEnabled !== false && learningDetail.confidence.metrics?.length ? (
                   <div className="mt-3 overflow-x-auto">
                     <table className="w-full min-w-[640px] text-left text-xs">
                       <thead className="text-stone-600">
@@ -4730,7 +4729,6 @@ export function IntoWorkbench() {
               feedback={buttonFeedbackFor("book-all", "book-all")}
               disabled={
                 !stats.ready ||
-                !hasPermission("book") ||
                 !state.exactConnection ||
                 !state.exactMasterData ||
                 state.exactMasterDataStale ||
@@ -4738,9 +4736,7 @@ export function IntoWorkbench() {
                 busy === "book-all"
               }
               disabledReason={
-                !hasPermission("book")
-                  ? "Your INTO account is not verified for invoice booking."
-                  : !state.exactConnection
+                !state.exactConnection
                   ? "Connect the company Exact account before booking ready invoices."
                   : !state.exactMasterData || state.exactMasterDataStale
                     ? "Sync Exact data before booking ready invoices."
@@ -4886,7 +4882,6 @@ export function IntoWorkbench() {
                           disabled={
                             Boolean(disabledReason) ||
                             invoice.status !== "Ready to Book" ||
-                            !hasPermission("book") ||
                             !state.exactConnection ||
                             !state.exactMasterData ||
                             state.exactMasterDataStale ||
@@ -5094,14 +5089,16 @@ export function IntoWorkbench() {
                       label="Supplier"
                       required
                       value={draft.supplierName}
-                      options={[]}
+                      options={supplierSearchOptions}
                       listId={`supplier-options-${selectedInvoice.id}`}
-                      onChange={(value) => updateDraft("supplierName", value)}
-                      disabled={!hasPermission("edit")}
+                      onChange={updateSupplierSearch}
                       issue={supplierFieldIssue}
                       helper={
                         matchedSupplierLabel
-                          ? `Exact supplier: ${matchedSupplierLabel}`
+                          ? selectedPurchaseJournal?.supplierResolution.selectionOrigin ===
+                            "automatic"
+                            ? `Selected from previously confirmed supplier evidence (${selectedPurchaseJournal.supplierResolution.method.toLowerCase()}): ${matchedSupplierLabel}. Type to change supplier.`
+                            : `Exact supplier: ${matchedSupplierLabel}. Type to change supplier.`
                           : "Search synced Exact supplier accounts."
                       }
                       confidence={
@@ -5117,55 +5114,14 @@ export function IntoWorkbench() {
                     {contextualSupplierReviewVisible ? (
                       <div className="sm:col-span-2 rounded-lg border border-stone-300 bg-stone-50 p-3">
                         <p className="text-sm font-semibold text-stone-950">
-                          Multiple Exact suppliers match
+                          Supplier selection required
                         </p>
                         <p className="mt-1 text-xs leading-5 text-stone-700">
-                          Select the supplier shown on this invoice. INTO will remember
-                          the choice for this supplier layout.
+                          {supplierManualReasonCopy(
+                            selectedPurchaseJournal?.supplierResolution.manualReason
+                          )} Type a supplier name, Exact code, VAT number, IBAN, or
+                          Chamber of Commerce number above.
                         </p>
-                        {duplicateSupplierCandidates.length > 1 ? (
-                          <div className="mt-2 flex flex-wrap gap-2">
-                            {duplicateSupplierCandidates.map(
-                              (candidate) => (
-                                <ActionButton
-                                  key={candidate.account.id}
-                                  variant="ghost"
-                                  onClick={() =>
-                                    applyIntelligenceAction(
-                                      "selectSupplier",
-                                      candidate.account.id
-                                    )
-                                  }
-                                  loading={busy === `supplier-${candidate.account.id}`}
-                                  feedback={buttonFeedbackFor(
-                                    `supplier-${candidate.account.id}`,
-                                    `supplier-${candidate.account.id}`
-                                  )}
-                                  disabled={!hasPermission("approve")}
-                                  disabledReason="Supplier selection is not available."
-                                  className="justify-start text-left"
-                                >
-                                  <span>
-                                    {candidate.account.code} - {candidate.account.name} (
-                                    {percentScore(candidate.confidence)} match)
-                                    {state.supplierLearningEnabled &&
-                                    supplierLearningByAccount.get(candidate.account.id) ? (
-                                      <span className="block text-xs font-normal text-stone-500">
-                                        Supplier reliability{" "}
-                                        {
-                                          supplierLearningByAccount.get(
-                                            candidate.account.id
-                                          )!.confidence.score
-                                        }
-                                        %
-                                      </span>
-                                    ) : null}
-                                  </span>
-                                </ActionButton>
-                              )
-                            )}
-                          </div>
-                        ) : null}
                       </div>
                     ) : null}
                     <TextField
@@ -5173,7 +5129,7 @@ export function IntoWorkbench() {
                       required
                       value={draft.referenceCode}
                       onChange={(value) => updateDraft("referenceCode", value)}
-                      disabled={!hasPermission("edit")}
+                      disabled={false}
                       issue={yourRefIssue}
                       helper={
                         selectedPurchaseJournal?.yourRef
@@ -5188,7 +5144,6 @@ export function IntoWorkbench() {
                       options={paymentConditionOptions}
                       listId={`payment-options-${selectedInvoice.id}`}
                       onChange={(value) => updateDraft("paymentTerms", value)}
-                      disabled={!hasPermission("edit")}
                       issue={paymentConditionFieldIssue}
                       helper={
                         selectedPurchaseJournal
@@ -5203,7 +5158,7 @@ export function IntoWorkbench() {
                       required
                       value={draft.invoiceDate}
                       onChange={(value) => updateDraft("invoiceDate", value)}
-                      disabled={!hasPermission("edit")}
+                      disabled={false}
                       issue={invoiceDateIssue}
                     />
                     <div className="sm:col-span-2 rounded-lg border border-stone-200 bg-stone-50/60 p-3">
@@ -5224,8 +5179,6 @@ export function IntoWorkbench() {
                         <ActionButton
                           variant="ghost"
                           onClick={addBookingLine}
-                          disabled={!hasPermission("edit")}
-                          disabledReason="Your INTO account is not verified for invoice edits."
                           className="min-h-9 px-3 py-1.5 text-xs"
                         >
                           Add line
@@ -5275,7 +5228,6 @@ export function IntoWorkbench() {
                                       onChange={(event) =>
                                         updateBookingLineGl(index, event.target.value)
                                       }
-                                      disabled={!hasPermission("edit")}
                                     />
                                     <ValidationMessage
                                       issue={bookingLineIssueFor(index, "glAccount")}
@@ -5292,7 +5244,6 @@ export function IntoWorkbench() {
                                           description: event.target.value,
                                         })
                                       }
-                                      disabled={!hasPermission("edit")}
                                     />
                                     <ValidationMessage
                                       issue={bookingLineIssueFor(index, "description")}
@@ -5310,7 +5261,6 @@ export function IntoWorkbench() {
                                           from: event.target.value,
                                         })
                                       }
-                                      disabled={!hasPermission("edit")}
                                     />
                                     <ValidationMessage
                                       issue={bookingLineIssueFor(index, "from")}
@@ -5328,7 +5278,6 @@ export function IntoWorkbench() {
                                           to: event.target.value,
                                         })
                                       }
-                                      disabled={!hasPermission("edit")}
                                     />
                                     <ValidationMessage
                                       issue={bookingLineIssueFor(index, "to")}
@@ -5344,7 +5293,6 @@ export function IntoWorkbench() {
                                           costCentre: event.target.value,
                                         })
                                       }
-                                      disabled={!hasPermission("edit")}
                                     />
                                   </td>
                                   <td className="w-[110px] px-2 py-2">
@@ -5357,7 +5305,6 @@ export function IntoWorkbench() {
                                           costUnit: event.target.value,
                                         })
                                       }
-                                      disabled={!hasPermission("edit")}
                                     />
                                   </td>
                                   <td className="w-[130px] px-2 py-2">
@@ -5370,7 +5317,6 @@ export function IntoWorkbench() {
                                       onChange={(event) =>
                                         updateBookingLineVat(index, event.target.value)
                                       }
-                                      disabled={!hasPermission("edit")}
                                     />
                                     <ValidationMessage
                                       issue={bookingLineVatIssueFor(index)}
@@ -5394,7 +5340,6 @@ export function IntoWorkbench() {
                                           event.target.value
                                         )
                                       }
-                                      disabled={!hasPermission("edit")}
                                     />
                                     <ValidationMessage
                                       issue={bookingLineIssueFor(index, "amount")}
@@ -5418,7 +5363,6 @@ export function IntoWorkbench() {
                                           event.target.value
                                         )
                                       }
-                                      disabled={!hasPermission("edit")}
                                     />
                                     <ValidationMessage
                                       issue={bookingLineIssueFor(index, "vatAmount")}
@@ -5428,7 +5372,6 @@ export function IntoWorkbench() {
                                     <button
                                       type="button"
                                       onClick={() => deleteBookingLine(index)}
-                                      disabled={!hasPermission("edit")}
                                       className="cursor-pointer rounded-md border border-rose-200 bg-white px-2 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:border-stone-200 disabled:bg-stone-100 disabled:text-stone-400"
                                     >
                                       Delete
@@ -5520,7 +5463,6 @@ export function IntoWorkbench() {
                             onChange={(event) =>
                               updateDraft("grossAmount", event.target.value)
                             }
-                            disabled={!hasPermission("edit")}
                             className="mt-1 w-full rounded-md border-2 border-emerald-600 bg-emerald-50 px-2 py-1.5 text-right font-semibold text-stone-950 outline-none focus:ring-2 focus:ring-emerald-100 disabled:cursor-not-allowed disabled:border-stone-300 disabled:bg-stone-100 disabled:text-stone-500"
                           />
                           <ValidationMessage issue={totalAmountFieldIssue} />
@@ -5747,15 +5689,10 @@ export function IntoWorkbench() {
                             "approve-intelligence"
                           )}
                           disabled={
-                            !hasPermission("approve") ||
                             !canApproveSelectedIntelligence ||
                             busy === "approve-intelligence"
                           }
-                          disabledReason={
-                            !hasPermission("approve")
-                              ? "Your INTO account is not verified for purchase journal approval."
-                              : "Approval is available only after required supplier, attachment, and reference checks are resolved."
-                          }
+                          disabledReason="Approval is available only after required supplier, attachment, and reference checks are resolved."
                         >
                           Approve intelligence
                         </ActionButton>

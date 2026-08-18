@@ -2,7 +2,6 @@ import {
   getSupplierLearningDetail,
   listSupplierLearningSummaries,
   resetLearningForSupplierCommand,
-  requirePermission,
   SupplierLearningGenerationConflictError,
   SupplierLearningNotFoundError,
 } from "../../../../../../lib/repository/invoice-store";
@@ -17,7 +16,7 @@ type RouteContext = {
 };
 
 export async function POST(request: Request, context: RouteContext) {
-  return withPersistentStore(async (principal) => {
+  return withPersistentStore(async () => {
     if (
       !learningFeatureFlags().learningV2Enabled ||
       supplierLearningMode() === "off"
@@ -27,15 +26,6 @@ export async function POST(request: Request, context: RouteContext) {
         { status: 404 }
       );
     }
-    try {
-      requirePermission("manage_learning", principal);
-    } catch (error) {
-      return Response.json(
-        { error: error instanceof Error ? error.message : "Not allowed." },
-        { status: 403 }
-      );
-    }
-
     const { accountId } = await context.params;
     try {
       const payload = (await request.json()) as { expectedGeneration?: unknown };

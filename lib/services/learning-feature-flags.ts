@@ -20,6 +20,26 @@ function booleanSetting(
   return defaultValue;
 }
 
+function percentageSetting(
+  environment: Environment,
+  key: string,
+  defaultValue: number
+) {
+  const value = Number(environment[key]);
+  return Number.isFinite(value)
+    ? Math.min(100, Math.max(0, value))
+    : defaultValue;
+}
+
+function supplierAllowlist(environment: Environment) {
+  return [...new Set(
+    (environment.SUPPLIER_LEARNED_AUTO_SELECTION_ALLOWLIST ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0 && value.length <= 128)
+  )].slice(0, 1_000);
+}
+
 export function learningFeatureFlags(
   environment: Environment = process.env
 ) {
@@ -45,10 +65,31 @@ export function learningFeatureFlags(
       "LEARNING_UI_ENABLED",
       !production
     ),
+    supplierReliabilityEnabled: booleanSetting(
+      environment,
+      "SUPPLIER_RELIABILITY_ENABLED",
+      !production
+    ),
+    supplierDriftEnabled: booleanSetting(
+      environment,
+      "SUPPLIER_DRIFT_ENABLED",
+      !production
+    ),
     supplierResolutionV2Enabled: booleanSetting(
       environment,
       "SUPPLIER_RESOLUTION_V2_ENABLED",
       !production
+    ),
+    supplierLearnedAutoSelectionEnabled: booleanSetting(
+      environment,
+      "SUPPLIER_LEARNED_AUTO_SELECTION_ENABLED",
+      !production
+    ),
+    supplierLearnedAutoSelectionAllowlist: supplierAllowlist(environment),
+    supplierLearnedAutoSelectionPercentage: percentageSetting(
+      environment,
+      "SUPPLIER_LEARNED_AUTO_SELECTION_PERCENTAGE",
+      production ? 0 : 100
     ),
     learningShadowMode: booleanSetting(
       environment,
@@ -56,6 +97,26 @@ export function learningFeatureFlags(
       production
     ),
   };
+}
+
+function supplierRolloutBucket(accountId: string) {
+  let hash = 2_166_136_261;
+  for (const character of accountId) {
+    hash ^= character.charCodeAt(0);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return (hash >>> 0) % 100;
+}
+
+export function supplierLearnedAutoSelectionEnabledFor(
+  accountId: string,
+  environment: Environment = process.env
+) {
+  const flags = learningFeatureFlags(environment);
+  if (!flags.supplierLearnedAutoSelectionEnabled) return false;
+  if (flags.supplierLearnedAutoSelectionAllowlist.includes(accountId)) return true;
+  return supplierRolloutBucket(accountId) <
+    flags.supplierLearnedAutoSelectionPercentage;
 }
 
 export function supplierLearningMode(

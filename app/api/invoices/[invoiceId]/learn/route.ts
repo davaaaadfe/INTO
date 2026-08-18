@@ -8,7 +8,6 @@ import {
   InvoiceRevisionConflictError,
   InvoiceRevisionValidationError,
   learnInvoice,
-  requirePermission,
 } from "../../../../../lib/repository/invoice-store";
 import { withPersistentStore } from "../../../../../lib/repository/persistent-request";
 import {
@@ -21,7 +20,7 @@ type RouteContext = {
 };
 
 export async function POST(request: Request, context: RouteContext) {
-  return withPersistentStore(async (principal) => {
+  return withPersistentStore(async () => {
     const flags = learningFeatureFlags();
     if (
       !flags.learningV2Enabled ||
@@ -33,15 +32,6 @@ export async function POST(request: Request, context: RouteContext) {
         { status: 404 }
       );
     }
-    try {
-      requirePermission("train", principal);
-    } catch (error) {
-      return Response.json(
-        { error: error instanceof Error ? error.message : "Not allowed." },
-        { status: 403 }
-      );
-    }
-
     const { invoiceId } = await context.params;
     const invoice = getInvoice(invoiceId);
     if (!invoice) {

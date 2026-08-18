@@ -1,6 +1,5 @@
 import type {
   BookingLearningStore,
-  SupplierConfidenceBreakdown,
   SupplierLearningExample,
   SupplierLearningPattern,
   SupplierLearningProfile,
@@ -14,6 +13,7 @@ import {
   SUPPLIER_PATTERN_MODEL_VERSION,
 } from "./supplier-pattern-derivation";
 export * from "./supplier-format-clustering";
+export * from "./supplier-drift";
 export * from "./supplier-reliability";
 export * from "./supplier-reliability-evidence";
 
@@ -22,58 +22,6 @@ type LearningInput = Omit<SupplierLearningExample, "generation"> & {
     Omit<SupplierLearningPattern, "supplierAccountId" | "generation">
   >;
 };
-
-const clamp = (value: number) => Math.max(0, Math.min(1, value));
-
-export function supplierConfidence(
-  profile?: SupplierLearningProfile,
-  patterns: SupplierLearningPattern[] = []
-): SupplierConfidenceBreakdown {
-  const exampleCount = profile?.exampleCount ?? 0;
-  const volume = exampleCount / (exampleCount + 2);
-  const activePatterns = profile
-    ? patterns.filter(
-        (pattern) =>
-          pattern.supplierAccountId === profile.supplierAccountId &&
-          pattern.generation === profile.generation &&
-          pattern.attempts > 0 &&
-          pattern.weight > 0
-      )
-    : [];
-  const totalWeight = activePatterns.reduce(
-    (total, pattern) => total + pattern.weight,
-    0
-  );
-  const quality = totalWeight
-    ? activePatterns.reduce(
-        (total, pattern) =>
-          total +
-          pattern.weight *
-            (Math.min(pattern.successes, pattern.attempts) + 1) /
-            (pattern.attempts + 2),
-        0
-      ) / totalWeight
-    : 0;
-  const driftPenalty =
-    profile?.formatDrift === "confirmed"
-      ? 20
-      : profile?.formatDrift === "possible"
-        ? 10
-        : 0;
-  const score = Math.round(
-    100 * clamp(0.35 + 0.65 * volume * quality - driftPenalty / 100)
-  );
-
-  return {
-    score,
-    band: score >= 85 ? "High" : score >= 65 ? "Medium" : "Low",
-    baseline: 35,
-    exampleCount,
-    volume,
-    quality,
-    driftPenalty,
-  };
-}
 
 export function learnSupplierInvoice(
   learning: BookingLearningStore,

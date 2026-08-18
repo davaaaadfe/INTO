@@ -17,6 +17,7 @@ import {
   getStore,
   recomputeInvoiceState,
   resetLearningForSupplier,
+  selectInvoiceSupplier,
   updateInvoiceExtraction,
 } from "../lib/repository/invoice-store";
 import { createMockExactMasterData } from "../lib/services/exact-master-data-service";
@@ -58,7 +59,10 @@ function routeLearningInvoice() {
     documentTextMode: "plain_text" as const,
   };
   updateInvoiceExtraction(invoice.id, extractedData, { applyLearning: false });
-  return recomputeInvoiceState(invoice.id)!;
+  const computed = recomputeInvoiceState(invoice.id)!;
+  return computed.purchaseJournal?.supplierResolution.selectedAccountId
+    ? computed
+    : selectInvoiceSupplier(computed.id, "supplier_noordzee")!;
 }
 
 test("supplier selection atomically saves the live corrected draft", async () => {

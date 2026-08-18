@@ -1,6 +1,5 @@
 import {
   getSupplierLearningDetail,
-  requirePermission,
   SupplierLearningNotFoundError,
 } from "../../../../../lib/repository/invoice-store";
 import { withPersistentStore } from "../../../../../lib/repository/persistent-request";
@@ -11,13 +10,12 @@ type RouteContext = {
 };
 
 export async function GET(request: Request, context: RouteContext) {
-  return withPersistentStore(async (principal) => {
+  return withPersistentStore(async () => {
     const flags = learningFeatureFlags();
     if (!flags.learningV2Enabled || !flags.learningUiEnabled) {
       return Response.json({ error: "Supplier learning is not enabled." }, { status: 404 });
     }
     try {
-      requirePermission("view", principal);
       const { accountId } = await context.params;
       return Response.json(getSupplierLearningDetail(accountId));
     } catch (error) {

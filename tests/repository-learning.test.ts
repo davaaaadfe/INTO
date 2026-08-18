@@ -135,7 +135,10 @@ function learningInvoice() {
   const computed = recomputeInvoiceState(invoice.id);
   assert.ok(computed?.purchaseJournal?.lines[0]);
   assert.equal(computed.revision, initialRevision + 1);
-  return { invoice: computed, extractedData };
+  const selected = computed.purchaseJournal.supplierResolution.selectedAccountId
+    ? computed
+    : selectInvoiceSupplier(computed.id, "supplier_noordzee")!;
+  return { invoice: selected, extractedData };
 }
 
 test("Learn assigns close structural layouts to one supplier cluster", () => {
@@ -300,9 +303,15 @@ test("Learn rejects a synthetic supplier-overview identity", () => {
   const supplier = cache.suppliers.find(
     (item) => item.id === invoice.purchaseJournal?.supplierResolution.selectedAccountId
   )!;
+  const priorDecision = getStore().learning.supplierSelections.find(
+    (item) => item.accountId === supplier.id
+  )!;
+  const decision = { ...priorDecision, invoiceId: invoice.id };
+  getStore().learning.supplierSelections.unshift(decision);
   const originalId = supplier.id;
   try {
     supplier.id = `supplier-overview:${supplier.code}`;
+    decision.accountId = supplier.id;
     const recomputed = recomputeInvoiceState(invoice.id)!;
     assert.match(
       recomputed.purchaseJournal?.supplierResolution.selectedAccountId ?? "",
@@ -321,6 +330,8 @@ test("Learn rejects a synthetic supplier-overview identity", () => {
     );
   } finally {
     supplier.id = originalId;
+    getStore().learning.supplierSelections =
+      getStore().learning.supplierSelections.filter((item) => item !== decision);
   }
 });
 
@@ -513,7 +524,7 @@ test("review and needs-review classify pending supplier candidate outcomes", () 
   );
 });
 
-test("an explicit duplicate-supplier choice becomes the default for the same layout", () => {
+test("an explicit duplicate-supplier choice cannot bypass a later hard conflict", () => {
   const store = getStore();
   store.exactMasterDataCaches = [
     {
@@ -591,11 +602,12 @@ test("an explicit duplicate-supplier choice becomes the default for the same lay
   );
   const learnedMatch = recomputeInvoiceState(futureInvoice.id)!;
 
+  assert.equal(learnedMatch.purchaseJournal!.supplierResolution.selectedAccountId, undefined);
+  assert.equal(learnedMatch.purchaseJournal!.supplierResolution.reviewRequired, true);
   assert.equal(
-    learnedMatch.purchaseJournal!.supplierResolution.selectedAccountId,
-    "supplier_ambiguous_a"
+    learnedMatch.purchaseJournal!.supplierResolution.manualReason,
+    "hard_identifier_conflict"
   );
-  assert.equal(learnedMatch.purchaseJournal!.supplierResolution.reviewRequired, false);
 
   const conflictingInvoice = createUploadedInvoice({
     fileName: "acme-conflict.pdf",

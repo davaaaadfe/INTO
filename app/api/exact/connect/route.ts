@@ -2,7 +2,6 @@ import {
   getCompanyConnectionUserId,
   listInvoices,
   publicExactConnection,
-  requireSystemOwner,
   setExactConnection,
   syncExactDataNow,
 } from "../../../../lib/repository/invoice-store";
@@ -22,7 +21,6 @@ import { logger } from "../../../../lib/utils/logger";
 export async function GET(request: Request) {
   return withPersistentStore(async (principal) => {
     try {
-      requireSystemOwner(principal);
       if (isRealExactMode()) {
         const authorization = await createRealExactAuthorizationUrl(
           getCompanyConnectionUserId(),
@@ -59,7 +57,6 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   return withPersistentStore(async (principal) => {
     try {
-      requireSystemOwner(principal);
       if (isRealExactMode()) {
         const authorization = await createRealExactAuthorizationUrl(
           getCompanyConnectionUserId(),

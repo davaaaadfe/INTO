@@ -10,7 +10,6 @@ import {
   markInvoiceBooked,
   markInvoiceBookingFailed,
   refreshExactConnectionForUser,
-  requirePermission,
   syncExactDataNow,
   InvoiceRevisionConflictError,
 } from "../../../../lib/repository/invoice-store";
@@ -22,15 +21,8 @@ import { logger } from "../../../../lib/utils/logger";
 type BulkBookingItem = { invoiceId?: unknown; expectedRevision?: unknown };
 
 export async function POST(request: Request) {
-  return withPersistentStore(async (principal) => {
+  return withPersistentStore(async () => {
     const results: Array<Record<string, unknown>> = [];
-
-    try {
-      requirePermission("book", principal);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Not allowed.";
-      return Response.json({ error: message, invoices: listInvoices(), results }, { status: 403 });
-    }
 
     let payload: { items?: BulkBookingItem[] };
     try {

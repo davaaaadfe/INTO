@@ -2,15 +2,13 @@ import {
   disconnectExactConnection,
   listInvoices,
   publicExactConnection,
-  requireSystemOwner,
 } from "../../../../lib/repository/invoice-store";
 import { withPersistentStore } from "../../../../lib/repository/persistent-request";
 import { logger } from "../../../../lib/utils/logger";
 
 export async function POST(request: Request) {
-  return withPersistentStore((principal) => {
+  return withPersistentStore(() => {
     try {
-      requireSystemOwner(principal);
       const disconnected = disconnectExactConnection();
 
       logger.info("exact.disconnected", {

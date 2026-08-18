@@ -12,6 +12,7 @@ import {
   hydrateStoreFromPersistence,
   listSupplierLearningSummaries,
   persistStoreSoon,
+  resetLearningForSupplierCommand,
   resetLearningForSupplier,
   setExactConnection,
   syncExactDataNow,
@@ -620,6 +621,8 @@ test("legacy migration skips Exact suppliers without learning evidence", async (
 
 test("supplier candidate outcome events project idempotently without values", async () => {
   const databasePath = testDatabasePath();
+  const previousKey = process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY;
+  process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY = "outcome-projection-test-key";
   const repository = new SqliteLearningRepository(databasePath);
   try {
     await repository.migrate();
@@ -636,17 +639,39 @@ test("supplier candidate outcome events project idempotently without values", as
       exampleCount: 1,
       formatDrift: "none",
     }];
+    store.learning.supplierExamples = [{
+      id: "outcome-example-a",
+      supplierAccountId: supplier.id,
+      generation: 1,
+      invoiceId: "invoice-a",
+      contentHash: "sha256:outcome-example-a",
+      formatFingerprint: "format-a",
+      learnedAt: "2026-08-17T09:30:00.000Z",
+      source: "explicit_learn",
+      trustState: "trusted",
+      trigger: "learn",
+      processingPurpose: "learning_only",
+      active: true,
+    }];
     store.learning.supplierOutcomeEvents = [{
       id: "outcome-application-a",
       supplierAccountId: supplier.id,
       generation: 1,
       invoiceId: "invoice-a",
       invoiceRevision: 4,
-      type: "application",
+      type: "correction",
       candidateIds: ["candidate-a"],
       fields: ["referenceCode"],
       createdAt: "2026-08-17T10:00:00.000Z",
     }];
+    await repository.ensureProfile({
+      companyId: process.env.INTO_COMPANY_ID?.trim() || "into-company",
+      divisionCode: store.exactMasterDataCaches[0]!.cache.divisionCode,
+      supplierAccountId: supplier.id,
+      fallbackSupplierCode: supplier.code,
+      generation: 1,
+      createdAt: "2026-08-17T09:00:00.000Z",
+    });
 
     const context = {
       actorId: "verified-a",
@@ -661,16 +686,89 @@ test("supplier candidate outcome events project idempotently without values", as
       divisionCode: store.exactMasterDataCaches[0]!.cache.divisionCode,
       supplierAccountId: supplier.id,
     });
-    assert.equal(events.filter((event) => event.type === "application").length, 1);
-    assert.deepEqual(events.find((event) => event.type === "application")?.metadata, {
+    assert.equal(events.filter((event) => event.type === "correction").length, 1);
+    assert.deepEqual(events.find((event) => event.type === "correction")?.metadata, {
       invoiceId: "invoice-a",
       invoiceRevision: 4,
       candidateIds: ["candidate-a"],
       fields: ["referenceCode"],
     });
     assert.doesNotMatch(JSON.stringify(events), /SECRET|rawValue|correctedValue/);
+    assert.equal((await repository.getProfile({
+      companyId: process.env.INTO_COMPANY_ID?.trim() || "into-company",
+      divisionCode: store.exactMasterDataCaches[0]!.cache.divisionCode,
+      supplierAccountId: supplier.id,
+    }))?.confidenceScore, 46);
   } finally {
     repository.close();
+    if (previousKey === undefined) delete process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY;
+    else process.env.LEARNING_ARTIFACT_ENCRYPTION_KEY = previousKey;
+    await removeDatabase(databasePath);
+  }
+});
+
+test("normalized adverse outcomes transition drift once and apply the policy penalty", async () => {
+  const databasePath = testDatabasePath();
+  const previousDrift = process.env.SUPPLIER_DRIFT_ENABLED;
+  process.env.SUPPLIER_DRIFT_ENABLED = "true";
+  const repository = new SqliteLearningRepository(databasePath);
+  try {
+    await repository.migrate();
+    const store = structuredClone(getStore());
+    const supplier = createMockExactMasterData().suppliers[0]!;
+    store.invoices = [];
+    store.exactMasterDataCaches = [{
+      userId: "company_connection",
+      cache: createMockExactMasterData(),
+    }];
+    store.learning.supplierProfiles = [{
+      supplierAccountId: supplier.id,
+      generation: 1,
+      exampleCount: 0,
+      formatDrift: "none",
+    }];
+    store.learning.supplierOutcomeEvents = [
+      ["drift-correction-1", "correction"],
+      ["drift-correction-2", "correction"],
+      ["drift-acceptance-1", "acceptance"],
+    ].map(([id, type], index) => ({
+      id,
+      supplierAccountId: supplier.id,
+      generation: 1,
+      invoiceId: `drift-invoice-${index}`,
+      invoiceRevision: 1,
+      type: type as "correction" | "acceptance",
+      candidateIds: [],
+      fields: ["referenceCode"],
+      createdAt: `2026-08-17T1${index}:00:00.000Z`,
+    }));
+
+    await persistLearningState(store, { requestId: "drift-transition" }, repository);
+    await persistLearningState(store, { requestId: "drift-transition" }, repository);
+
+    const scope = {
+      companyId: process.env.INTO_COMPANY_ID?.trim() || "into-company",
+      divisionCode: store.exactMasterDataCaches[0]!.cache.divisionCode,
+      supplierAccountId: supplier.id,
+    };
+    const profile = await repository.getProfile(scope);
+    assert.equal(profile?.driftState, "possible");
+    assert.equal(profile?.confidenceScore, 25);
+    const driftEvents = (await repository.listEvents(scope)).filter(
+      (event) => event.type === "drift"
+    );
+    assert.equal(driftEvents.length, 1);
+    assert.deepEqual(driftEvents[0]?.metadata, {
+      from: "none",
+      to: "possible",
+      policyVersion: "supplier-drift-v1",
+      evaluatedCount: 3,
+      adverseCount: 2,
+    });
+  } finally {
+    repository.close();
+    if (previousDrift === undefined) delete process.env.SUPPLIER_DRIFT_ENABLED;
+    else process.env.SUPPLIER_DRIFT_ENABLED = previousDrift;
     await removeDatabase(databasePath);
   }
 });
@@ -704,7 +802,7 @@ test("normalized supplier outcomes and reset replay metadata hydrate after resta
     store.learning.supplierOutcomeEvents = [{
       id: "outcome-acceptance-restart",
       supplierAccountId: supplier.id,
-      generation: 1,
+      generation: 2,
       invoiceId: "invoice-restart",
       invoiceRevision: 7,
       type: "acceptance",
@@ -712,35 +810,50 @@ test("normalized supplier outcomes and reset replay metadata hydrate after resta
       fields: ["referenceCode"],
       createdAt: "2026-08-17T11:00:00.000Z",
     }];
-    await persistLearningState(store, { requestId: "outcome-restart" }, repository);
-    const profile = (await repository.listProfiles(
-      process.env.INTO_COMPANY_ID?.trim() || "into-company",
-      store.exactMasterDataCaches[0]!.cache.divisionCode
-    ))[0]!;
-    await repository.saveEvent({
-      id: "reset-restart",
+    const profile = await repository.ensureProfile({
+      companyId: process.env.INTO_COMPANY_ID?.trim() || "into-company",
+      divisionCode: store.exactMasterDataCaches[0]!.cache.divisionCode,
+      supplierAccountId: supplier.id,
+      fallbackSupplierCode: supplier.code,
+      createdAt: "2026-08-17T10:00:00.000Z",
+    });
+    const reset = await repository.resetSupplier({
       companyId: profile.companyId,
       divisionCode: profile.divisionCode,
       supplierAccountId: supplier.id,
-      generation: 1,
-      type: "reset",
-      idempotencyKey: "reset:restart-key",
+      expectedGeneration: profile.generation,
       actorId: "verified-a",
       sessionCorrelationId: "session-a",
       requestId: "restart-key",
-      metadata: { previousGeneration: 0 },
-      createdAt: "2026-08-17T12:00:00.000Z",
+      createdAt: "2026-08-17T10:30:00.000Z",
     });
+    store.learning.supplierProfiles[0]!.generation = reset.generation;
+    store.learning.supplierOutcomeEvents[0]!.generation = reset.generation;
+    await persistLearningState(store, { requestId: "outcome-restart" }, repository);
+    assert.equal(reset.generation, profile.generation + 1);
 
     store.learning.supplierProfiles = [];
     store.learning.supplierOutcomeEvents = [];
     await closeConfiguredLearningRepository();
+    const restartedRepository = await configuredLearningRepository();
+    assert.ok(restartedRepository);
+    const restartedEvents = await restartedRepository.listEvents(profile);
+    assert.equal(restartedEvents.length, 2);
+    assert.deepEqual(
+      restartedEvents.find((event) => event.type === "acceptance")?.metadata,
+      {
+        invoiceId: "invoice-restart",
+        invoiceRevision: 7,
+        candidateIds: ["private-candidate-id"],
+        fields: ["referenceCode"],
+      }
+    );
     assert.equal(await hydrateLearningState(store), true);
 
     assert.deepEqual(store.learning.supplierOutcomeEvents, [{
       id: "outcome-acceptance-restart",
       supplierAccountId: supplier.id,
-      generation: 1,
+      generation: reset.generation,
       invoiceId: "invoice-restart",
       invoiceRevision: 7,
       type: "acceptance",
@@ -749,8 +862,25 @@ test("normalized supplier outcomes and reset replay metadata hydrate after resta
       createdAt: "2026-08-17T11:00:00.000Z",
     }]);
     assert.equal(store.learning.supplierProfiles[0]?.lastResetRequestKey, "restart-key");
-    assert.equal(store.learning.supplierProfiles[0]?.lastResetExpectedGeneration, 0);
+    assert.equal(
+      store.learning.supplierProfiles[0]?.lastResetExpectedGeneration,
+      profile.generation
+    );
+    (globalThis as typeof globalThis & { __INTO_STORE?: IntoStore }).__INTO_STORE = store;
+    assert.equal(
+      resetLearningForSupplierCommand(
+        supplier.id,
+        profile.generation,
+        "restart-key"
+      ).replayed,
+      true
+    );
+    assert.equal(
+      store.learning.supplierProfiles[0]?.generation,
+      reset.generation
+    );
   } finally {
+    clearRuntime();
     repository.close();
     await closeConfiguredLearningRepository();
     if (previous.mode === undefined) delete process.env.DATABASE_MODE;

@@ -1,7 +1,6 @@
 import {
   getInvoice,
   listAuditEvents,
-  requirePermission,
 } from "../../../../../lib/repository/invoice-store";
 import { withPersistentStore } from "../../../../../lib/repository/persistent-request";
 
@@ -15,9 +14,8 @@ async function invoiceIdFromContext(context: RouteContext) {
 }
 
 export async function GET(request: Request, context: RouteContext) {
-  return withPersistentStore(async (principal) => {
+  return withPersistentStore(async () => {
     try {
-      requirePermission("view", principal);
       const invoiceId = await invoiceIdFromContext(context);
       const invoice = getInvoice(invoiceId);
 

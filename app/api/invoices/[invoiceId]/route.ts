@@ -8,7 +8,6 @@ import {
   InvoiceRevisionConflictError,
   InvoiceRevisionValidationError,
   listInvoices,
-  requirePermission,
   saveInvoiceReview,
 } from "../../../../lib/repository/invoice-store";
 import { withPersistentStore } from "../../../../lib/repository/persistent-request";
@@ -24,14 +23,7 @@ async function invoiceIdFromContext(context: RouteContext) {
 }
 
 export async function GET(request: Request, context: RouteContext) {
-  return withPersistentStore(async (principal) => {
-    try {
-      requirePermission("view", principal);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Not allowed.";
-      return Response.json({ error: message }, { status: 403 });
-    }
-
+  return withPersistentStore(async () => {
     const invoice = getInvoice(await invoiceIdFromContext(context));
 
     if (!invoice) {
@@ -43,9 +35,8 @@ export async function GET(request: Request, context: RouteContext) {
 }
 
 export async function PATCH(request: Request, context: RouteContext) {
-  return withPersistentStore(async (principal) => {
+  return withPersistentStore(async () => {
     try {
-      requirePermission("edit", principal);
       const invoiceId = await invoiceIdFromContext(context);
       const invoice = getInvoice(invoiceId);
 

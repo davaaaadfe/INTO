@@ -6,7 +6,6 @@ import {
   listInvoices,
   markInvoiceReading,
   recomputeInvoiceState,
-  requirePermission,
   updateInvoiceExtraction,
 } from "../../../lib/repository/invoice-store";
 import { extractInvoiceData } from "../../../lib/services/invoice-extraction-service";
@@ -26,9 +25,8 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  return withPersistentStore(async (principal) => {
+  return withPersistentStore(async () => {
     try {
-      requirePermission("upload", principal);
       const formData = await request.formData();
       const files = formData
         .getAll("files")
@@ -100,7 +98,6 @@ export async function POST(request: Request) {
 
       logger.info("invoice.uploaded", {
         invoiceId: invoice.id,
-        fileName: invoice.fileName,
         fileSize: invoice.fileSize,
       });
 

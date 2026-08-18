@@ -71,6 +71,15 @@ test("supplier extraction selects only the closest active-generation cluster", (
   assert.equal(context?.clusterId, "cluster-a");
   assert.deepEqual(context?.patterns.map((pattern) => pattern.key), ["active"]);
   assert.equal(unfamiliar, null);
+  learning.supplierProfiles[0]!.formatDrift = "confirmed";
+  assert.equal(
+    supplierExtractionContext(
+      learning,
+      "supplier-a",
+      "Invoice number: A-9\nTotal: EUR 99.00"
+    ),
+    null
+  );
 });
 
 test("supplier candidates retain provenance and only prefill in apply mode", () => {

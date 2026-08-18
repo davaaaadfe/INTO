@@ -1,16 +1,14 @@
 import {
   addAuditEvent,
   listInvoices,
-  requireSystemOwner,
   syncExactDataNow,
 } from "../../../../lib/repository/invoice-store";
 import { withPersistentStore } from "../../../../lib/repository/persistent-request";
 import { logger } from "../../../../lib/utils/logger";
 
 export async function POST(request: Request) {
-  return withPersistentStore(async (principal) => {
+  return withPersistentStore(async () => {
     try {
-      requireSystemOwner(principal);
       const masterData = await syncExactDataNow();
       logger.info("exact.master_data_synced", {
         divisionCode: masterData.divisionCode,

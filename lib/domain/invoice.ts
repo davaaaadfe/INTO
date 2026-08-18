@@ -29,35 +29,6 @@ export type LocalInvoiceFileStatus =
   | "missing";
 export type ValidationSeverity = "error" | "warning";
 export type UserStatus = "invited" | "active" | "disabled";
-export type PermissionAction =
-  | "view"
-  | "search_archive"
-  | "upload"
-  | "edit"
-  | "review"
-  | "approve"
-  | "book"
-  | "delete"
-  | "manage_connections"
-  | "manage_users"
-  | "manage_settings"
-  | "train"
-  | "manage_learning";
-
-export const SHARED_ACCESS_PERMISSIONS = [
-  "view",
-  "search_archive",
-  "upload",
-  "edit",
-  "review",
-  "approve",
-  "book",
-  "manage_connections",
-  "manage_users",
-  "manage_settings",
-  "train",
-  "manage_learning",
-] as const satisfies readonly PermissionAction[];
 
 export type IntoUser = {
   id: string;
@@ -67,11 +38,6 @@ export type IntoUser = {
   isSystemOwner: boolean;
   createdAt: string;
   updatedAt: string;
-};
-
-export type CurrentUserContext = {
-  user: IntoUser;
-  permissions: PermissionAction[];
 };
 
 export type AuditEventType =
@@ -378,7 +344,16 @@ export type SupplierResolution = {
   threshold: number;
   method: string;
   reviewRequired: boolean;
+  selectionOrigin?: "manual" | "automatic";
   reasonCode?: "supplier_ambiguous" | "supplier_low_confidence";
+  manualReason?:
+    | "unfamiliar_supplier"
+    | "unfamiliar_format"
+    | "hard_identifier_conflict"
+    | "insufficient_confidence"
+    | "insufficient_margin"
+    | "insufficient_evidence"
+    | "exact_master_data_unavailable";
   candidates: SupplierMatchCandidate[];
   reasoning: string[];
   shadowEvaluation?: {
@@ -386,6 +361,7 @@ export type SupplierResolution = {
     matchConfidence: number;
     reviewRequired: boolean;
     reasonCode?: "supplier_ambiguous" | "supplier_low_confidence";
+    manualReason?: SupplierResolution["manualReason"];
   };
 };
 
@@ -837,6 +813,7 @@ export type SupplierConfidenceBreakdown = {
 
 export type SupplierLearningSummary = SupplierLearningProfile & {
   confidence: SupplierConfidenceBreakdown;
+  reliabilityEnabled?: boolean;
   supplierCode: string;
   supplierName: string;
 };

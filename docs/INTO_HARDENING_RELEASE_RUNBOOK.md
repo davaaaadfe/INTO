@@ -7,7 +7,7 @@ This runbook applies to the verified-user, supplier-learning, document-analysis,
 1. Back up the runtime and normalized auth/learning databases.
 2. Apply the numbered auth and learning migrations before application traffic.
 3. Run `pnpm test`, `pnpm run typecheck`, `pnpm run lint`, and `pnpm run build` with the release artifact.
-4. Run the repository contract and concurrency suites against both SQLite and a real PostgreSQL service.
+4. Run the repository contract and concurrency suites against both SQLite and a real PostgreSQL service. For the disposable Neon gate, set `INTO_POSTGRES_INTEGRATION_DATABASE_URL` in `.env.local` and run `pnpm run test:postgres`; the test applies idempotent migrations, verifies rollback, and removes its temporary probe table.
 5. Confirm at least two active verified users before changing `AUTH_MODE` from `dual` to `verified_user`.
 6. Confirm managed OCR privacy/region/retention approval before enabling `DOCUMENT_INTELLIGENCE_ENABLED`.
 7. Confirm the approved held-out resolver gate before enabling automatic supplier selection: empirical precision at least 99.5%, 95% lower confidence bound at least 99%, zero policy violations, and at least 500 eligible decisions across 50 suppliers.

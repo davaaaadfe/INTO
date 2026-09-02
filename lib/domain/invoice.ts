@@ -51,6 +51,7 @@ export type AuditEventType =
   | "invoice_booking_failed"
   | "invoice_file_deleted"
   | "invoice_file_cleanup"
+  | "storage_cleanup_completed"
   | "duplicate_decision"
   | "invoice_reread"
   | "invoice_learned"

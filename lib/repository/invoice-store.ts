@@ -2472,7 +2472,15 @@ export async function deleteInvoiceFileAfterBooking(invoiceId: string) {
   return invoice;
 }
 
-export async function cleanupTemporaryInvoiceFiles(referenceDate = new Date()) {
+export async function cleanupTemporaryInvoiceFiles(
+  referenceDate = new Date(),
+  auditContext?: {
+    actorId: string;
+    actorName: string;
+    requestId: string;
+    sessionCorrelationId: string;
+  }
+) {
   const retentionMs = temporaryInvoiceRetentionDays() * 24 * 60 * 60 * 1000;
   const cutoff = referenceDate.getTime() - retentionMs;
   const deletedInvoiceIds: string[] = [];
@@ -2507,6 +2515,8 @@ export async function cleanupTemporaryInvoiceFiles(referenceDate = new Date()) {
     addAuditEvent({
       invoiceId: invoice.id,
       type: bookedAndAttached ? "invoice_file_deleted" : "invoice_file_cleanup",
+      userId: auditContext?.actorId,
+      userName: auditContext?.actorName,
       message: bookedAndAttached
         ? "Temporary invoice file was deleted after successful Exact booking."
         : "Old temporary invoice file was deleted by cleanup.",
@@ -2514,6 +2524,24 @@ export async function cleanupTemporaryInvoiceFiles(referenceDate = new Date()) {
         storageKey: invoice.storageKey,
         localFileStatus: invoice.localFileStatus,
         retentionDays: temporaryInvoiceRetentionDays(),
+        requestId: auditContext?.requestId,
+        sessionCorrelationId: auditContext?.sessionCorrelationId,
+      },
+    });
+  }
+
+  if (auditContext) {
+    addAuditEvent({
+      type: "storage_cleanup_completed",
+      userId: auditContext.actorId,
+      userName: auditContext.actorName,
+      message: "Machine storage cleanup completed.",
+      metadata: {
+        checked: getStore().invoices.length,
+        deleted: deletedInvoiceIds.length,
+        learningArtifactsPruned,
+        requestId: auditContext.requestId,
+        sessionCorrelationId: auditContext.sessionCorrelationId,
       },
     });
   }

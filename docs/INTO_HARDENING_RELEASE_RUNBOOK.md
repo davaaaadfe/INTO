@@ -11,6 +11,7 @@ This runbook applies to the verified-user, supplier-learning, document-analysis,
 5. Confirm at least two active verified users before changing `AUTH_MODE` from `dual` to `verified_user`.
 6. Confirm managed OCR privacy/region/retention approval before enabling `DOCUMENT_INTELLIGENCE_ENABLED`.
 7. Confirm the approved held-out resolver gate before enabling automatic supplier selection: empirical precision at least 99.5%, 95% lower confidence bound at least 99%, zero policy violations, and at least 500 eligible decisions across 50 suppliers.
+8. Configure a unique `INTO_STORAGE_CLEANUP_TOKEN` of at least 32 characters for the machine scheduler. Invoke `POST /api/storage/cleanup` only with `Authorization: Bearer <token>`; verified browser sessions are intentionally rejected.
 
 ## Staged rollout
 
@@ -28,6 +29,7 @@ This runbook applies to the verified-user, supplier-learning, document-analysis,
 - Learning: transaction success/failure, CAS conflict, projection parity, derivation lag, reset, migration, and pattern outcomes.
 - Resolver: hashed supplier reference, cluster familiarity, score/margin gates, manual/automatic/override classification, precision lower bound, and policy violations.
 - Booking: reservations, completion/uncertain outcomes, and every learning-only block.
+- Storage cleanup: machine-attributed completion events and deleted/pruned counts only; never invoice records, invoice IDs, or the bearer token.
 
 Escalate immediately for any Exact call after a learning-only block, compact-snapshot/normalized-core mismatch, or resolver hard-conflict/policy violation. Disable automatic selection immediately if its precision gate is breached. Operational thresholds for sustained auth, learning, or OCR failure rates must be approved before production enablement.
 

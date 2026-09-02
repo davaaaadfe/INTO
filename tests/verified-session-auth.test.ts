@@ -78,7 +78,7 @@ test("every protected API route uses the persistent request wrapper", async () =
     if (publicRoutes.has(relative)) continue;
     assert.match(
       await readFile(route, "utf8"),
-      /withPersistentStore\(|withVerifiedPersistentRequest\(|resolveRequestPrincipal\(/,
+      /withPersistentStore\(|withMachinePersistentStore\(|withVerifiedPersistentRequest\(|resolveRequestPrincipal\(/,
       relative
     );
   }

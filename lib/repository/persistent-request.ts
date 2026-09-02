@@ -54,6 +54,24 @@ export async function withPublicPersistentStore<T>(
   });
 }
 
+export async function withMachinePersistentStore<T>(
+  handler: (context: {
+    actorId: string;
+    actorName: string;
+    requestId: string;
+    sessionCorrelationId: string;
+  }) => Promise<T> | T,
+  request: Request
+): Promise<T | Response> {
+  const context = {
+    actorId: "system_storage_cleanup",
+    actorName: "Storage cleanup service",
+    requestId: request.headers.get("idempotency-key")?.trim() || randomUUID(),
+    sessionCorrelationId: "machine_storage_cleanup",
+  };
+  return runPersistent(() => handler(context), context);
+}
+
 async function runPersistent<T>(
   handler: () => Promise<T> | T,
   context: {

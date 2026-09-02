@@ -11,6 +11,7 @@ const publicApiPaths = new Set([
   "/api/access/login",
   "/api/access/logout",
   "/api/exact/callback",
+  "/api/storage/cleanup",
 ]);
 
 export function proxy(request: NextRequest) {

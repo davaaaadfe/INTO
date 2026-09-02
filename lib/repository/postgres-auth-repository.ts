@@ -579,7 +579,7 @@ export class PostgresAuthRepository implements AuthRepository {
         INSERT INTO into_auth_sessions (
           id, user_id, token_digest, correlation_id_hash, token_version,
           issued_at, expires_at, revoked_at, last_seen_at
-        ) SELECT $10, user_id, $11, $12, $13, $14, $15, $16, $17 FROM user_update
+        ) SELECT $10, id, $11, $12, $13, $14, $15, $16, $17 FROM user_update
         RETURNING id, user_id
       ), event_insert AS (
         INSERT INTO into_auth_events (

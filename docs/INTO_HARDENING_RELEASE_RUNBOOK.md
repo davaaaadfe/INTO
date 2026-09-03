@@ -11,7 +11,7 @@ This runbook applies to the verified-user, supplier-learning, document-analysis,
 5. Confirm at least two active verified users before changing `AUTH_MODE` from `dual` to `verified_user`.
 6. Confirm managed OCR privacy/region/retention approval before enabling `DOCUMENT_INTELLIGENCE_ENABLED`.
 7. Confirm the approved held-out resolver gate before enabling automatic supplier selection: empirical precision at least 99.5%, 95% lower confidence bound at least 99%, zero policy violations, and at least 500 eligible decisions across 50 suppliers.
-8. Configure a unique `INTO_STORAGE_CLEANUP_TOKEN` of at least 32 characters for the machine scheduler. Invoke `POST /api/storage/cleanup` only with `Authorization: Bearer <token>`; verified browser sessions are intentionally rejected.
+8. Configure a unique `INTO_STORAGE_CLEANUP_TOKEN` of at least 32 characters for the machine scheduler. For Vercel Cron, set `CRON_SECRET` to the exact same value; Vercel invokes the secured cleanup route daily at 03:00 UTC. Manual machine calls use `POST /api/storage/cleanup` with `Authorization: Bearer <token>`; verified browser sessions are intentionally rejected.
 
 ## Staged rollout
 

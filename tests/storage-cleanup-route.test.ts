@@ -5,6 +5,41 @@ import { POST as cleanupStorage } from "../app/api/storage/cleanup/route";
 import { listAuditEvents } from "../lib/repository/invoice-store";
 import { proxy } from "../proxy";
 
+test("the secured cleanup route supports Vercel's scheduled GET request", async () => {
+  const previousMode = process.env.DATABASE_MODE;
+  const previousAuthMode = process.env.AUTH_MODE;
+  const previousToken = process.env.INTO_STORAGE_CLEANUP_TOKEN;
+  process.env.DATABASE_MODE = "memory";
+  process.env.AUTH_MODE = "verified_user";
+  process.env.INTO_STORAGE_CLEANUP_TOKEN = "correct-machine-token-that-is-at-least-32-characters";
+
+  try {
+    const route = (await import("../app/api/storage/cleanup/route")) as Record<
+      string,
+      unknown
+    >;
+    assert.equal(typeof route.GET, "function");
+    const response = await (route.GET as (request: Request) => Promise<Response>)(
+      new Request("http://localhost/api/storage/cleanup", {
+        method: "GET",
+        headers: {
+          authorization:
+            "Bearer correct-machine-token-that-is-at-least-32-characters",
+        },
+      })
+    );
+
+    assert.equal(response.status, 200);
+  } finally {
+    if (previousMode === undefined) delete process.env.DATABASE_MODE;
+    else process.env.DATABASE_MODE = previousMode;
+    if (previousAuthMode === undefined) delete process.env.AUTH_MODE;
+    else process.env.AUTH_MODE = previousAuthMode;
+    if (previousToken === undefined) delete process.env.INTO_STORAGE_CLEANUP_TOKEN;
+    else process.env.INTO_STORAGE_CLEANUP_TOKEN = previousToken;
+  }
+});
+
 test("the API proxy delegates storage cleanup authentication to the machine route", () => {
   const previousAuthMode = process.env.AUTH_MODE;
   process.env.AUTH_MODE = "verified_user";

@@ -39,6 +39,8 @@ DATABASE_MODE=postgres
 DATABASE_URL=your_managed_postgresql_connection_string
 STORAGE_MODE=postgres
 TEMP_INVOICE_RETENTION_DAYS=30
+INTO_STORAGE_CLEANUP_TOKEN=
+CRON_SECRET=
 ```
 
 If managed document analysis is approved, also configure
@@ -56,6 +58,10 @@ custom domain.
 `DATABASE_URL` is required on Vercel because serverless process memory and its
 local filesystem are not durable. The PostgreSQL adapter stores metadata and
 temporary invoice bytes until they are attached to Exact Online.
+
+Set `INTO_STORAGE_CLEANUP_TOKEN` to a random secret of at least 32 characters,
+then set `CRON_SECRET` to the exact same value. Vercel sends `CRON_SECRET` as a
+Bearer token to the daily cleanup job defined in `vercel.json`.
 
 ## 3. Callback URLs
 

@@ -39,3 +39,5 @@ export async function POST(request: Request) {
     });
   }, request);
 }
+
+export const GET = POST;

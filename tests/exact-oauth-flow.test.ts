@@ -82,6 +82,25 @@ function exactResponse(records: unknown[]) {
   return Response.json({ d: { results: records } });
 }
 
+test("production rejects the unauthenticated mock Exact callback", async () => {
+  await withExactEnv(
+    {
+      NODE_ENV: "production",
+      DATABASE_MODE: "memory",
+      EXACT_ONLINE_MODE: "mock",
+    },
+    async () => {
+      disconnectExactConnection();
+      const response = await exactCallback(
+        new Request("https://into.example.test/api/exact/callback?code=mock")
+      );
+
+      assert.equal(response.status, 503);
+      assert.equal(getExactConnection(), null);
+    }
+  );
+});
+
 test("uses Vercel Exact credentials for OAuth, encrypted tokens, refresh, and master-data sync", async () => {
   const authPath = resolve("data/tmp-tests", `exact-flow-auth-${crypto.randomUUID()}.sqlite`);
   await withExactEnv(

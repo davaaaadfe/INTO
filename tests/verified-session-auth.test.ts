@@ -35,11 +35,22 @@ async function repositoryWithActiveUser() {
   return { path, repository };
 }
 
-test("auth mode parsing defaults invalid configuration to legacy_password", () => {
-  assert.equal(parseAuthMode(undefined), "legacy_password");
-  assert.equal(parseAuthMode("dual"), "dual");
-  assert.equal(parseAuthMode("verified_user"), "verified_user");
-  assert.equal(parseAuthMode("verified-user"), "legacy_password");
+test("auth mode parsing fails closed in production", () => {
+  const previousNodeEnv = process.env.NODE_ENV;
+  try {
+    process.env.NODE_ENV = "test";
+    assert.equal(parseAuthMode(undefined), "legacy_password");
+    assert.equal(parseAuthMode("verified-user"), "legacy_password");
+
+    process.env.NODE_ENV = "production";
+    assert.equal(parseAuthMode(undefined), "verified_user");
+    assert.equal(parseAuthMode("verified-user"), "verified_user");
+    assert.equal(parseAuthMode("dual"), "dual");
+    assert.equal(parseAuthMode("verified_user"), "verified_user");
+  } finally {
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+  }
 });
 
 test("unsafe verified flows require configured exact origins and reject forwarded-host spoofing", () => {

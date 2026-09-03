@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { rm, stat } from "node:fs/promises";
 import {
+  cleanupTemporaryInvoiceFiles,
   createUploadedInvoice,
   deleteInvoiceFileAfterBooking,
   getInvoice,
@@ -70,5 +71,46 @@ test("deletes the temporary invoice file only after a successful Exact booking",
       listAuditEvents(invoice.id).some((event) => event.type === "invoice_file_deleted"),
       true
     );
+  });
+});
+
+test("cleanup deletes expired learning-only invoice files without deleting invoice history", async () => {
+  await withTempStorage(async () => {
+    const previousRetention = process.env.TEMP_INVOICE_RETENTION_DAYS;
+    process.env.TEMP_INVOICE_RETENTION_DAYS = "1";
+    try {
+      const stored = storeMockInvoiceFile({
+        fileName: "learned-temp.pdf",
+        fileType: "application/pdf",
+        content: "temporary learned invoice content",
+      });
+      const invoice = createUploadedInvoice({
+        source: "manual_upload",
+        fileName: "learned-temp.pdf",
+        fileType: stored.fileType,
+        fileSize: stored.fileSize,
+        checksum: stored.checksum,
+        storageKey: stored.storageKey,
+      });
+      invoice.status = "Learned";
+      invoice.processingPurpose = "learning_only";
+      invoice.learningState = "saved";
+      invoice.createdAt = "2026-08-01T00:00:00.000Z";
+
+      const result = await cleanupTemporaryInvoiceFiles(
+        new Date("2026-08-03T00:00:00.000Z")
+      );
+
+      assert.equal(result.deleted, 1);
+      assert.equal(await getStoredInvoiceFile(stored.storageKey), null);
+      assert.equal(getInvoice(invoice.id)?.status, "Learned");
+      assert.equal(getInvoice(invoice.id)?.localFileStatus, "deleted_by_cleanup");
+    } finally {
+      if (previousRetention === undefined) {
+        delete process.env.TEMP_INVOICE_RETENTION_DAYS;
+      } else {
+        process.env.TEMP_INVOICE_RETENTION_DAYS = previousRetention;
+      }
+    }
   });
 });

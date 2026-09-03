@@ -557,7 +557,7 @@ async function saveConfiguredStoreSnapshot(
         const committedSnapshot = await withSqliteStoreTransaction(
           async (database) => {
             const repository = SqliteLearningRepository.fromDatabase(database);
-            const artifactsPrepared = await persistAnalysisArtifacts(
+            await persistAnalysisArtifacts(
               store,
               repository
             );
@@ -567,9 +567,7 @@ async function saveConfiguredStoreSnapshot(
               context,
               repository
             );
-            const evidenceSafeSnapshot = artifactsPrepared
-              ? snapshotWithoutDocumentEvidence(store)
-              : store;
+            const evidenceSafeSnapshot = snapshotWithoutDocumentEvidence(store);
             const snapshot = normalized
               ? snapshotWithoutActiveLearning(evidenceSafeSnapshot)
               : evidenceSafeSnapshot;
@@ -598,7 +596,7 @@ async function saveConfiguredStoreSnapshot(
         const committedSnapshot = await withPostgresStoreTransaction(
           async (query) => {
             const repository = PostgresLearningRepository.fromQuery(query);
-            const artifactsPrepared = await persistAnalysisArtifacts(
+            await persistAnalysisArtifacts(
               store,
               repository
             );
@@ -611,9 +609,7 @@ async function saveConfiguredStoreSnapshot(
             if (!identityIsCurrent()) {
               throw new Error("Persistence configuration changed during save.");
             }
-            const evidenceSafeSnapshot = artifactsPrepared
-              ? snapshotWithoutDocumentEvidence(store)
-              : store;
+            const evidenceSafeSnapshot = snapshotWithoutDocumentEvidence(store);
             const snapshot = normalized
               ? snapshotWithoutActiveLearning(evidenceSafeSnapshot)
               : evidenceSafeSnapshot;
@@ -637,11 +633,9 @@ async function saveConfiguredStoreSnapshot(
   // artifacts before the CAS can at worst leave an unreferenced encrypted row;
   // it cannot publish a losing Learn or reset mutation.
   if (!identityIsCurrent()) return;
-  const artifactsPrepared = await persistAnalysisArtifacts(store);
+  await persistAnalysisArtifacts(store);
   if (!identityIsCurrent()) return;
-  const commitSnapshot = artifactsPrepared
-    ? snapshotWithoutDocumentEvidence(store)
-    : store;
+  const commitSnapshot = snapshotWithoutDocumentEvidence(store);
 
   // The revision-protected, already-sanitized snapshot is the mutation commit
   // point. Project learning only after this request wins the CAS, so a losing
@@ -2498,8 +2492,12 @@ export async function cleanupTemporaryInvoiceFiles(
       invoice.status === "Uploaded" &&
       Number.isFinite(createdAt) &&
       createdAt < cutoff;
+    const oldLearningOnly =
+      invoice.processingPurpose === "learning_only" &&
+      Number.isFinite(createdAt) &&
+      createdAt < cutoff;
 
-    if (!bookedAndAttached && !oldInactiveUpload) {
+    if (!bookedAndAttached && !oldInactiveUpload && !oldLearningOnly) {
       continue;
     }
 

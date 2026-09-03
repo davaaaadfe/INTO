@@ -187,11 +187,27 @@ test("the request store survives a local process restart", async () => {
 
   try {
     await hydrateStoreFromPersistence();
+    getStore().invoices[0]!.extractedData.rawText =
+      "sensitive evidence must not enter the runtime snapshot";
+    getStore().invoices[0]!.extractedData.documentAnalysis = {
+      pages: [],
+      fieldCandidates: [],
+      confidence: 1,
+      provider: { name: "test", model: "test-v1" },
+      sourceMode: "plain_text",
+    };
     getStore().auditEvents.unshift({ id: "restart-proof" } as never);
     setExactConnection(createMockExactConnection("company_connection"));
     await syncExactDataNow();
     persistStoreSoon();
     await flushStoreToPersistence();
+
+    const durableSnapshot = await loadSqliteStoreSnapshot(databasePath);
+    assert.equal(durableSnapshot?.invoices[0]?.extractedData.rawText, undefined);
+    assert.equal(
+      durableSnapshot?.invoices[0]?.extractedData.documentAnalysis,
+      undefined
+    );
 
     delete runtime.__INTO_STORE;
     delete runtime.__INTO_STORE_HYDRATED_FOR;

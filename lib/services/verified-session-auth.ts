@@ -330,7 +330,9 @@ export class RequestAuthenticationError extends Error {
 export function parseAuthMode(value = process.env.AUTH_MODE): AuthMode {
   return value === "dual" || value === "verified_user" || value === "legacy_password"
     ? value
-    : "legacy_password";
+    : process.env.NODE_ENV === "production"
+      ? "verified_user"
+      : "legacy_password";
 }
 
 export function digestVerifiedSessionToken(token: string) {

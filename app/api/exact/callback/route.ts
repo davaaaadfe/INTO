@@ -60,6 +60,13 @@ export async function GET(request: Request) {
     }
   }
 
+  if (process.env.NODE_ENV === "production") {
+    return Response.json(
+      { error: "Exact Online integration is not configured." },
+      { status: 503 }
+    );
+  }
+
   return withPublicPersistentStore(async () => {
     const hasCode = Boolean(code);
     const connection = setExactConnection(

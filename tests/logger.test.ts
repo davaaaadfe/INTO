@@ -9,6 +9,9 @@ test("structured logging drops sensitive metadata recursively", () => {
   try {
     logger.error("privacy.boundary", {
       invoiceId: "invoice-safe-id",
+      exactBookingId: "exact-booking-id",
+      accountCode: "supplier-code",
+      accountName: "supplier-name",
       message: "supplier NL00BANK0123456789 failed for secret.pdf",
       fileName: "secret.pdf",
       nested: {
@@ -22,7 +25,13 @@ test("structured logging drops sensitive metadata recursively", () => {
 
   assert.equal(output.length, 1);
   const payload = JSON.parse(output[0] ?? "{}") as Record<string, unknown>;
-  assert.equal(payload.invoiceId, "invoice-safe-id");
+  assert.equal(payload.invoiceId, undefined);
+  assert.equal(payload.exactBookingId, undefined);
+  assert.equal(payload.accountCode, undefined);
+  assert.equal(payload.accountName, undefined);
   assert.deepEqual(payload.nested, { outcome: "failed" });
-  assert.doesNotMatch(output[0] ?? "", /NL00BANK|secret\.pdf|raw-hash/);
+  assert.doesNotMatch(
+    output[0] ?? "",
+    /invoice-safe-id|exact-booking-id|supplier-code|supplier-name|NL00BANK|secret\.pdf|raw-hash/
+  );
 });

@@ -1,6 +1,6 @@
 type LogLevel = "info" | "warn" | "error";
 
-const sensitiveLogKey = /^(?:message|description|error|fileName|sourceFileName|storageKey|contentHash|rawText|oldValue|newValue|evidence|iban|vat|supplierAccountId|supplierId)$/i;
+const sensitiveLogKey = /^(?:message|description|error|fileName|sourceFileName|storageKey|contentHash|rawText|oldValue|newValue|evidence|iban|vat|invoiceId|duplicateInvoiceId|exactBookingId|supplierAccountId|supplierId|accountCode|accountName)$/i;
 const secretLogKey = /(?:cookie|password|secret|token)/i;
 
 function safeLogValue(value: unknown): unknown {

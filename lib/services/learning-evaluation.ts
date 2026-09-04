@@ -34,6 +34,7 @@ export type LearningEvaluationCase = {
   expected: LearningEvaluationResult;
   prediction: LearningEvaluationResult & {
     selectionOutcome: SupplierSelectionOutcome;
+    automaticSelectionEligible?: boolean;
     policyViolation?: boolean;
   };
 };
@@ -149,11 +150,15 @@ export function evaluateLearningCorpus(
     if (outcome === "shadow_recommendation") shadowRecommendations += 1;
     if (outcome === "override") overrides += 1;
     if (item.prediction.policyViolation) policyViolations += 1;
-    if (outcome === "eligible_automatic_selection") {
+    const eligible = item.prediction.automaticSelectionEligible ??
+      outcome === "eligible_automatic_selection";
+    if (eligible) {
       eligibleDecisions += 1;
       if (item.expected.supplierAccountId) {
         eligibleSuppliers.add(item.expected.supplierAccountId);
       }
+    }
+    if (outcome === "eligible_automatic_selection") {
       autoSelections += 1;
       if (
         item.expected.supplierAccountId !== null &&
@@ -212,6 +217,7 @@ export function evaluateLearningCorpus(
       overrides,
       policyViolations,
       precision,
+      coverage: ratio(autoSelections, eligibleDecisions),
       recall: ratio(correctAutoSelections, eligibleDecisions),
       confidenceLowerBound,
       recommendedGatePassed,

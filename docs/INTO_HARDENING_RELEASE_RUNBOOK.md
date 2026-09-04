@@ -5,7 +5,7 @@ This runbook applies to the verified-user, supplier-learning, document-analysis,
 ## Release prerequisites
 
 1. Back up the runtime and normalized auth/learning databases.
-2. Apply the numbered auth and learning migrations before application traffic.
+2. Run `npm run db:migrate:postgres` with the production `DATABASE_URL` available locally before application traffic. Retain its count-free schema-version result with the release evidence.
 3. Run `pnpm test`, `pnpm run typecheck`, `pnpm run lint`, and `pnpm run build` with the release artifact.
 4. Run the repository contract and concurrency suites against both SQLite and a real PostgreSQL service. For the disposable Neon gate, set `INTO_POSTGRES_INTEGRATION_DATABASE_URL` in `.env.local` and run `pnpm run test:postgres`; the test applies idempotent migrations, verifies rollback, and removes its temporary probe table.
 5. Confirm at least two active verified users before changing `AUTH_MODE` from `dual` to `verified_user`.

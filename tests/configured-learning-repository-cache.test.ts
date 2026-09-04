@@ -204,3 +204,48 @@ test("a late old-identity rejection cannot clear a newer cached repository", asy
     }
   );
 });
+
+test("production learning requests verify schema compatibility without running migrations", async () => {
+  const environment = process.env as Record<string, string | undefined>;
+  const previous = {
+    nodeEnv: process.env.NODE_ENV,
+    databaseMode: process.env.DATABASE_MODE,
+    databaseUrl: process.env.DATABASE_URL,
+    learningEnabled: process.env.LEARNING_V2_ENABLED,
+    learningMode: process.env.SUPPLIER_LEARNING_MODE,
+  };
+  const originalMigrate = PostgresLearningRepository.prototype.migrate;
+  const originalSchemaVersion = PostgresLearningRepository.prototype.schemaVersion;
+  let migrationCalls = 0;
+  closeConfiguredLearningRepository();
+  environment.NODE_ENV = "production";
+  process.env.DATABASE_MODE = "postgres";
+  process.env.DATABASE_URL = "postgresql://test:test@production-learning.example/into";
+  process.env.LEARNING_V2_ENABLED = "true";
+  process.env.SUPPLIER_LEARNING_MODE = "observe";
+  PostgresLearningRepository.prototype.migrate = async () => {
+    migrationCalls += 1;
+  };
+  PostgresLearningRepository.prototype.schemaVersion = async () => 0;
+  try {
+    await assert.rejects(
+      configuredLearningRepository(),
+      /learning database schema 0 does not match required schema 3/i
+    );
+    assert.equal(migrationCalls, 0);
+  } finally {
+    closeConfiguredLearningRepository();
+    PostgresLearningRepository.prototype.migrate = originalMigrate;
+    PostgresLearningRepository.prototype.schemaVersion = originalSchemaVersion;
+    for (const [key, value] of Object.entries({
+      NODE_ENV: previous.nodeEnv,
+      DATABASE_MODE: previous.databaseMode,
+      DATABASE_URL: previous.databaseUrl,
+      LEARNING_V2_ENABLED: previous.learningEnabled,
+      SUPPLIER_LEARNING_MODE: previous.learningMode,
+    })) {
+      if (value === undefined) delete environment[key];
+      else environment[key] = value;
+    }
+  }
+});

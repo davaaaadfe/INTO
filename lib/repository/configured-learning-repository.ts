@@ -1,4 +1,5 @@
 import {
+  LEARNING_REPOSITORY_SCHEMA_VERSION,
   SqliteLearningRepository,
 } from "./learning-repository";
 import { PostgresLearningRepository } from "./postgres-learning-repository";
@@ -63,7 +64,7 @@ export async function configuredLearningRepository(): Promise<
   }
 
   closeCurrentRepository();
-  const repository =
+  const repository: ConfiguredLearningRepository =
     mode === "sqlite"
       ? new SqliteLearningRepository(sqliteDatabasePath())
       : new PostgresLearningRepository();
@@ -73,13 +74,23 @@ export async function configuredLearningRepository(): Promise<
   runtime.__INTO_LEARNING_REPOSITORY_LOADING = loading;
   void (async () => {
     try {
-      await repository.migrate();
+      if (process.env.NODE_ENV === "production") {
+        const version = await repository.schemaVersion();
+        if (version !== LEARNING_REPOSITORY_SCHEMA_VERSION) {
+          throw new Error(
+            `Learning database schema ${version} does not match required schema ${LEARNING_REPOSITORY_SCHEMA_VERSION}. Run the release migration command.`
+          );
+        }
+      } else {
+        await repository.migrate();
+      }
       if (runtime.__INTO_LEARNING_REPOSITORY_LOADING === loading) {
         runtime.__INTO_LEARNING_REPOSITORY = repository;
         runtime.__INTO_LEARNING_REPOSITORY_IDENTITY = identity;
       }
       resolve(repository);
     } catch (error) {
+      repository.close?.();
       reject(error);
     } finally {
       if (runtime.__INTO_LEARNING_REPOSITORY_LOADING === loading) {

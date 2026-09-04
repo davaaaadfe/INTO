@@ -17,16 +17,26 @@ a public temporary URL.
 Set these in Vercel Project Settings -> Environment Variables.
 
 ```text
+AUTH_MODE=dual
+INTO_ACCESS_PASSWORD=
+INTO_INVITATION_SECRET=
+INTO_TRUSTED_ORIGINS=https://your-vercel-domain.vercel.app
+
+EXACT_ONLINE_MODE=real
 EXACT_ONLINE_CLIENT_ID=
 EXACT_ONLINE_CLIENT_SECRET=
 EXACT_ONLINE_REDIRECT_URI=https://your-vercel-domain.vercel.app/api/exact/callback
+EXACT_ONLINE_ENABLE_REAL_BOOKING=false
 
 OAUTH_TOKEN_ENCRYPTION_KEY=
 OAUTH_STATE_SECRET=
 LEARNING_ARTIFACT_ENCRYPTION_KEY=
 
 LEARNING_V2_ENABLED=false
+LEARN_WORKFLOW_ENABLED=false
 LEARNING_UI_ENABLED=false
+SUPPLIER_RELIABILITY_ENABLED=false
+SUPPLIER_DRIFT_ENABLED=false
 SUPPLIER_RESOLUTION_V2_ENABLED=false
 LEARNING_SHADOW_MODE=true
 SUPPLIER_LEARNED_AUTO_SELECTION_ENABLED=false
@@ -42,6 +52,23 @@ TEMP_INVOICE_RETENTION_DAYS=30
 INTO_STORAGE_CLEANUP_TOKEN=
 CRON_SECRET=
 ```
+
+Keep `AUTH_MODE=dual` only for the verified-user bootstrap window. After two
+active verified users can sign in and recovery has been rehearsed, change it to
+`verified_user`, redeploy, and retire the shared password. Missing or invalid
+production `AUTH_MODE` fails closed to verified-user authentication.
+
+Before deploying an application version with newer database schemas, back up
+the production database and run this one-shot command with the production
+`DATABASE_URL` available locally:
+
+```text
+npm run db:migrate:postgres
+```
+
+The command migrates and verifies the auth, supplier-learning, runtime-store,
+and temporary-invoice-file schemas. Production requests verify auth and
+learning schema versions but do not run those migrations.
 
 If managed document analysis is approved, also configure
 `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT`,

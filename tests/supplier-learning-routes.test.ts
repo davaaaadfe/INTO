@@ -237,12 +237,14 @@ test("supplier reset replays one request and rejects changed or synthetic target
 test("supplier learning read state stays off until both rollout flags are enabled", async () => {
   const original = {
     NODE_ENV: process.env.NODE_ENV,
+    AUTH_MODE: process.env.AUTH_MODE,
     LEARNING_V2_ENABLED: process.env.LEARNING_V2_ENABLED,
     LEARNING_UI_ENABLED: process.env.LEARNING_UI_ENABLED,
   };
 
   try {
     Reflect.set(process.env, "NODE_ENV", "production");
+    process.env.AUTH_MODE = "legacy_password";
     delete process.env.LEARNING_V2_ENABLED;
     delete process.env.LEARNING_UI_ENABLED;
 

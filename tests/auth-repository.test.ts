@@ -388,7 +388,7 @@ test("legacy inventory coalesces duplicate raw and normalized identities determi
   }]);
 });
 
-test("configured auth storage auto-migrates locally but never in production", async () => {
+test("configured auth storage auto-migrates locally and rejects an unmigrated production schema", async () => {
   const path = databasePath();
   const environment = process.env as Record<string, string | undefined>;
   const previous = {
@@ -408,8 +408,10 @@ test("configured auth storage auto-migrates locally but never in production", as
     closeConfiguredAuthRepository();
     await rm(path, { force: true });
     environment.NODE_ENV = "production";
-    const production = await configuredAuthRepository();
-    assert.equal(await production.schemaVersion(), 0);
+    await assert.rejects(
+      configuredAuthRepository(),
+      /auth database schema 0 does not match required schema 7/i
+    );
   } finally {
     closeConfiguredAuthRepository();
     if (previous.nodeEnv === undefined) delete environment.NODE_ENV;

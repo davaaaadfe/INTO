@@ -167,6 +167,19 @@ async function invoiceFileSqlClient() {
   return sql;
 }
 
+export async function migratePostgresPersistenceSchema() {
+  const sql = await invoiceFileSqlClient();
+  const rows = await sql`
+    SELECT
+      to_regclass('public.into_runtime_store') IS NOT NULL AS runtime_store_ready,
+      to_regclass('public.into_temp_invoice_files') IS NOT NULL AS temporary_invoice_files_ready
+  `;
+  return {
+    runtimeStoreReady: rows[0]?.runtime_store_ready === true,
+    temporaryInvoiceFilesReady: rows[0]?.temporary_invoice_files_ready === true,
+  };
+}
+
 export async function savePostgresTemporaryInvoiceFile(input: {
   storageKey: string;
   originalFileName: string;

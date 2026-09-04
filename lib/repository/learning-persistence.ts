@@ -1662,12 +1662,12 @@ export function snapshotWithoutDocumentEvidence(store: IntoStore): IntoStore {
     delete invoice.extractedData.rawText;
     delete invoice.extractedData.extractionEvidence;
     delete invoice.extractedData.documentAnalysis;
-    for (const version of invoice.extractionHistory) {
+    for (const version of invoice.extractionHistory ?? []) {
       delete version.extractedData.rawText;
       delete version.extractedData.extractionEvidence;
       delete version.extractedData.documentAnalysis;
     }
-    for (const attempt of invoice.bookingAttempts) {
+    for (const attempt of invoice.bookingAttempts ?? []) {
       removeDocumentEvidence(attempt.requestPayload);
       removeDocumentEvidence(attempt.responsePayload);
     }

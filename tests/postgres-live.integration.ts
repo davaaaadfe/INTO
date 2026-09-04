@@ -4,6 +4,7 @@ import test from "node:test";
 import { PostgresAuthRepository } from "../lib/repository/postgres-auth-repository";
 import { PostgresLearningRepository } from "../lib/repository/postgres-learning-repository";
 import { withPostgresStoreTransaction } from "../lib/repository/postgres-store";
+import { migratePostgresReleaseSchema } from "../lib/repository/release-migrations";
 import {
   createUserInvitation,
   verifyUserInvitation,
@@ -62,6 +63,31 @@ test("real PostgreSQL migrations and rollback are transactional", async () => {
       if (previousMode === undefined) delete process.env.DATABASE_MODE;
       else process.env.DATABASE_MODE = previousMode;
     }
+  }
+});
+
+test("the release migration command prepares and verifies every production schema", async () => {
+  const url = process.env.INTO_POSTGRES_INTEGRATION_DATABASE_URL?.trim();
+  assert.ok(url, "INTO_POSTGRES_INTEGRATION_DATABASE_URL is required.");
+  const parsed = new URL(url);
+  assert.match(parsed.hostname, /\.neon\.tech$/);
+
+  const previousUrl = process.env.DATABASE_URL;
+  const previousMode = process.env.DATABASE_MODE;
+  process.env.DATABASE_URL = url;
+  process.env.DATABASE_MODE = "postgres";
+  try {
+    assert.deepEqual(await migratePostgresReleaseSchema(), {
+      authSchemaVersion: 7,
+      learningSchemaVersion: 3,
+      runtimeStoreReady: true,
+      temporaryInvoiceFilesReady: true,
+    });
+  } finally {
+    if (previousUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previousUrl;
+    if (previousMode === undefined) delete process.env.DATABASE_MODE;
+    else process.env.DATABASE_MODE = previousMode;
   }
 });
 

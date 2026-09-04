@@ -36,20 +36,21 @@ async function repositoryWithActiveUser() {
 }
 
 test("auth mode parsing fails closed in production", () => {
+  const environment = process.env as Record<string, string | undefined>;
   const previousNodeEnv = process.env.NODE_ENV;
   try {
-    process.env.NODE_ENV = "test";
+    environment.NODE_ENV = "test";
     assert.equal(parseAuthMode(undefined), "legacy_password");
     assert.equal(parseAuthMode("verified-user"), "legacy_password");
 
-    process.env.NODE_ENV = "production";
+    environment.NODE_ENV = "production";
     assert.equal(parseAuthMode(undefined), "verified_user");
     assert.equal(parseAuthMode("verified-user"), "verified_user");
     assert.equal(parseAuthMode("dual"), "dual");
     assert.equal(parseAuthMode("verified_user"), "verified_user");
   } finally {
-    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
-    else process.env.NODE_ENV = previousNodeEnv;
+    if (previousNodeEnv === undefined) delete environment.NODE_ENV;
+    else environment.NODE_ENV = previousNodeEnv;
   }
 });
 

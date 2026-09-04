@@ -13,6 +13,7 @@
     "start:vercel": "next start",
     "lint": "eslint app components lib db tests",
     "db:generate": "drizzle-kit generate",
+    "db:migrate:postgres": "node --env-file-if-exists=.env.local --experimental-strip-types --loader ./tests/ts-extension-loader.mjs scripts/migrate-postgres.ts",
     "test": "node --experimental-strip-types --loader ./tests/ts-extension-loader.mjs --test tests/*.test.ts",
     "test:postgres": "node --env-file=.env.local --experimental-strip-types --loader ./tests/ts-extension-loader.mjs --test tests/postgres-live.integration.ts",
     "typecheck": "tsc --noEmit"

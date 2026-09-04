@@ -1,4 +1,5 @@
 import {
+  AUTH_SCHEMA_VERSION,
   type AuthRepository,
   SqliteAuthRepository,
 } from "./auth-repository";
@@ -44,13 +45,23 @@ export async function configuredAuthRepository(): Promise<ConfiguredAuthReposito
   runtime.__INTO_AUTH_REPOSITORY_LOADING = taggedLoading;
   void (async () => {
     try {
-      if (shouldAutoMigrate()) await repository.migrate();
+      if (shouldAutoMigrate()) {
+        await repository.migrate();
+      } else {
+        const version = await repository.schemaVersion();
+        if (version !== AUTH_SCHEMA_VERSION) {
+          throw new Error(
+            `Auth database schema ${version} does not match required schema ${AUTH_SCHEMA_VERSION}. Run the release migration command.`
+          );
+        }
+      }
       if (runtime.__INTO_AUTH_REPOSITORY_LOADING === taggedLoading) {
         runtime.__INTO_AUTH_REPOSITORY = repository;
         runtime.__INTO_AUTH_REPOSITORY_IDENTITY = identity;
       }
       resolve(repository);
     } catch (error) {
+      repository.close?.();
       reject(error);
     }
   })();

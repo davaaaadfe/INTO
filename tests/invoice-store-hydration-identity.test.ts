@@ -173,7 +173,10 @@ async function withPostgresHydration(
     let fields: Array<{ name: string; dataTypeID: number }> = [];
     let rows: unknown[][] = [];
 
-    if (sql.startsWith("SELECT payload, revision FROM into_runtime_store")) {
+    if (sql.startsWith("SELECT MAX(version) AS version FROM supplier_learning_schema_migrations")) {
+      fields = [{ name: "version", dataTypeID: 23 }];
+      rows = [["3"]];
+    } else if (sql.startsWith("SELECT payload, revision FROM into_runtime_store")) {
       selectedUrls.push(connectionString);
       await beforeSelect(connectionString);
       const stored = snapshots.get(connectionString);
@@ -597,10 +600,16 @@ test("an empty old database cannot initialize or poison the new PostgreSQL ident
       const learningMigration = sql.startsWith(
         "CREATE TABLE IF NOT EXISTS supplier_learning_schema_migrations"
       );
+      const learningSchemaCheck = sql.startsWith(
+        "SELECT MAX(version) AS version FROM supplier_learning_schema_migrations"
+      );
       const initialSnapshotWrite = sql.startsWith(
         "INSERT INTO into_runtime_store"
       );
-      if (!boundaryCaptured && (learningMigration || initialSnapshotWrite)) {
+      if (
+        !boundaryCaptured &&
+        (learningMigration || learningSchemaCheck || initialSnapshotWrite)
+      ) {
         boundaryCaptured = true;
         saveBoundaryReached();
         await boundaryRelease;

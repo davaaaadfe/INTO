@@ -159,3 +159,165 @@ test("real PostgreSQL invitation verification creates the credential and session
     }
   }
 });
+
+test("real PostgreSQL learning writes replay, replace, and reset concurrently", async () => {
+  const url = process.env.INTO_POSTGRES_INTEGRATION_DATABASE_URL?.trim();
+  assert.ok(url, "INTO_POSTGRES_INTEGRATION_DATABASE_URL is required.");
+  const previousUrl = process.env.DATABASE_URL;
+  const previousMode = process.env.DATABASE_MODE;
+  process.env.DATABASE_URL = url;
+  process.env.DATABASE_MODE = "postgres";
+  const identity = randomUUID();
+  const scope = {
+    companyId: `postgres-live-${identity}`,
+    divisionCode: "test",
+    supplierAccountId: `supplier-${identity}`,
+  };
+  const createdAt = "2026-09-04T07:00:00.000Z";
+  const repository = new PostgresLearningRepository(url);
+
+  try {
+    await repository.migrate();
+    const profile = await repository.ensureProfile({
+      ...scope,
+      fallbackSupplierCode: "LIVE",
+      createdAt,
+    });
+    const example = {
+      ...scope,
+      id: `example-${identity}-a`,
+      generation: profile.generation,
+      invoiceId: `invoice-${identity}-a`,
+      contentHash: `sha256:${identity}`,
+      originalFilename: "sanitized.pdf",
+      originalPrediction: { referenceCode: "ORIGINAL" },
+      finalFields: { referenceCode: "FINAL-A" },
+      bookingLines: [],
+      observationState: { referenceCode: "observed" as const },
+      fingerprint: "layout-live",
+      fingerprintVersion: "layout-v1",
+      formatSignature: "invoice number:<value>",
+      formatCluster: "cluster-live",
+      validationResult: { valid: true },
+      processingPurpose: "learning_only" as const,
+      source: "explicit_learn" as const,
+      trustState: "trusted" as const,
+      trigger: "learn" as const,
+      actorId: "verified-live",
+      sessionCorrelationId: `session-${identity}`,
+      requestId: `learn-${identity}-a`,
+      createdAt,
+    };
+
+    assert.equal((await repository.saveExample(example)).created, true);
+    assert.equal((await repository.saveExample(example)).created, false);
+    assert.equal(
+      (await repository.saveExample({
+        ...example,
+        id: `example-${identity}-b`,
+        invoiceId: `invoice-${identity}-b`,
+        finalFields: { referenceCode: "FINAL-B" },
+        requestId: `learn-${identity}-b`,
+      })).created,
+      true
+    );
+    const examples = await repository.listExamples(scope, true);
+    assert.equal(examples.length, 2);
+    assert.equal(examples.filter((item) => item.active).length, 1);
+    assert.equal(examples.find((item) => item.active)?.id, `example-${identity}-b`);
+    assert.equal((await repository.getProfile(scope))?.learnedCount, 1);
+
+    const pattern = {
+      ...scope,
+      id: `pattern-${identity}`,
+      generation: profile.generation,
+      formatCluster: "cluster-live",
+      field: "referenceCode",
+      patternKey: "field:referenceCode",
+      supportCount: 2,
+      successCount: 1,
+      correctionCount: 1,
+      driftState: "none" as const,
+      modelVersion: "pattern-live-v1",
+      createdAt,
+    };
+    await repository.replaceDerivedPatterns({
+      ...scope,
+      generation: profile.generation,
+      modelVersion: pattern.modelVersion,
+      patterns: [pattern],
+      updatedAt: createdAt,
+    });
+    await repository.replaceDerivedPatterns({
+      ...scope,
+      generation: profile.generation,
+      modelVersion: pattern.modelVersion,
+      patterns: [{ ...pattern, supportCount: 5, successCount: 4 }],
+      updatedAt: "2026-09-04T07:01:00.000Z",
+    });
+    const patterns = await repository.listPatterns(scope);
+    assert.equal(patterns.length, 1);
+    assert.equal(Number(patterns[0]?.support_count), 5);
+    assert.equal(Number(patterns[0]?.success_count), 4);
+
+    const event = {
+      ...scope,
+      id: `event-${identity}-a`,
+      generation: profile.generation,
+      type: "confirmation" as const,
+      idempotencyKey: `confirmation:${identity}`,
+      actorId: "verified-live",
+      sessionCorrelationId: `session-${identity}`,
+      requestId: `confirmation-${identity}`,
+      metadata: { outcome: "confirmed" },
+      createdAt,
+    };
+    await repository.saveEvent(event);
+    await repository.saveEvent({ ...event, id: `event-${identity}-b` });
+    assert.equal(
+      (await repository.listEvents(scope)).filter(
+        (item) => item.idempotencyKey === event.idempotencyKey
+      ).length,
+      1
+    );
+
+    const resets = await Promise.allSettled([
+      repository.resetSupplier({
+        ...scope,
+        expectedGeneration: profile.generation,
+        actorId: "verified-live-a",
+        sessionCorrelationId: `session-${identity}-a`,
+        requestId: `reset-${identity}-a`,
+        createdAt: "2026-09-04T07:02:00.000Z",
+      }),
+      repository.resetSupplier({
+        ...scope,
+        expectedGeneration: profile.generation,
+        actorId: "verified-live-b",
+        sessionCorrelationId: `session-${identity}-b`,
+        requestId: `reset-${identity}-b`,
+        createdAt: "2026-09-04T07:02:00.000Z",
+      }),
+    ]);
+    assert.equal(resets.filter((result) => result.status === "fulfilled").length, 1);
+    assert.equal(resets.filter((result) => result.status === "rejected").length, 1);
+    assert.equal((await repository.getProfile(scope))?.generation, profile.generation + 1);
+    assert.equal((await repository.listExamples(scope)).length, 0);
+    assert.equal((await repository.listPatterns(scope)).length, 0);
+  } finally {
+    try {
+      await withPostgresStoreTransaction(async (query) => {
+        await query("DELETE FROM supplier_learning_events WHERE company_id = $1", [scope.companyId]);
+        await query("DELETE FROM supplier_learning_patterns WHERE company_id = $1", [scope.companyId]);
+        await query("DELETE FROM supplier_learning_examples WHERE company_id = $1", [scope.companyId]);
+        await query("DELETE FROM supplier_identity_aliases WHERE company_id = $1", [scope.companyId]);
+        await query("DELETE FROM supplier_learning_profiles WHERE company_id = $1", [scope.companyId]);
+      });
+    } finally {
+      if (previousUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousUrl;
+      if (previousMode === undefined) delete process.env.DATABASE_MODE;
+      else process.env.DATABASE_MODE = previousMode;
+    }
+  }
+});

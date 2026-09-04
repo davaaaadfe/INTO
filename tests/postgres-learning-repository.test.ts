@@ -313,6 +313,10 @@ test("PostgreSQL example writes supersede changed truth without increasing disti
     }),
     /generation changed/i
   );
+  assert.match(
+    calls.find(({ query }) => query.includes("INSERT INTO supplier_learning_examples"))?.query ?? "",
+    /ON CONFLICT\s*\([\s\S]*content_hash\s*\)\s*WHERE active = true\s*DO NOTHING/i
+  );
 
   const write = calls[0]!;
   assert.match(write.query, /existing AS[\s\S]*FOR UPDATE/i);

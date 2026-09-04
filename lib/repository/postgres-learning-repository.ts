@@ -1001,6 +1001,7 @@ export class PostgresLearningRepository {
             EXISTS (SELECT 1 FROM deactivated)
           )
         ON CONFLICT(company_id, division_code, supplier_account_id, generation, content_hash)
+          WHERE active = true
           DO NOTHING
         RETURNING *
       ), updated AS (

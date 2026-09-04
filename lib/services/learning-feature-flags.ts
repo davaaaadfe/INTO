@@ -85,6 +85,11 @@ export function learningFeatureFlags(
       "SUPPLIER_LEARNED_AUTO_SELECTION_ENABLED",
       !production
     ),
+    supplierLearnedAutoSelectionEvaluationApproved: booleanSetting(
+      environment,
+      "SUPPLIER_LEARNED_AUTO_SELECTION_EVALUATION_APPROVED",
+      false
+    ),
     supplierLearnedAutoSelectionAllowlist: supplierAllowlist(environment),
     supplierLearnedAutoSelectionPercentage: percentageSetting(
       environment,
@@ -114,6 +119,7 @@ export function supplierLearnedAutoSelectionEnabledFor(
 ) {
   const flags = learningFeatureFlags(environment);
   if (!flags.supplierLearnedAutoSelectionEnabled) return false;
+  if (!flags.supplierLearnedAutoSelectionEvaluationApproved) return false;
   if (flags.supplierLearnedAutoSelectionAllowlist.includes(accountId)) return true;
   return supplierRolloutBucket(accountId) <
     flags.supplierLearnedAutoSelectionPercentage;

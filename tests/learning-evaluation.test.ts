@@ -25,10 +25,13 @@ async function executableCases() {
     resolution: process.env.SUPPLIER_RESOLUTION_V2_ENABLED,
     shadow: process.env.LEARNING_SHADOW_MODE,
     mode: process.env.SUPPLIER_LEARNING_MODE,
+    evaluationApproved:
+      process.env.SUPPLIER_LEARNED_AUTO_SELECTION_EVALUATION_APPROVED,
   };
   process.env.SUPPLIER_RESOLUTION_V2_ENABLED = "true";
   process.env.LEARNING_SHADOW_MODE = "false";
   process.env.SUPPLIER_LEARNING_MODE = "apply";
+  process.env.SUPPLIER_LEARNED_AUTO_SELECTION_EVALUATION_APPROVED = "true";
   try {
     const masterData = createMockExactMasterData();
     return await Promise.all(
@@ -54,6 +57,12 @@ async function executableCases() {
       delete process.env.SUPPLIER_LEARNING_MODE;
     } else {
       process.env.SUPPLIER_LEARNING_MODE = previous.mode;
+    }
+    if (previous.evaluationApproved === undefined) {
+      delete process.env.SUPPLIER_LEARNED_AUTO_SELECTION_EVALUATION_APPROVED;
+    } else {
+      process.env.SUPPLIER_LEARNED_AUTO_SELECTION_EVALUATION_APPROVED =
+        previous.evaluationApproved;
     }
   }
 }

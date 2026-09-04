@@ -67,6 +67,11 @@ function routeLearningInvoice() {
 
 test("supplier selection atomically saves the live corrected draft", async () => {
   const invoice = routeLearningInvoice();
+  invoice.purchaseJournal!.supplierResolution.shadowEvaluation = {
+    selectedAccountId: "supplier_noordzee",
+    matchConfidence: 0.97,
+    reviewRequired: false,
+  };
   const correctedData = {
     ...invoice.extractedData,
     expenseDescription: "Corrected before supplier selection",
@@ -97,6 +102,24 @@ test("supplier selection atomically saves the live corrected draft", async () =>
   assert.equal(
     payload.invoice?.purchaseJournal?.supplierResolution.selectedAccountId,
     "supplier_delta_it"
+  );
+  const supplierAudit = getStore().auditEvents.find(
+    (event) => event.invoiceId === invoice.id && event.field === "supplier"
+  );
+  assert.deepEqual(
+    {
+      policyVersion: supplierAudit?.metadata?.shadowPolicyVersion,
+      eligible: supplierAudit?.metadata?.shadowEligible,
+      outcome: supplierAudit?.metadata?.shadowSelectionOutcome,
+      confidence: supplierAudit?.metadata?.shadowMatchConfidence,
+    },
+    {
+      policyVersion: "supplier-resolution-v2.1",
+      eligible: true,
+      outcome: "overridden",
+      confidence: 0.97,
+    },
+    "supplier outcome must use the pre-edit shadow decision and survive audit sanitization"
   );
 });
 
@@ -536,10 +559,30 @@ test("Learn route keeps retries isolated when invoices share a content hash", as
       { params: { invoiceId: invoice.id } }
     );
 
-  assert.equal((await post(firstInvoice, firstPayload)).status, 200);
-  assert.equal((await post(secondInvoice, secondPayload)).status, 200);
-  assert.equal((await post(firstInvoice, firstPayload)).status, 200);
-  assert.equal((await post(secondInvoice, secondPayload)).status, 200);
+  const firstResponse = await post(firstInvoice, firstPayload);
+  assert.equal(
+    firstResponse.status,
+    200,
+    JSON.stringify(await firstResponse.clone().json())
+  );
+  const secondResponse = await post(secondInvoice, secondPayload);
+  assert.equal(
+    secondResponse.status,
+    200,
+    JSON.stringify(await secondResponse.clone().json())
+  );
+  const firstReplayResponse = await post(firstInvoice, firstPayload);
+  assert.equal(
+    firstReplayResponse.status,
+    200,
+    JSON.stringify(await firstReplayResponse.clone().json())
+  );
+  const secondReplayResponse = await post(secondInvoice, secondPayload);
+  assert.equal(
+    secondReplayResponse.status,
+    200,
+    JSON.stringify(await secondReplayResponse.clone().json())
+  );
   assert.equal(
     (await post(secondInvoice, { ...secondPayload, requestKey: "wrong-key" })).status,
     409

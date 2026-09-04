@@ -29,6 +29,8 @@ const originalSupplierResolutionV2Enabled =
   process.env.SUPPLIER_RESOLUTION_V2_ENABLED;
 const originalLearningShadowMode = process.env.LEARNING_SHADOW_MODE;
 const originalSupplierLearningMode = process.env.SUPPLIER_LEARNING_MODE;
+const originalSupplierAutoSelectionEvaluationApproved =
+  process.env.SUPPLIER_LEARNED_AUTO_SELECTION_EVALUATION_APPROVED;
 
 function setEnvironmentValue(key: string, value: string | undefined) {
   if (value === undefined) {
@@ -74,6 +76,7 @@ function withSupplierLearningMode<T>(mode: "off" | "observe" | "apply", action: 
 before(() => {
   process.env.SUPPLIER_RESOLUTION_V2_ENABLED = "true";
   process.env.LEARNING_SHADOW_MODE = "false";
+  process.env.SUPPLIER_LEARNED_AUTO_SELECTION_EVALUATION_APPROVED = "true";
   process.env.SUPPLIER_LEARNING_MODE = "apply";
 });
 
@@ -84,6 +87,10 @@ after(() => {
   );
   setEnvironmentValue("LEARNING_SHADOW_MODE", originalLearningShadowMode);
   setEnvironmentValue("SUPPLIER_LEARNING_MODE", originalSupplierLearningMode);
+  setEnvironmentValue(
+    "SUPPLIER_LEARNED_AUTO_SELECTION_EVALUATION_APPROVED",
+    originalSupplierAutoSelectionEvaluationApproved
+  );
 });
 
 function extractedInvoice(

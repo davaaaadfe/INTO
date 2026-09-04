@@ -2443,12 +2443,7 @@ export function rememberDecisionsFromInvoice(
     invoice.extractedData.rawText ?? ""
   );
   learning.supplierSelections = learning.supplierSelections.filter(
-    (decision) =>
-      decision.supplierIdentity !== supplierIdentity ||
-      Boolean(
-        decision.formatFingerprint &&
-          decision.formatFingerprint !== supplierFormatFingerprint
-      )
+    (decision) => decision.invoiceId !== invoice.id
   );
   learning.supplierSelections.unshift({
     supplierIdentity,

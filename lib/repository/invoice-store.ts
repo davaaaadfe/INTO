@@ -25,6 +25,7 @@ import type {
   SupplierOverviewImportStatus,
   SupplierOverviewRecord,
   SupplierLearningSummary,
+  SupplierResolution,
   UploadedInvoice,
   ValidationError,
 } from "../domain/invoice";
@@ -70,7 +71,10 @@ import {
   supplierReliabilityEvidenceFromLearningStore,
 } from "../services/supplier-learning";
 import { learningFeatureFlags } from "../services/learning-feature-flags";
-import { supplierResolutionShadowTelemetry } from "../services/supplier-resolution-telemetry";
+import {
+  supplierResolutionOutcomeTelemetry,
+  supplierResolutionShadowTelemetry,
+} from "../services/supplier-resolution-telemetry";
 import { createId } from "../utils/id";
 import { logger } from "../utils/logger";
 import {
@@ -1806,6 +1810,7 @@ export function learnInvoice(
   );
   const supplierAccountId =
     draftBooking.supplierResolution.selectedAccountId ??
+    invoice.purchaseJournal?.supplierResolution.selectedAccountId ??
     (isGenerationRelearn
       ? previousExample?.supplierAccountId ??
         invoice.learningMetadata?.supplierAccountId
@@ -2689,7 +2694,10 @@ export function approveInvoiceIntelligence(
 export function selectInvoiceSupplier(
   invoiceId: string,
   accountId: string,
-  expectedRevision?: unknown
+  expectedRevision?: unknown,
+  options: {
+    shadowEvaluation?: SupplierResolution["shadowEvaluation"] | null;
+  } = {}
 ) {
   const invoice = getInvoice(invoiceId);
   const store = getStore();
@@ -2712,8 +2720,16 @@ export function selectInvoiceSupplier(
     return invoice;
   }
 
-  const shadowEvaluation = structuredClone(
-    invoice.purchaseJournal?.supplierResolution.shadowEvaluation
+  const shadowEvaluation =
+    options.shadowEvaluation === null
+      ? undefined
+      : structuredClone(
+          options.shadowEvaluation ??
+            invoice.purchaseJournal?.supplierResolution.shadowEvaluation
+        );
+  const shadowOutcome = supplierResolutionOutcomeTelemetry(
+    shadowEvaluation,
+    account.id
   );
 
   const supplierIdentity = supplierIdentityForInvoice(invoice);
@@ -2731,12 +2747,7 @@ export function selectInvoiceSupplier(
     correctedAt: decidedAt,
   });
   store.learning.supplierSelections = store.learning.supplierSelections.filter(
-    (decision) =>
-      !(
-        decision.supplierIdentity === supplierIdentity &&
-        (!decision.formatFingerprint ||
-          decision.formatFingerprint === supplierFormatFingerprint)
-      )
+    (decision) => decision.invoiceId !== invoiceId
   );
   store.learning.supplierSelections.unshift({
     supplierIdentity,
@@ -2751,6 +2762,9 @@ export function selectInvoiceSupplier(
   if (updatedInvoice) {
     updatedInvoice.revision += 1;
   }
+  if (shadowOutcome) {
+    logger.info("supplier.resolution_shadow_outcome", shadowOutcome);
+  }
   addAuditEvent({
     invoiceId,
     type: "invoice_field_edited",
@@ -2760,7 +2774,14 @@ export function selectInvoiceSupplier(
     metadata: {
       accountCode: account.code,
       accountName: account.name,
-      ...(shadowEvaluation ? { shadowEvaluation } : {}),
+      ...(shadowOutcome
+        ? {
+            shadowPolicyVersion: shadowOutcome.policyVersion,
+            shadowEligible: shadowOutcome.eligible,
+            shadowSelectionOutcome: shadowOutcome.outcome,
+            shadowMatchConfidence: shadowOutcome.matchConfidence,
+          }
+        : {}),
     },
   });
 

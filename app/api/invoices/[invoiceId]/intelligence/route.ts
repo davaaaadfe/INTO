@@ -43,6 +43,9 @@ export async function POST(request: Request, context: RouteContext) {
       };
 
       assertExpectedInvoiceRevision(invoice, payload.expectedRevision);
+      const shadowEvaluation = structuredClone(
+        invoice.purchaseJournal?.supplierResolution.shadowEvaluation ?? null
+      );
       if (payload.action === "selectSupplier" && payload.extractedData) {
         saveInvoiceReview(
           invoiceId,
@@ -54,7 +57,12 @@ export async function POST(request: Request, context: RouteContext) {
 
       const updatedInvoice =
         payload.action === "selectSupplier"
-          ? selectInvoiceSupplier(invoiceId, payload.accountId ?? "", invoice.revision)
+          ? selectInvoiceSupplier(
+              invoiceId,
+              payload.accountId ?? "",
+              invoice.revision,
+              { shadowEvaluation }
+            )
           : approveInvoiceIntelligence(invoiceId, invoice.revision);
 
       if (!updatedInvoice) {

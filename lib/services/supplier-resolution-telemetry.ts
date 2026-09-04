@@ -21,3 +21,21 @@ export function supplierResolutionShadowTelemetry(
     manualReason: shadow.manualReason ?? null,
   };
 }
+
+export function supplierResolutionOutcomeTelemetry(
+  shadow: SupplierResolution["shadowEvaluation"],
+  confirmedAccountId: string
+) {
+  if (!shadow) return null;
+  return {
+    policyVersion: SUPPLIER_RESOLUTION_V2_POLICY.version,
+    eligible: !shadow.reviewRequired,
+    outcome: !shadow.selectedAccountId
+      ? "abstained"
+      : shadow.selectedAccountId === confirmedAccountId
+        ? "confirmed"
+        : "overridden",
+    matchConfidence: shadow.matchConfidence,
+    manualReason: shadow.manualReason ?? null,
+  };
+}

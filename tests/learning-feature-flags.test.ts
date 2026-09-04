@@ -18,6 +18,7 @@ test("learning feature flags are independently disabled by default in production
     supplierDriftEnabled: false,
     supplierResolutionV2Enabled: false,
     supplierLearnedAutoSelectionEnabled: false,
+    supplierLearnedAutoSelectionEvaluationApproved: false,
     supplierLearnedAutoSelectionAllowlist: [],
     supplierLearnedAutoSelectionPercentage: 0,
     learningShadowMode: true,
@@ -36,6 +37,7 @@ test("learning feature flags parse explicit true and false values", () => {
     SUPPLIER_DRIFT_ENABLED: "1",
     SUPPLIER_RESOLUTION_V2_ENABLED: "on",
     SUPPLIER_LEARNED_AUTO_SELECTION_ENABLED: "true",
+    SUPPLIER_LEARNED_AUTO_SELECTION_EVALUATION_APPROVED: "true",
     SUPPLIER_LEARNED_AUTO_SELECTION_ALLOWLIST: " supplier-a, supplier-b, supplier-a ",
     SUPPLIER_LEARNED_AUTO_SELECTION_PERCENTAGE: "25",
     LEARNING_SHADOW_MODE: "false",
@@ -49,6 +51,7 @@ test("learning feature flags parse explicit true and false values", () => {
   assert.equal(flags.supplierDriftEnabled, true);
   assert.equal(flags.supplierResolutionV2Enabled, true);
   assert.equal(flags.supplierLearnedAutoSelectionEnabled, true);
+  assert.equal(flags.supplierLearnedAutoSelectionEvaluationApproved, true);
   assert.deepEqual(flags.supplierLearnedAutoSelectionAllowlist, [
     "supplier-a",
     "supplier-b",
@@ -62,6 +65,7 @@ test("learned auto-selection rollout is supplier-scoped and deterministic", () =
     supplierLearnedAutoSelectionEnabledFor("supplier-a", {
       NODE_ENV: "production",
       SUPPLIER_LEARNED_AUTO_SELECTION_ENABLED: "true",
+      SUPPLIER_LEARNED_AUTO_SELECTION_EVALUATION_APPROVED: "true",
       SUPPLIER_LEARNED_AUTO_SELECTION_ALLOWLIST: "supplier-a",
       SUPPLIER_LEARNED_AUTO_SELECTION_PERCENTAGE: "0",
     }),
@@ -71,6 +75,7 @@ test("learned auto-selection rollout is supplier-scoped and deterministic", () =
     supplierLearnedAutoSelectionEnabledFor("supplier-b", {
       NODE_ENV: "production",
       SUPPLIER_LEARNED_AUTO_SELECTION_ENABLED: "true",
+      SUPPLIER_LEARNED_AUTO_SELECTION_EVALUATION_APPROVED: "true",
       SUPPLIER_LEARNED_AUTO_SELECTION_ALLOWLIST: "supplier-a",
       SUPPLIER_LEARNED_AUTO_SELECTION_PERCENTAGE: "0",
     }),
@@ -80,6 +85,7 @@ test("learned auto-selection rollout is supplier-scoped and deterministic", () =
     supplierLearnedAutoSelectionEnabledFor("supplier-b", {
       NODE_ENV: "production",
       SUPPLIER_LEARNED_AUTO_SELECTION_ENABLED: "true",
+      SUPPLIER_LEARNED_AUTO_SELECTION_EVALUATION_APPROVED: "true",
       SUPPLIER_LEARNED_AUTO_SELECTION_PERCENTAGE: "100",
     }),
     true
@@ -87,6 +93,19 @@ test("learned auto-selection rollout is supplier-scoped and deterministic", () =
   assert.equal(
     supplierLearnedAutoSelectionEnabledFor("supplier-a", {
       SUPPLIER_LEARNED_AUTO_SELECTION_ENABLED: "false",
+      SUPPLIER_LEARNED_AUTO_SELECTION_EVALUATION_APPROVED: "true",
+      SUPPLIER_LEARNED_AUTO_SELECTION_ALLOWLIST: "supplier-a",
+      SUPPLIER_LEARNED_AUTO_SELECTION_PERCENTAGE: "100",
+    }),
+    false
+  );
+});
+
+test("learned auto-selection stays disabled until evaluation approval is explicit", () => {
+  assert.equal(
+    supplierLearnedAutoSelectionEnabledFor("supplier-a", {
+      NODE_ENV: "production",
+      SUPPLIER_LEARNED_AUTO_SELECTION_ENABLED: "true",
       SUPPLIER_LEARNED_AUTO_SELECTION_ALLOWLIST: "supplier-a",
       SUPPLIER_LEARNED_AUTO_SELECTION_PERCENTAGE: "100",
     }),

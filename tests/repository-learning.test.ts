@@ -460,8 +460,13 @@ test("re-read and supplier selection each invalidate an earlier Learn draft", ()
         decision.supplierIdentity === "vat:NL123456789B01" &&
         decision.accountId === "supplier_ambiguous_b"
     ),
-    false,
-    "the explicit choice must replace the prior default for the same layout"
+    true,
+    "the explicit choice must retain prior confirmation evidence"
+  );
+  assert.equal(
+    getStore().learning.supplierSelections[0]?.invoiceId,
+    invoice.id,
+    "the current invoice choice must take precedence without rewriting history"
   );
   assert.throws(
     () =>
@@ -472,6 +477,22 @@ test("re-read and supplier selection each invalidate an earlier Learn draft", ()
         beforeSelectionRevision
       ),
     /revision changed/i
+  );
+  const learned = learnInvoice(
+    invoice.id,
+    selected.extractedData,
+    selected.purchaseJournal!.lines,
+    selected.revision
+  )!;
+  assert.equal(learned.status, "Learned");
+  assert.equal(
+    getStore().learning.supplierSelections.some(
+      (decision) =>
+        decision.invoiceId === "previous-approved-invoice" &&
+        decision.accountId === "supplier_ambiguous_b"
+    ),
+    true,
+    "successful Learn must not erase prior supplier confirmation history"
   );
 });
 

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { supplierResolutionShadowTelemetry } from "../lib/services/supplier-resolution-telemetry";
+import {
+  supplierResolutionOutcomeTelemetry,
+  supplierResolutionShadowTelemetry,
+} from "../lib/services/supplier-resolution-telemetry";
 
 test("shadow resolver telemetry hashes candidate identity and exposes only gate outcomes", () => {
   const detail = supplierResolutionShadowTelemetry({
@@ -40,5 +43,37 @@ test("shadow resolver telemetry is absent when shadow mode did not run", () => {
       reasoning: [],
     }),
     null
+  );
+});
+
+test("confirmed supplier choices record privacy-safe shadow correctness", () => {
+  const confirmed = supplierResolutionOutcomeTelemetry(
+    {
+      selectedAccountId: "supplier-sensitive-id",
+      matchConfidence: 0.97,
+      reviewRequired: false,
+    },
+    "supplier-sensitive-id"
+  );
+  const overridden = supplierResolutionOutcomeTelemetry(
+    {
+      selectedAccountId: "supplier-sensitive-id",
+      matchConfidence: 0.97,
+      reviewRequired: false,
+    },
+    "different-sensitive-id"
+  );
+
+  assert.deepEqual(confirmed, {
+    policyVersion: "supplier-resolution-v2.1",
+    eligible: true,
+    outcome: "confirmed",
+    matchConfidence: 0.97,
+    manualReason: null,
+  });
+  assert.equal(overridden?.outcome, "overridden");
+  assert.doesNotMatch(
+    JSON.stringify([confirmed, overridden]),
+    /supplier-sensitive-id|different-sensitive-id/
   );
 });

@@ -14,6 +14,7 @@ import {
   DUPLICATE_INVOICE_REFERENCE_MESSAGE,
 } from "./invoice-validation";
 import {
+  type ExactBookingPersistenceHooks,
   type ExactDuplicatePurchaseBooking,
   createRealExactPurchaseBooking,
   findRealExactPurchaseBookingDuplicate,
@@ -129,7 +130,8 @@ function duplicateBookingMessage(duplicate: ExactDuplicatePurchaseBooking) {
 export async function bookInvoiceInExact(
   connection: ExactConnection | null,
   invoice: UploadedInvoice,
-  masterData: ExactMasterDataCache | null
+  masterData: ExactMasterDataCache | null,
+  persistence?: ExactBookingPersistenceHooks
 ) {
   assertInvoiceBookingAllowed(invoice);
   if (!connection || connection.status !== "connected") {
@@ -238,7 +240,7 @@ export async function bookInvoiceInExact(
     if (duplicate) {
       throw new Error(duplicateBookingMessage(duplicate));
     }
-    return createRealExactPurchaseBooking(connection, invoice, syncedMasterData);
+    return createRealExactPurchaseBooking(connection, invoice, syncedMasterData, persistence);
   }
 
   const duplicate = findMockExactDuplicatePurchaseBooking(invoice, syncedMasterData);
@@ -250,6 +252,7 @@ export async function bookInvoiceInExact(
     throw new Error("Mock Exact Online rejected the supplier ledger mapping.");
   }
 
+  await persistence?.beforeWrite();
   return {
     exactBookingId: createId("exact_booking"),
     divisionCode: connection.divisionCode,

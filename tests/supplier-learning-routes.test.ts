@@ -640,7 +640,7 @@ test("single booking requires a positive expectedRevision before booking work", 
     new Request(`http://localhost/api/invoices/${invoice.id}/book`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ expectedRevision: 0 }),
+      body: JSON.stringify({ expectedRevision: 0, requestKey: "invalid-revision" }),
     }),
     { params: { invoiceId: invoice.id } }
   );
@@ -705,6 +705,7 @@ test("bulk booking excludes learning-only ready invoices before attempts or conn
             expectedRevision: learnedStatusOnly.revision,
           },
         ],
+        requestKey: "learning-only-exclusion",
       }),
     })
   );

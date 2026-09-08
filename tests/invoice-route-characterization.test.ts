@@ -69,7 +69,7 @@ test("PATCH requires a positive integer expectedRevision", async () => {
 
 test("booking recompute cannot consume the command revision before Exact returns", () => {
   const source = readFileSync(
-    new URL("../app/api/invoices/[invoiceId]/book/route.ts", import.meta.url),
+    new URL("../lib/repository/invoice-booking.ts", import.meta.url),
     "utf8"
   );
 

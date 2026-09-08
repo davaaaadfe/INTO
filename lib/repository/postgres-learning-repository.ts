@@ -971,6 +971,7 @@ export class PostgresLearningRepository {
         SELECT * FROM supplier_learning_examples
         WHERE company_id=$2 AND division_code=$3 AND supplier_account_id=$4
           AND generation=$5 AND content_hash=$8 AND active=true
+          AND EXISTS (SELECT 1 FROM profile_ok)
         FOR UPDATE
       ), same_truth AS (
         SELECT 1 FROM existing
@@ -1069,15 +1070,25 @@ export class PostgresLearningRepository {
       };
     }
     const existing = await this.query(
-      `SELECT * FROM supplier_learning_examples
-       WHERE company_id=$1 AND division_code=$2 AND supplier_account_id=$3
-         AND generation=$4 AND content_hash=$5 AND active=true`,
+      `SELECT examples.* FROM supplier_learning_examples AS examples
+       JOIN supplier_learning_profiles AS profiles
+         ON profiles.company_id=examples.company_id
+        AND profiles.division_code=examples.division_code
+        AND profiles.supplier_account_id=examples.supplier_account_id
+        AND profiles.generation=examples.generation
+       WHERE examples.company_id=$1 AND examples.division_code=$2
+         AND examples.supplier_account_id=$3 AND examples.generation=$4
+         AND examples.content_hash=$5 AND examples.active=true
+         AND examples.final_fields_json=$6::jsonb
+         AND examples.booking_lines_json=$7::jsonb`,
       [
         input.companyId,
         input.divisionCode,
         input.supplierAccountId,
         input.generation,
         input.contentHash,
+        JSON.stringify(input.finalFields),
+        JSON.stringify(input.bookingLines),
       ]
     );
     if (existing[0]) {

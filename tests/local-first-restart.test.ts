@@ -295,9 +295,10 @@ test("uploaded invoice files and audit state survive a local restart", async () 
   });
 });
 
-test("a failed Exact booking remains retryable with its original file after restart", async () => {
+test("a partial Exact booking stays locked with its original file after restart", async () => {
   await withLocalFirstEnvironment(async () => {
     const originalFetch = globalThis.fetch;
+    let posts = 0;
     const bytes = new TextEncoder().encode(
       "%PDF-1.7\nInvoice number: RETRY-2026-001\nTotal: EUR 121.00"
     );
@@ -309,6 +310,7 @@ test("a failed Exact booking remains retryable with its original file after rest
           : input.url
       );
       const method = init?.method ?? "GET";
+      if (method === "POST") posts += 1;
 
       if (method === "GET" && /\/purchaseentry\/PurchaseEntr(?:y|ies)/i.test(url.pathname)) {
         return Response.json({ d: { results: [] } });
@@ -391,19 +393,22 @@ test("a failed Exact booking remains retryable with its original file after rest
         new Request(`http://localhost/api/invoices/${invoice.id}/book`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ expectedRevision: invoice.revision }),
+          body: JSON.stringify({ expectedRevision: invoice.revision, requestKey: "partial-booking" }),
         }),
         { params: { invoiceId: invoice.id } }
       );
       assert.equal(firstBookingResponse.status, 409);
       const firstFailure = (await firstBookingResponse.json()) as {
         error: string;
-        invoice: UploadedInvoice;
+        currentInvoice: UploadedInvoice;
       };
-      assert.match(firstFailure.error, /Attachment rejected by Exact/);
-      assert.equal(firstFailure.invoice.status, "Booking Failed");
-      assert.equal(firstFailure.invoice.localFileStatus, "available");
-      assert.equal(firstFailure.invoice.bookingAttempts.length, 1);
+      assert.match(firstFailure.error, /reconciliation/i);
+      assert.doesNotMatch(firstFailure.error, /Attachment rejected by Exact/);
+      assert.equal(posts, 2);
+      assert.equal(firstFailure.currentInvoice.bookingOperation?.state, "uncertain");
+      assert.equal(firstFailure.currentInvoice.bookingOperation?.exactDocumentId, "restart-document-id");
+      assert.equal(firstFailure.currentInvoice.localFileStatus, "available");
+      assert.equal(firstFailure.currentInvoice.bookingAttempts.length, 1);
 
       closeSqliteStore();
       clearRuntimeStore();
@@ -415,11 +420,11 @@ test("a failed Exact booking remains retryable with its original file after rest
         (candidate) => candidate.id === invoice.id
       );
       assert.ok(retained);
-      assert.equal(retained.status, "Booking Failed");
-      assert.equal(retained.exactBookingStatus, "failed");
+      assert.equal(retained.bookingOperation?.state, "uncertain");
+      assert.equal(retained.exactBookingStatus, "reconciliation_required");
       assert.equal(retained.localFileStatus, "available");
       assert.equal(retained.bookingAttempts.length, 1);
-      assert.match(retained.bookingAttempts[0]?.errorMessage ?? "", /Attachment rejected/);
+      assert.match(retained.bookingAttempts[0]?.errorMessage ?? "", /reconciliation/i);
 
       const auditResponse = await getInvoiceAudit(
         new Request(`http://localhost/api/invoices/${retained.id}/audit`),
@@ -427,7 +432,7 @@ test("a failed Exact booking remains retryable with its original file after rest
       );
       const audit = (await auditResponse.json()) as { events: AuditEvent[] };
       assert.equal(
-        audit.events.some((event) => event.type === "invoice_booking_failed"),
+        audit.events.some((event) => event.type === "invoice_booking_uncertain"),
         true
       );
 
@@ -445,19 +450,20 @@ test("a failed Exact booking remains retryable with its original file after rest
         new Request(`http://localhost/api/invoices/${retained.id}/book`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ expectedRevision: retained.revision }),
+          body: JSON.stringify({ expectedRevision: retained.revision, requestKey: "different-retry-key" }),
         }),
         { params: { invoiceId: retained.id } }
       );
       assert.equal(retryResponse.status, 409);
       const retried = (await retryResponse.json()) as {
         error: string;
-        invoice: UploadedInvoice;
+        currentInvoice: UploadedInvoice;
       };
-      assert.match(retried.error, /Attachment rejected by Exact/);
-      assert.equal(retried.invoice.status, "Booking Failed");
-      assert.equal(retried.invoice.localFileStatus, "available");
-      assert.equal(retried.invoice.bookingAttempts.length, 2);
+      assert.match(retried.error, /reconciliation/i);
+      assert.equal(posts, 2, "restart and a different request key must never repeat any Exact POST");
+      assert.equal(retried.currentInvoice.bookingOperation?.state, "uncertain");
+      assert.equal(retried.currentInvoice.localFileStatus, "available");
+      assert.equal(retried.currentInvoice.bookingAttempts.length, 1);
 
       const retryFileResponse = await getInvoiceFile(new Request(fileUrl), {
         params: { invoiceId: retained.id },

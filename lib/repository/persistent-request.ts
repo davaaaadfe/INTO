@@ -2,15 +2,45 @@ import {
   createStoreRequestCheckpoint,
   flushStoreToPersistence,
   hydrateStoreForPersistentRequest,
+  persistStoreSoon,
   restoreStoreRequestCheckpoint,
   setLearningPersistenceContext,
 } from "./invoice-store";
 import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { databaseMode, databasePersistenceIdentity } from "./sqlite-store";
 import { withVerifiedPersistentRequest, type RequestPrincipal } from "../services/verified-session-auth";
 import { logger } from "../utils/logger";
 import { withRequestPrincipalContext } from "./request-principal-context";
 
 export { withRequestPrincipalContext } from "./request-principal-context";
+
+const checkpoints = new AsyncLocalStorage<{ checkpoint: ReturnType<typeof createStoreRequestCheckpoint> }>();
+
+export function restorePersistentStore() {
+  const state = checkpoints.getStore();
+  if (!state) throw new Error("A persistent request is required.");
+  restoreStoreRequestCheckpoint(state.checkpoint);
+}
+
+/** Commit a durable boundary before an irreversible external action. */
+export async function commitPersistentStore() {
+  const state = checkpoints.getStore();
+  if (!state) {
+    throw new Error("Booking requires a durable persistent request.");
+  }
+  const identity = databasePersistenceIdentity();
+  try {
+    if (databaseMode() === "memory") throw new Error("Booking requires durable storage.");
+    persistStoreSoon();
+    await flushStoreToPersistence();
+    if (databasePersistenceIdentity() !== identity) throw new Error("Persistence configuration changed.");
+    state.checkpoint = createStoreRequestCheckpoint();
+  } catch (error) {
+    restoreStoreRequestCheckpoint(state.checkpoint);
+    throw error;
+  }
+}
 
 const runtime = globalThis as typeof globalThis & {
   __INTO_PERSISTENT_REQUEST_TAIL?: Promise<void>;
@@ -90,15 +120,17 @@ async function runPersistent<T>(
   setLearningPersistenceContext(context);
   try {
     await hydrateStoreForPersistentRequest();
-    const checkpoint = createStoreRequestCheckpoint();
-    try {
-      const result = await handler();
-      await flushStoreToPersistence(context);
-      return result;
-    } catch (error) {
-      restoreStoreRequestCheckpoint(checkpoint);
-      throw error;
-    }
+    const state = { checkpoint: createStoreRequestCheckpoint() };
+    return await checkpoints.run(state, async () => {
+      try {
+        const result = await handler();
+        await flushStoreToPersistence(context);
+        return result;
+      } catch (error) {
+        restoreStoreRequestCheckpoint(state.checkpoint);
+        throw error;
+      }
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     const learningStorageIsNotConfigured = message.includes(

@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import {
   assertInvoiceBookingAllowed,
+  assertInvoiceNotBooking,
+  hasPendingBooking,
   emptyExtractedInvoiceData,
 } from "../domain/invoice";
 import type {
@@ -918,7 +920,7 @@ export function createStoreRequestCheckpoint() {
 export function restoreStoreRequestCheckpoint(
   checkpoint: ReturnType<typeof createStoreRequestCheckpoint>
 ) {
-  globalStore.__INTO_STORE = checkpoint.store;
+  globalStore.__INTO_STORE = structuredClone(checkpoint.store);
   globalStore.__INTO_STORE_DIRTY = checkpoint.dirty;
   globalStore.__INTO_STORE_DIRTY_REVISION = checkpoint.dirtyRevision;
   globalStore.__INTO_STORE_PERSISTED_DIRTY_REVISION =
@@ -1349,6 +1351,7 @@ function recomputeInvoiceInStore(
     return null;
   }
 
+  if (hasPendingBooking(invoice)) return invoice;
   const previousLearnInputs = recomputedLearnInputs(invoice);
   const previousShadowEvaluation = canonicalJson(
     invoice.purchaseJournal?.supplierResolution.shadowEvaluation ?? null
@@ -1513,6 +1516,7 @@ export function updateInvoiceExtraction(
   if (invoice.processingPurpose === "learning_only" || invoice.status === "Learned") {
     throw new Error("Learned invoices cannot be reprocessed.");
   }
+  assertInvoiceNotBooking(invoice);
 
   if (!invoice.extractionHistory.some((version) => version.reason === "initial")) {
     invoice.extractionHistory.push({
@@ -1561,6 +1565,7 @@ export function saveInvoiceReview(
   if (!invoice) {
     return null;
   }
+  assertInvoiceNotBooking(invoice);
   if (options.expectedRevision !== undefined) {
     assertExpectedInvoiceRevision(invoice, options.expectedRevision);
   }
@@ -1708,6 +1713,7 @@ export function learnInvoice(
   if (!invoice) {
     return null;
   }
+  assertInvoiceNotBooking(invoice);
   const activeProfile = invoice.learningMetadata
     ? store.learning.supplierProfiles.find(
         (item) =>
@@ -2190,6 +2196,7 @@ export function applyValidation(
     return null;
   }
 
+  assertInvoiceNotBooking(invoice);
   invoice.validationErrors = validationErrors;
   return recomputeInvoiceState(invoiceId);
 }
@@ -2197,6 +2204,7 @@ export function applyValidation(
 export function markInvoiceReading(invoiceId: string) {
   const invoice = getInvoice(invoiceId);
   if (invoice) {
+    assertInvoiceNotBooking(invoice);
     invoice.status = "Reading";
     invoice.updatedAt = now();
   }
@@ -2209,6 +2217,7 @@ export function markInvoiceFileError(invoiceId: string, message: string) {
     return null;
   }
 
+  assertInvoiceNotBooking(invoice);
   invoice.status = "Validation Failed";
   invoice.purchaseJournal = null;
   invoice.validationErrors = [
@@ -2233,6 +2242,7 @@ export function markInvoicePossibleDuplicate(
     return null;
   }
 
+  assertInvoiceNotBooking(invoice);
   invoice.status = "Possible Duplicate";
   invoice.duplicateDetection = detection;
   invoice.validationErrors = uniqueValidationErrors([
@@ -2278,6 +2288,7 @@ export function replaceInvoiceExtractionFromReread(
   if (!invoice) {
     return null;
   }
+  assertInvoiceNotBooking(invoice);
   if (expectedRevision !== undefined) {
     assertExpectedInvoiceRevision(invoice, expectedRevision);
   }
@@ -2330,6 +2341,7 @@ export async function resolveDuplicateDecision(input: {
 }) {
   const targetId = input.invoiceId ?? input.duplicateInvoiceId;
   const invoice = targetId ? getInvoice(targetId) : null;
+  if (invoice) assertInvoiceNotBooking(invoice);
   if (invoice && input.expectedRevision !== undefined) {
     assertExpectedInvoiceRevision(invoice, input.expectedRevision);
   }
@@ -2487,6 +2499,7 @@ export async function cleanupTemporaryInvoiceFiles(
     await pruneExpiredLearningArtifacts(referenceDate);
 
   for (const invoice of getStore().invoices) {
+    if (hasPendingBooking(invoice)) continue;
     if (!invoice.storageKey || invoice.localFileStatus !== "available") {
       continue;
     }
@@ -2602,6 +2615,7 @@ export function markInvoiceNeedsReview(
   if (invoice.processingPurpose === "learning_only" || invoice.status === "Learned") {
     throw new Error("Learned invoices cannot be returned to review.");
   }
+  assertInvoiceNotBooking(invoice);
 
   const previousStatus = invoice.status;
   invoice.status = "Validation Failed";
@@ -2651,6 +2665,7 @@ export function approveInvoiceIntelligence(
   if (invoice.processingPurpose === "learning_only" || invoice.status === "Learned") {
     throw new Error("Learned invoices cannot be approved for booking.");
   }
+  assertInvoiceNotBooking(invoice);
 
   invoice.intelligenceApprovedAt = now();
   const updatedInvoice = recomputeInvoiceState(invoiceId, { incrementRevision: false });
@@ -2716,6 +2731,7 @@ export function selectInvoiceSupplier(
   if (invoice.processingPurpose === "learning_only" || invoice.status === "Learned") {
     throw new Error("Learned invoices cannot change supplier.");
   }
+  assertInvoiceNotBooking(invoice);
   if (invoice.purchaseJournal?.supplierResolution.selectedAccountId === accountId) {
     return invoice;
   }

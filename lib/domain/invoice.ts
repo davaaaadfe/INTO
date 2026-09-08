@@ -49,6 +49,8 @@ export type AuditEventType =
   | "invoice_approved"
   | "invoice_booked"
   | "invoice_booking_failed"
+  | "invoice_booking_reserved"
+  | "invoice_booking_uncertain"
   | "invoice_file_deleted"
   | "invoice_file_cleanup"
   | "storage_cleanup_completed"
@@ -551,6 +553,20 @@ export type UploadedInvoice = {
   lastError?: string;
   exactBookingId?: string;
   exactBookingStatus?: "not_booked" | "booked" | "failed" | string;
+  bookingOperation?: {
+    id: string;
+    state: "reserved" | "uncertain" | "completed";
+    requestKeyHash: string;
+    inputRevision: number;
+    actorId: string;
+    sessionCorrelationId: string;
+    requestId: string;
+    createdAt: string;
+    updatedAt: string;
+    exactDocumentId?: string;
+    exactAttachmentId?: string;
+    exactBookingId?: string;
+  };
   intelligenceApprovedAt?: string;
   duplicateDetection?: DuplicateDetectionResult;
   duplicateResolutionDecision?: DuplicateResolutionDecision;
@@ -820,10 +836,21 @@ export type SupplierLearningSummary = SupplierLearningProfile & {
 };
 
 export function assertInvoiceBookingAllowed(
-  invoice: Pick<UploadedInvoice, "processingPurpose" | "status">
+  invoice: Pick<UploadedInvoice, "processingPurpose" | "status" | "bookingOperation">
 ) {
   if (invoice.processingPurpose === "learning_only" || invoice.status === "Learned") {
     throw new Error(LEARNING_ONLY_BOOKING_MESSAGE);
+  }
+  assertInvoiceNotBooking(invoice);
+}
+
+export function hasPendingBooking(invoice: Pick<UploadedInvoice, "bookingOperation">) {
+  return invoice.bookingOperation?.state === "reserved" || invoice.bookingOperation?.state === "uncertain";
+}
+
+export function assertInvoiceNotBooking(invoice: Pick<UploadedInvoice, "bookingOperation">) {
+  if (hasPendingBooking(invoice)) {
+    throw new Error("Booking is in progress or requires reconciliation. Do not submit it again.");
   }
 }
 

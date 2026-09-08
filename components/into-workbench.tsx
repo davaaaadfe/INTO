@@ -18,6 +18,7 @@ import {
   UNSUPPORTED_VAT_CODE_WARNING,
   intoPurchaseVatCodeOrFallback,
   isIntoPurchaseVatCode,
+  hasPendingBooking,
 } from "../lib/domain/invoice";
 import type {
   AuditEvent,
@@ -1373,6 +1374,7 @@ export function IntoWorkbench() {
     return previewFileProbe.status;
   }, [previewFileProbe, selectedInvoice]);
   const selectedPurchaseJournal = selectedInvoice?.purchaseJournal ?? null;
+  const selectedBookingPending = Boolean(selectedInvoice && hasPendingBooking(selectedInvoice));
   const selectedInvoiceIsPdf = Boolean(
     selectedInvoice &&
       (selectedInvoice.fileType === "application/pdf" ||
@@ -3176,7 +3178,7 @@ export function IntoWorkbench() {
       const response = await fetch(`/api/invoices/${invoiceId}/book`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ expectedRevision: invoice.revision }),
+        body: JSON.stringify({ expectedRevision: invoice.revision, requestKey: `book:${invoice.id}:${invoice.revision}` }),
       });
       const data = await readApiJson(response);
 
@@ -3194,7 +3196,7 @@ export function IntoWorkbench() {
         throw new Error(data.error ?? "Booking failed.");
       }
 
-      setMessage("Invoice booked into mock Exact Online.");
+      setMessage("Invoice booked into Exact Online.");
       flashButton(key, "success");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Booking failed.");
@@ -3223,6 +3225,7 @@ export function IntoWorkbench() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          requestKey: crypto.randomUUID(),
           items: state.invoices
             .filter((invoice) => invoice.status === "Ready to Book")
             .map((invoice) => ({
@@ -3473,6 +3476,7 @@ export function IntoWorkbench() {
   }
 
   function saveChangesDisabledReason() {
+    if (selectedBookingPending) return "Booking is in progress or requires reconciliation. Do not submit it again.";
     const busyReason = busyDisabledReason("save");
     if (busyReason) {
       return busyReason;
@@ -3486,6 +3490,7 @@ export function IntoWorkbench() {
   }
 
   function learnDisabledReason(invoice: UploadedInvoice) {
+    if (hasPendingBooking(invoice)) return "Booking is in progress or requires reconciliation. Do not submit it again.";
     const busyReason = busyDisabledReason("learn");
     if (busyReason) {
       return busyReason;
@@ -3539,6 +3544,7 @@ export function IntoWorkbench() {
   }
 
   function reReadDisabledReason(invoice: UploadedInvoice) {
+    if (hasPendingBooking(invoice)) return "Booking is in progress or requires reconciliation. Do not submit it again.";
     const actionKey = `reread-${invoice.id}`;
     const busyReason = busyDisabledReason(actionKey);
     if (busyReason) {
@@ -3561,6 +3567,7 @@ export function IntoWorkbench() {
   }
 
   function markReviewedDisabledReason(invoice: UploadedInvoice) {
+    if (hasPendingBooking(invoice)) return "Booking is in progress or requires reconciliation. Do not submit it again.";
     const busyReason = busyDisabledReason("approve-intelligence");
     if (busyReason) {
       return busyReason;
@@ -3605,6 +3612,7 @@ export function IntoWorkbench() {
   }
 
   function bookingLineDisabledReason(invoice: UploadedInvoice) {
+    if (hasPendingBooking(invoice)) return "Booking is in progress or requires reconciliation. Do not submit it again.";
     if (
       selectedInvoice?.id === invoice.id &&
       selectedBookingLineDisabledReason
@@ -3622,6 +3630,7 @@ export function IntoWorkbench() {
   }
 
   function bookDisabledReason(invoice: UploadedInvoice) {
+    if (hasPendingBooking(invoice)) return "Booking is in progress or requires reconciliation. Do not submit it again.";
     if (requiredBookingIssuesForInvoice(invoice).length > 0) {
       return REQUIRED_BOOKING_DISABLED_REASON;
     }
@@ -3665,6 +3674,7 @@ export function IntoWorkbench() {
   }
 
   function needsReviewDisabledReason(invoice: UploadedInvoice) {
+    if (hasPendingBooking(invoice)) return "Booking is in progress or requires reconciliation. Do not submit it again.";
     const actionKey = `needs-review-${invoice.id}`;
     const busyReason = busyDisabledReason(actionKey);
     if (busyReason) {
@@ -5057,6 +5067,13 @@ export function IntoWorkbench() {
             </section>
 
             <aside className="min-w-0 overflow-hidden rounded-xl border border-stone-200 bg-white shadow-sm">
+              {selectedBookingPending ? (
+                <p role="status" className="p-4 text-sm font-semibold text-amber-900">
+                  Booking is in progress or requires reconciliation. Do not submit it again. Check Exact with your administrator.
+                </p>
+              ) : null}
+              <fieldset disabled={selectedBookingPending} className="min-w-0">
+                <legend className="sr-only">Invoice review actions</legend>
               <div className="border-b border-stone-200 bg-white/95 p-3 shadow-sm">
                 <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
                   <div>
@@ -5864,6 +5881,7 @@ export function IntoWorkbench() {
                   <p className="text-sm text-rose-700">{selectedInvoice.lastError}</p>
                 ) : null}
               </div>
+              </fieldset>
             </aside>
           </section>
         ) : (

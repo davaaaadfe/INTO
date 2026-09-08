@@ -87,6 +87,15 @@ type ExactBookingResult = {
   bookedAt: string;
 };
 
+export type ExactBookingPersistenceHooks = {
+  beforeWrite(): Promise<void>;
+  recordProgress(progress: {
+    exactDocumentId?: string;
+    exactAttachmentId?: string;
+    exactBookingId?: string;
+  }): Promise<void>;
+};
+
 export type ExactDuplicatePurchaseBooking = {
   exactBookingId: string;
   yourRef: string;
@@ -1055,13 +1064,17 @@ export async function syncRealExactMasterData(
 export async function createRealExactPurchaseBooking(
   connection: ExactConnection,
   invoice: UploadedInvoice,
-  masterData: ExactMasterDataCache
+  masterData: ExactMasterDataCache,
+  persistence?: ExactBookingPersistenceHooks
 ): Promise<ExactBookingResult> {
   assertInvoiceBookingAllowed(invoice);
   if (!isRealExactBookingEnabled()) {
     throw new Error(
       "Real Exact Online booking is disabled. Set EXACT_ONLINE_ENABLE_REAL_BOOKING=true only after validating the purchase-entry payload with your Exact Online division."
     );
+  }
+  if (!persistence) {
+    throw new Error("Durable booking persistence is required before writing to Exact Online.");
   }
 
   const booking = invoice.purchaseJournal;
@@ -1129,6 +1142,7 @@ export async function createRealExactPurchaseBooking(
     );
   }
 
+  await persistence.beforeWrite();
   const documentResponse = await requestExactJson<Record<string, unknown>>(
     connection,
     `/api/v1/${divisionCode}/documents/Documents`,
@@ -1151,6 +1165,7 @@ export async function createRealExactPurchaseBooking(
   if (!exactDocumentId) {
     throw new Error("Exact Online created no usable document reference.");
   }
+  await persistence.recordProgress({ exactDocumentId });
 
   const attachmentResponse = await requestExactJson<Record<string, unknown>>(
     connection,
@@ -1167,6 +1182,7 @@ export async function createRealExactPurchaseBooking(
   const exactAttachmentId =
     responseValue(attachmentResponse, ["ID", "AttachmentID"]) ||
     `${exactDocumentId}/${invoice.fileName}`;
+  await persistence.recordProgress({ exactAttachmentId });
 
   const purchaseEntryResponse = await requestExactJson<Record<string, unknown>>(
     connection,
@@ -1198,6 +1214,7 @@ export async function createRealExactPurchaseBooking(
   if (!exactBookingId) {
     throw new Error("Exact Online created no usable purchase entry reference.");
   }
+  await persistence.recordProgress({ exactBookingId });
 
   return {
     exactBookingId,

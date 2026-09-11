@@ -1,7 +1,5 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { rm } from "node:fs/promises";
-import { resolve } from "node:path";
 import { GET as exactCallback } from "../app/api/exact/callback/route";
 import { POST as exactConnect } from "../app/api/exact/connect/route";
 import { GET as exactStatus } from "../app/api/exact/status/route";
@@ -16,22 +14,21 @@ import {
 } from "../lib/repository/invoice-store";
 import {
   createRealExactAuthorizationUrl,
+  createExactOAuthState,
   exactIntegrationMode,
+  reauthorizeExactOAuthState,
   verifyExactOAuthState,
 } from "../lib/services/exact-api-client";
-import { decryptExactSecret } from "../lib/services/exact-token-crypto";
-import { SqliteAuthRepository } from "../lib/repository/auth-repository";
 import {
-  closeConfiguredAuthRepository,
-  setConfiguredAuthRepositoryFactoryForTest,
-} from "../lib/repository/configured-auth-repository";
+  decryptExactSecret,
+  encodeExactStatePayload,
+  signExactState,
+} from "../lib/services/exact-token-crypto";
 import {
-  createUserInvitation,
-  issueVerifiedSession,
-  resolveVerifiedPrincipal,
-  revokeVerifiedSession,
-  verifyUserInvitation,
-} from "../lib/services/verified-session-auth";
+  accessSessionCorrelationId,
+  createIntoAccessSession,
+  INTO_ACCESS_COOKIE_NAME,
+} from "../lib/services/into-access-auth";
 
 const envKeys = [
   "NODE_ENV",
@@ -44,7 +41,7 @@ const envKeys = [
   "OAUTH_TOKEN_ENCRYPTION_KEY",
   "OAUTH_STATE_SECRET",
   "AUTH_MODE",
-  "INTO_INVITATION_SECRET",
+  "INTO_ACCESS_PASSWORD",
   "DATABASE_MODE",
   "LOCAL_DATABASE_PATH",
 ];
@@ -82,6 +79,24 @@ function exactResponse(records: unknown[]) {
   return Response.json({ d: { results: records } });
 }
 
+function sharedPrincipal(token: string) {
+  return {
+    actorId: "shared_user",
+    actorName: "Shared access",
+    accessLevel: "legacy_shared",
+    verificationState: "legacy",
+    sessionCorrelationId: accessSessionCorrelationId(token),
+    requestId: "shared-exact-request",
+  } as const;
+}
+
+function sharedHeaders(token: string) {
+  return {
+    cookie: `${INTO_ACCESS_COOKIE_NAME}=${token}`,
+    "idempotency-key": "shared-exact-request",
+  };
+}
+
 test("production rejects the unauthenticated mock Exact callback", async () => {
   await withExactEnv(
     {
@@ -102,7 +117,6 @@ test("production rejects the unauthenticated mock Exact callback", async () => {
 });
 
 test("uses Vercel Exact credentials for OAuth, encrypted tokens, refresh, and master-data sync", async () => {
-  const authPath = resolve("data/tmp-tests", `exact-flow-auth-${crypto.randomUUID()}.sqlite`);
   await withExactEnv(
     {
       NODE_ENV: "production",
@@ -113,16 +127,13 @@ test("uses Vercel Exact credentials for OAuth, encrypted tokens, refresh, and ma
       EXACT_ONLINE_REDIRECT_URI:
         " https://into.example.com/api/exact/callback ",
       OAUTH_TOKEN_ENCRYPTION_KEY: "test-token-encryption-key",
-      AUTH_MODE: "dual",
-      INTO_INVITATION_SECRET: "test-only-invitation-secret-at-least-32-bytes",
-      DATABASE_MODE: "sqlite",
-      LOCAL_DATABASE_PATH: authPath,
+      AUTH_MODE: "verified_user",
+      INTO_ACCESS_PASSWORD: "test-only-shared-password",
+      DATABASE_MODE: "memory",
     },
     async () => {
-      const authRepository = new SqliteAuthRepository(authPath);
-      await authRepository.migrate();
-      setConfiguredAuthRepositoryFactoryForTest(() => authRepository);
-      closeConfiguredAuthRepository();
+      const token = createIntoAccessSession();
+      const initiatingPrincipal = sharedPrincipal(token);
       const originalFetch = globalThis.fetch;
       const tokenRequests: URLSearchParams[] = [];
       const exactApiRequests: string[] = [];
@@ -231,7 +242,7 @@ test("uses Vercel Exact credentials for OAuth, encrypted tokens, refresh, and ma
 
         const connectResponse = await exactConnect(new Request("http://localhost/api/exact/connect", {
           method: "POST",
-          headers: { origin: "http://localhost" },
+          headers: { origin: "http://localhost", ...sharedHeaders(token) },
         }));
         assert.equal(connectResponse.status, 200);
         const authorization = await connectResponse.json();
@@ -250,40 +261,15 @@ test("uses Vercel Exact credentials for OAuth, encrypted tokens, refresh, and ma
         );
         assert.doesNotMatch(authorization.authorizationUrl, /exact-client-secret/);
 
-        const invitation = await createUserInvitation(authRepository, {
-          actorId: "bootstrap", actorName: "Bootstrap", accessLevel: "verified_user",
-          verificationState: "verified", sessionCorrelationId: "bootstrap", requestId: "invite-exact",
-        }, {
-          email: "verified-exact@example.test", name: "Verified Exact Actor", requestKey: "exact-flow",
-        }, "https://into.example.com");
-        const verified = await verifyUserInvitation(authRepository, {
-          token: new URL(invitation.verificationUrl).searchParams.get("token")!,
-          displayName: "Verified Exact Actor", password: "correct horse battery staple", requestId: "verify-exact",
-        });
-        const initiatingPrincipal = await resolveVerifiedPrincipal(new Request(
-          "https://into.example.com/api/exact/connect",
-          { headers: {
-            cookie: `into_verified_session=${verified.session.token}`,
-            "idempotency-key": "verified-exact-request",
-          } }
-        ), { repository: authRepository });
-        const callbackAuthorization = await createRealExactAuthorizationUrl(
-          getCompanyConnectionUserId(),
-          initiatingPrincipal
-        );
+        const callbackAuthorization = authorization;
         const decodedState = await verifyExactOAuthState(callbackAuthorization.state);
         assert.equal("principal" in decodedState, false);
-        if (decodedState.auth.kind !== "verified") throw new Error("Expected verified OAuth state.");
         assert.deepEqual(decodedState.auth, {
-          kind: "verified",
-          userId: initiatingPrincipal.actorId,
-          sessionId: initiatingPrincipal.sessionId,
+          kind: "shared",
           sessionCorrelationId: initiatingPrincipal.sessionCorrelationId,
           requestId: initiatingPrincipal.requestId,
-          repositoryIdentityHash: decodedState.auth.repositoryIdentityHash,
         });
-        assert.match(decodedState.auth.repositoryIdentityHash, /^[a-f0-9]{64}$/);
-        assert.doesNotMatch(JSON.stringify(decodedState), /Verified Exact Actor/);
+        assert.doesNotMatch(JSON.stringify(decodedState), /repositoryIdentityHash|displayName|email/);
         await assert.rejects(
           verifyExactOAuthState(`${callbackAuthorization.state.slice(0, -1)}x`),
           /signature is invalid/
@@ -292,7 +278,8 @@ test("uses Vercel Exact credentials for OAuth, encrypted tokens, refresh, and ma
           new Request(
             `https://into.example.com/api/exact/callback?code=authorization-code&state=${encodeURIComponent(
               callbackAuthorization.state
-            )}`
+            )}`,
+            { headers: sharedHeaders(token) }
           )
         );
         assert.equal(callbackResponse.status, 302);
@@ -372,7 +359,9 @@ test("uses Vercel Exact credentials for OAuth, encrypted tokens, refresh, and ma
           false
         );
 
-        const statusResponse = await exactStatus(new Request("http://localhost/api/exact/status"));
+        const statusResponse = await exactStatus(new Request("http://localhost/api/exact/status", {
+          headers: sharedHeaders(token),
+        }));
         const status = await statusResponse.json();
         const serializedStatus = JSON.stringify(status);
         assert.equal(status.configuration.ready, true);
@@ -395,18 +384,12 @@ test("uses Vercel Exact credentials for OAuth, encrypted tokens, refresh, and ma
         assert.equal(tokenRequests[1]?.get("grant_type"), "refresh_token");
       } finally {
         globalThis.fetch = originalFetch;
-        closeConfiguredAuthRepository();
-        setConfiguredAuthRepositoryFactoryForTest(undefined);
-        try { authRepository.close(); } catch { /* configured repository already closed it */ }
-        await rm(authPath, { force: true }).catch(() => undefined);
       }
     }
   );
 });
 
-test("Exact OAuth callback reauthorizes signed identifiers against current mode, repository, user, and session", async () => {
-  const path = resolve("data/tmp-tests", `exact-auth-${crypto.randomUUID()}.sqlite`);
-  const repository = new SqliteAuthRepository(path);
+test("Exact OAuth state requires the initiating shared password session regardless of old auth mode", async () => {
   await withExactEnv({
     NODE_ENV: "test",
     EXACT_ONLINE_MODE: "real",
@@ -416,51 +399,50 @@ test("Exact OAuth callback reauthorizes signed identifiers against current mode,
     EXACT_ONLINE_REDIRECT_URI: "https://into.example.test/api/exact/callback",
     OAUTH_TOKEN_ENCRYPTION_KEY: "test-token-encryption-key",
     OAUTH_STATE_SECRET: "test-oauth-state-secret",
-    AUTH_MODE: "verified_user",
-    INTO_INVITATION_SECRET: "test-only-invitation-secret-at-least-32-bytes",
-    DATABASE_MODE: "sqlite",
-    LOCAL_DATABASE_PATH: path,
+    AUTH_MODE: "legacy_password",
+    INTO_ACCESS_PASSWORD: "test-only-shared-password",
+    DATABASE_MODE: "memory",
   }, async () => {
-    const exactApi = await import("../lib/services/exact-api-client");
-    const reauthorize = (exactApi as typeof exactApi & {
-      reauthorizeExactOAuthState?: (state: string, now?: number) => Promise<unknown>;
-    }).reauthorizeExactOAuthState;
-    assert.equal(typeof reauthorize, "function");
-    await repository.migrate();
-    setConfiguredAuthRepositoryFactoryForTest(() => repository);
-    closeConfiguredAuthRepository();
-    const invitation = await createUserInvitation(repository, {
-      actorId: "bootstrap", actorName: "Bootstrap", accessLevel: "verified_user",
-      verificationState: "verified", sessionCorrelationId: "bootstrap", requestId: "invite",
-    }, {
-      email: "oauth-user@example.test", name: "OAuth User", requestKey: "oauth-user",
-    }, "https://into.example.test");
-    const verified = await verifyUserInvitation(repository, {
-      token: new URL(invitation.verificationUrl).searchParams.get("token")!,
-      displayName: "OAuth User", password: "correct horse battery staple", requestId: "verify",
+    const token = createIntoAccessSession();
+    const principal = sharedPrincipal(token);
+    const state = await createExactOAuthState(getCompanyConnectionUserId(), principal);
+    const request = new Request("https://into.example.test/api/exact/callback", {
+      headers: { ...sharedHeaders(token), "idempotency-key": "callback-request" },
     });
-    const request = new Request("https://into.example.test/api/exact/connect", {
-      headers: { cookie: `into_verified_session=${verified.session.token}`, "idempotency-key": "oauth-request" },
+    const decoded = await verifyExactOAuthState(state);
+    const historicalStatePayload = encodeExactStatePayload({
+      ...decoded,
+      auth: {
+        kind: "verified", userId: "retired-user", sessionId: "retired-session",
+        sessionCorrelationId: "verified-session", requestId: "retired-request",
+        repositoryIdentityHash: "a".repeat(64),
+      },
     });
-    const resolved = await resolveVerifiedPrincipal(request, { repository });
-    const principal = { ...resolved, sessionId: verified.session.sessionId };
-    const state = await exactApi.createExactOAuthState(getCompanyConnectionUserId(), principal);
-    const authorized = await reauthorize!(state) as { actorId: string; actorName: string };
-    assert.deepEqual({ actorId: authorized.actorId, actorName: authorized.actorName }, {
-      actorId: verified.user.id,
-      actorName: "OAuth User",
+    const historicalState = `${historicalStatePayload}.${await signExactState(historicalStatePayload)}`;
+    const legacyStatePayload = encodeExactStatePayload({
+      ...decoded, auth: { ...decoded.auth, kind: "legacy" },
     });
-
-    process.env.AUTH_MODE = "legacy_password";
-    await assert.rejects(reauthorize!(state), /state is no longer authorized/i);
-    process.env.AUTH_MODE = "verified_user";
-
-    process.env.LOCAL_DATABASE_PATH = `${path}.switched`;
-    await assert.rejects(reauthorize!(state), /state is no longer authorized/i);
-    process.env.LOCAL_DATABASE_PATH = path;
-
-    await revokeVerifiedSession(repository, verified.session.token);
-    await assert.rejects(reauthorize!(state), /state is no longer authorized/i);
+    const legacyState = `${legacyStatePayload}.${await signExactState(legacyStatePayload)}`;
+    const expiredPayload = encodeExactStatePayload({
+      ...decoded, issuedAt: Date.now() - 16 * 60 * 1000,
+    });
+    const expiredState = `${expiredPayload}.${await signExactState(expiredPayload)}`;
+    const futurePayload = encodeExactStatePayload({
+      ...decoded, issuedAt: Date.now() + 2 * 60 * 1000,
+    });
+    const futureState = `${futurePayload}.${await signExactState(futurePayload)}`;
+    const validCookie = sharedHeaders(token).cookie;
+    const blockedCallbacks = [
+      { state, cookie: undefined },
+      { state, cookie: sharedHeaders(createIntoAccessSession()).cookie },
+      { state, cookie: `${INTO_ACCESS_COOKIE_NAME}=expired.invalid.session` },
+      { state, cookie: "into_verified_session=v1.retired-personal-session" },
+      { state: historicalState, cookie: validCookie },
+      { state: legacyState, cookie: validCookie },
+      { state: expiredState, cookie: validCookie },
+      { state: futureState, cookie: validCookie },
+      { state: `${state}.invalid`, cookie: validCookie },
+    ];
     let tokenExchanges = 0;
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () => {
@@ -468,61 +450,55 @@ test("Exact OAuth callback reauthorizes signed identifiers against current mode,
       return Response.json({ access_token: "must-not-be-issued" });
     }) as typeof fetch;
     try {
-      const response = await exactCallback(new Request(
-        `https://into.example.test/api/exact/callback?code=blocked&state=${encodeURIComponent(state)}`
-      ));
-      assert.equal(response.headers.get("location"), "https://into.example.test/?exact=error");
+      for (const blocked of blockedCallbacks) {
+        const response = await exactCallback(new Request(
+          `https://into.example.test/api/exact/callback?code=blocked&state=${encodeURIComponent(blocked.state)}`,
+          { headers: blocked.cookie ? { cookie: blocked.cookie } : {} }
+        ));
+        assert.equal(tokenExchanges, 0);
+        assert.equal(response.headers.get("location"), "https://into.example.test/?exact=error");
+      }
       assert.equal(tokenExchanges, 0);
     } finally {
       globalThis.fetch = originalFetch;
     }
-
-    const fresh = await issueVerifiedSession(repository, verified.user.id);
-    const freshRequest = new Request("https://into.example.test/api/exact/connect", {
-      headers: { cookie: `into_verified_session=${fresh.token}` },
-    });
-    const freshPrincipal = {
-      ...await resolveVerifiedPrincipal(freshRequest, { repository }),
-      sessionId: fresh.sessionId,
-    };
-    const freshState = await exactApi.createExactOAuthState(getCompanyConnectionUserId(), freshPrincipal);
-    await assert.rejects(
-      reauthorize!(freshState, Date.now() + 13 * 60 * 60 * 1000),
-      /state is no longer authorized/i
-    );
-
-    const secondInvitation = await createUserInvitation(repository, freshPrincipal, {
-      email: "oauth-second@example.test", name: "OAuth Second", requestKey: "oauth-second",
-    }, "https://into.example.test");
-    const second = await verifyUserInvitation(repository, {
-      token: new URL(secondInvitation.verificationUrl).searchParams.get("token")!,
-      displayName: "OAuth Second", password: "another correct password", requestId: "verify-second",
-    });
-    const currentUser = (await repository.listUsers()).find((user) => user.id === verified.user.id)!;
-    await repository.updateUserStatus({
-      actorId: second.user.id,
-      targetId: currentUser.id,
-      expectedVersion: currentUser.version,
-      status: "disabled",
-      requestId: "disable-oauth-user",
-      sessionId: second.session.sessionId,
-      timestamp: new Date().toISOString(),
-    });
-    await assert.rejects(reauthorize!(freshState), /state is no longer authorized/i);
-
-    const legacyState = await exactApi.createExactOAuthState(getCompanyConnectionUserId(), {
-      actorId: "shared_user", actorName: "Shared access", accessLevel: "legacy_shared",
-      verificationState: "legacy", sessionCorrelationId: "legacy_session", requestId: "legacy-request",
-    });
-    process.env.AUTH_MODE = "dual";
-    assert.equal((await reauthorize!(legacyState) as { verificationState: string }).verificationState, "legacy");
-    process.env.AUTH_MODE = "verified_user";
-    await assert.rejects(reauthorize!(legacyState), /state is no longer authorized/i);
+    assert.equal((await verifyExactOAuthState(state)).auth.kind, "shared");
+    for (const mode of ["legacy_password", "dual", "verified_user", "obsolete-mode"]) {
+      process.env.AUTH_MODE = mode;
+      const authorized = await reauthorizeExactOAuthState(state, request);
+      assert.deepEqual(authorized, principal);
+      assert.equal(Object.isFrozen(authorized), true);
+    }
+    process.env.DATABASE_MODE = "postgres";
+    process.env.DATABASE_URL = "postgres://unavailable.example.test/auth";
+    assert.deepEqual(await reauthorizeExactOAuthState(state, request), principal);
+    process.env.INTO_ACCESS_PASSWORD = "rotated-shared-password";
+    await assert.rejects(reauthorizeExactOAuthState(state, request));
+    delete process.env.INTO_ACCESS_PASSWORD;
+    await assert.rejects(reauthorizeExactOAuthState(state, request));
   });
-  closeConfiguredAuthRepository();
-  setConfiguredAuthRepositoryFactoryForTest(undefined);
-  try { repository.close(); } catch { /* configured repository already closed it */ }
-  await rm(path, { force: true });
+});
+
+test("Exact OAuth creation rejects personal-user principals", async () => {
+  await withExactEnv({ OAUTH_STATE_SECRET: "test-oauth-state-secret" }, async () => {
+    await assert.rejects(createExactOAuthState(getCompanyConnectionUserId(), {
+      actorId: "retired-user", actorName: "Retired Person", accessLevel: "verified_user",
+      verificationState: "verified", sessionId: "retired-session",
+      sessionCorrelationId: "retired-correlation", requestId: "retired-request",
+    }), /shared password session/i);
+  });
+});
+
+test("development mock callback requires a shared password session", async () => {
+  await withExactEnv({
+    NODE_ENV: "development", DATABASE_MODE: "memory", EXACT_ONLINE_MODE: "mock",
+    INTO_ACCESS_PASSWORD: "test-only-shared-password",
+  }, async () => {
+    disconnectExactConnection();
+    const response = await exactCallback(new Request("http://localhost/api/exact/callback?code=mock"));
+    assert.equal(response.status, 401);
+    assert.equal(getExactConnection(), null);
+  });
 });
 
 test("rejects an email address used as the Exact OAuth Client ID", async () => {

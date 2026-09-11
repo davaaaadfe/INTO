@@ -35,7 +35,7 @@ async function repositoryWithActiveUser() {
   return { path, repository };
 }
 
-test("auth mode parsing fails closed in production", () => {
+test("historical auth mode parsing remains available for migration compatibility", () => {
   const environment = process.env as Record<string, string | undefined>;
   const previousNodeEnv = process.env.NODE_ENV;
   try {
@@ -54,7 +54,7 @@ test("auth mode parsing fails closed in production", () => {
   }
 });
 
-test("unsafe verified flows require configured exact origins and reject forwarded-host spoofing", () => {
+test("unsafe authenticated flows require configured exact origins and reject forwarded-host spoofing", () => {
   const previousOrigins = process.env.INTO_TRUSTED_ORIGINS;
   const previousContext = process.env.NODE_TEST_CONTEXT;
   delete process.env.NODE_TEST_CONTEXT;

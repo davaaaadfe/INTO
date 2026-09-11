@@ -21,6 +21,7 @@ import {
   updateInvoiceExtraction,
 } from "../lib/repository/invoice-store";
 import { createMockExactMasterData } from "../lib/services/exact-master-data-service";
+import { createIntoAccessSession } from "../lib/services/into-access-auth";
 
 let routeLearningInvoiceSequence = 0;
 
@@ -261,6 +262,7 @@ test("supplier learning read state stays off until both rollout flags are enable
   const original = {
     NODE_ENV: process.env.NODE_ENV,
     AUTH_MODE: process.env.AUTH_MODE,
+    INTO_ACCESS_PASSWORD: process.env.INTO_ACCESS_PASSWORD,
     LEARNING_V2_ENABLED: process.env.LEARNING_V2_ENABLED,
     LEARNING_UI_ENABLED: process.env.LEARNING_UI_ENABLED,
   };
@@ -268,10 +270,14 @@ test("supplier learning read state stays off until both rollout flags are enable
   try {
     Reflect.set(process.env, "NODE_ENV", "production");
     process.env.AUTH_MODE = "legacy_password";
+    process.env.INTO_ACCESS_PASSWORD = "test-shared-route-password";
+    const authenticatedRequest = () => new Request("http://localhost/api/suppliers/learning", {
+      headers: { cookie: `into_access_session=${createIntoAccessSession()}` },
+    });
     delete process.env.LEARNING_V2_ENABLED;
     delete process.env.LEARNING_UI_ENABLED;
 
-    const productionDefault = await listSupplierLearningRoute(new Request("http://localhost/api/suppliers/learning"));
+    const productionDefault = await listSupplierLearningRoute(authenticatedRequest());
     assert.deepEqual(await productionDefault.json(), {
       enabled: false,
       suppliers: [],
@@ -279,7 +285,7 @@ test("supplier learning read state stays off until both rollout flags are enable
 
     process.env.LEARNING_V2_ENABLED = "true";
     process.env.LEARNING_UI_ENABLED = "false";
-    const hiddenUi = await listSupplierLearningRoute(new Request("http://localhost/api/suppliers/learning"));
+    const hiddenUi = await listSupplierLearningRoute(authenticatedRequest());
     assert.deepEqual(await hiddenUi.json(), {
       enabled: false,
       suppliers: [],
@@ -287,14 +293,14 @@ test("supplier learning read state stays off until both rollout flags are enable
 
     process.env.LEARNING_V2_ENABLED = "false";
     process.env.LEARNING_UI_ENABLED = "true";
-    const disabledLearning = await listSupplierLearningRoute(new Request("http://localhost/api/suppliers/learning"));
+    const disabledLearning = await listSupplierLearningRoute(authenticatedRequest());
     assert.deepEqual(await disabledLearning.json(), {
       enabled: false,
       suppliers: [],
     });
 
     process.env.LEARNING_V2_ENABLED = "true";
-    const enabled = await listSupplierLearningRoute(new Request("http://localhost/api/suppliers/learning"));
+    const enabled = await listSupplierLearningRoute(authenticatedRequest());
     const payload = (await enabled.json()) as {
       enabled?: boolean;
       suppliers?: unknown[];

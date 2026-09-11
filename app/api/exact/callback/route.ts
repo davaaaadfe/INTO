@@ -3,7 +3,6 @@ import {
   setExactConnection,
   syncExactDataNow,
 } from "../../../../lib/repository/invoice-store";
-import { withPublicPersistentStore } from "../../../../lib/repository/persistent-request";
 import { withPersistentStore } from "../../../../lib/repository/persistent-request";
 import { createMockExactConnection } from "../../../../lib/services/exact-online-service";
 import {
@@ -34,7 +33,7 @@ export async function GET(request: Request) {
         throw new Error("Exact OAuth callback is missing code or state.");
       }
 
-      const principal = await reauthorizeExactOAuthState(state);
+      const principal = await reauthorizeExactOAuthState(state, request);
       const verifiedState = await verifyExactOAuthState(state);
       return withPersistentStore(async () => {
         const connection = setExactConnection(
@@ -67,7 +66,7 @@ export async function GET(request: Request) {
     );
   }
 
-  return withPublicPersistentStore(async () => {
+  return withPersistentStore(async () => {
     const hasCode = Boolean(code);
     const connection = setExactConnection(
       createMockExactConnection(getCompanyConnectionUserId())

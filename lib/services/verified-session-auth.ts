@@ -13,6 +13,7 @@ import {
 import { configuredAuthRepository } from "../repository/configured-auth-repository";
 import {
   INTO_ACCESS_COOKIE_NAME,
+  accessSessionCorrelationId,
   isIntoAccessPasswordConfigured,
   verifyIntoAccessSession,
 } from "./into-access-auth";
@@ -327,6 +328,7 @@ export class RequestAuthenticationError extends Error {
   }
 }
 
+/** Historical migration compatibility only; request access is always password-only. */
 export function parseAuthMode(value = process.env.AUTH_MODE): AuthMode {
   return value === "dual" || value === "verified_user" || value === "legacy_password"
     ? value
@@ -470,10 +472,10 @@ export async function resolveVerifiedPrincipal(
   });
 }
 
-function legacyPrincipal(request: Request): LegacyPrincipal {
+function legacyPrincipal(request: Request, now = Date.now()): LegacyPrincipal {
   const token = cookieFromRequest(request, INTO_ACCESS_COOKIE_NAME);
   if (!isIntoAccessPasswordConfigured()) {
-    if (testLegacyPrincipalEnabled) {
+    if (testLegacyPrincipalEnabled && process.env.NODE_ENV !== "production") {
       return Object.freeze({
         actorId: "shared_user",
         actorName: "Shared access",
@@ -485,13 +487,13 @@ function legacyPrincipal(request: Request): LegacyPrincipal {
     }
     throw new RequestAuthenticationError(503);
   }
-  if (!verifyIntoAccessSession(token)) throw new RequestAuthenticationError(401);
+  if (!verifyIntoAccessSession(token, now)) throw new RequestAuthenticationError(401);
   return Object.freeze({
     actorId: "shared_user",
     actorName: "Shared access",
     accessLevel: "legacy_shared",
     verificationState: "legacy",
-    sessionCorrelationId: "legacy_session",
+    sessionCorrelationId: accessSessionCorrelationId(token, now)!,
     requestId: requestIdFor(request),
   });
 }
@@ -500,12 +502,8 @@ export async function resolveRequestPrincipal(
   request: Request,
   options: { mode?: AuthMode; repository?: AuthRepository; now?: number } = {}
 ): Promise<RequestPrincipal> {
-  const mode = options.mode ?? parseAuthMode();
-  if (mode === "legacy_password") return legacyPrincipal(request);
-  const verifiedToken = cookieFromRequest(request, VERIFIED_SESSION_COOKIE_NAME);
-  if (verifiedToken) return resolveVerifiedPrincipal(request, options);
-  if (mode === "dual") return legacyPrincipal(request);
-  return resolveVerifiedPrincipal(request, options);
+  // AUTH_MODE and personal cookies cannot re-enable the retired account workflow.
+  return legacyPrincipal(request, options.now);
 }
 
 function trustedOrigins(request: Request) {
@@ -523,7 +521,8 @@ function trustedOrigins(request: Request) {
   const url = new URL(request.url);
   const local = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
   const trusted = [...configured, ...platform];
-  const source = trusted.length ? trusted : local || testLegacyPrincipalEnabled ? [url.origin] : [];
+  const testOrigin = testLegacyPrincipalEnabled && process.env.NODE_ENV !== "production";
+  const source = trusted.length ? trusted : local || testOrigin ? [url.origin] : [];
   return new Set(source.flatMap((origin) => {
     try {
       return [new URL(origin).origin];
@@ -545,7 +544,7 @@ export async function withVerifiedPersistentRequest<T>(
 ): Promise<T | Response> {
   try {
     const principal = await resolveRequestPrincipal(request);
-    if (parseAuthMode() !== "legacy_password") requireSameOrigin(request);
+    if (isIntoAccessPasswordConfigured() || process.env.NODE_ENV === "production") requireSameOrigin(request);
     return await handler(principal);
   } catch (error) {
     if (error instanceof RequestAuthenticationError) {

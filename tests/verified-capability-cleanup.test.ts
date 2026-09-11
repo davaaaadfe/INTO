@@ -14,7 +14,7 @@ function sourceFiles(directory: string): string[] {
   });
 }
 
-test("live code has one verified human capability level", () => {
+test("live code does not branch on human roles or permissions", () => {
   for (const file of ["app", "components", "lib"].flatMap(sourceFiles)) {
     assert.doesNotMatch(
       readFileSync(file, "utf8"),

@@ -1,5 +1,7 @@
 # Hardening progress — 2026-09-08
 
+Historical checkpoint: the later password-only decision supersedes this note's second-user and verified-auth recovery requirements. Follow the current release runbook; do not create accounts to satisfy this older checklist.
+
 ## Implemented in this working batch
 
 - Durable booking reservation before every real Exact POST sequence, using the existing SQLite/PostgreSQL snapshot CAS rather than a parallel persistence store.

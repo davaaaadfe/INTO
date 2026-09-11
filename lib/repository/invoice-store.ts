@@ -192,7 +192,7 @@ function userDisplayName(user: IntoUser | null | undefined) {
 
 function mutationUser(): IntoUser {
   const principal = currentRequestPrincipal();
-  if (!principal || principal.accessLevel === "legacy_shared") return getCurrentUser();
+  if (!principal) return getCurrentUser();
   const timestamp = now();
   return {
     id: principal.actorId,

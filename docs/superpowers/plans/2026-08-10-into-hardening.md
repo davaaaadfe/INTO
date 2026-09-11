@@ -1,5 +1,9 @@
 # INTO Supplier Learning, Document Intelligence, and Verified-User Hardening
 
+## Superseding access decision — September 2026
+
+The user replaced the per-person requirement with shared-password-only entrance and equal access to all human workflows. No email, ID, display name, invitation, Users UI, or second recovery user is required. Existing `AUTH_MODE` settings do not change this behavior. Keep signed expiring sessions, same-origin checks, bounded password attempts, and opaque audit/session correlation. Historical personal records remain stored but cannot authenticate; do not purge history. Storage cleanup remains machine-only. Tasks 2–4 below document earlier completed compatibility work, not a requirement to restore account login. Task 20 now means eliminating human permission differences while retaining shared access. See the current release runbook for deployment instructions.
+
 ## Global constraints
 
 - Work directly in the current checkout on `main`, as explicitly approved by the user.
@@ -8,11 +12,11 @@
 - Never allow `Learned` or `learning_only` invoices to reach Exact, regardless of flags.
 - First unfamiliar supplier or document format always requires user-driven Exact supplier search; never show proactive ranked candidates.
 - Later auto-selection requires prior explicit supplier/format confirmation, confidence at least `0.90`, margin at least `0.12`, no hard-identifier conflict, and either one unique hard identifier or two independent soft-signal families. BIC is support only.
-- All authenticated people use the single `verified_user` access level. Deny unauthenticated, unverified, or disabled people server-side. Never persist a raw cookie/token/password.
+- All valid shared-password sessions have the same human access. Deny missing, expired, or tampered shared sessions server-side; old personal-session cookies cannot unlock INTO. Never persist a raw cookie/token/password in the database or audits.
 - Learning patterns are evidence and may not bypass deterministic accounting, VAT, duplicate, Exact-account, required-field, or line-balance validation.
 - Use existing SQLite/PostgreSQL drivers and existing normalized learning tables; do not make Drizzle authoritative.
 - The durable runtime snapshot must remain compact. Important writes are idempotent, optimistic-concurrency-safe, and atomic across snapshot/core learning state.
-- Preserve audit history and historical `shared_user` attribution; new operations carry verified actor, request, and opaque session correlation.
+- Preserve audit history and historical attribution; new operations carry the Shared access actor, request, and opaque session correlation, without claiming to identify a person.
 - Follow strict TDD: add a focused failing test, verify the expected failure, then implement the minimum passing production change.
 - Production-only decisions that still require human approval remain safely disabled behind configuration.
 

@@ -53,7 +53,6 @@ import {
   zoomFromWheel,
 } from "../lib/services/preview-pan";
 import { readApiJson } from "../lib/utils/api-response";
-import { IntoUsersPanel } from "./into-users-panel";
 
 type ApiState = {
   invoices: UploadedInvoice[];
@@ -96,8 +95,7 @@ type UploadItem = {
 type ButtonFeedback = "success" | "error";
 type PreviewFileStatus = "checking" | "available" | "missing";
 type ResolvedPreviewFileStatus = Exclude<PreviewFileStatus, "checking">;
-type ActiveView = "queue" | "archive" | "supplier-learning" | "users";
-type SafeActor = { id: string; email: string; displayName: string; status: string; version: number };
+type ActiveView = "queue" | "archive" | "supplier-learning";
 type SupplierLearningDetail = {
   profile: SupplierLearningSummary;
   clusters: Array<{ id: string; exampleCount: number }>;
@@ -1335,8 +1333,6 @@ export function IntoWorkbench() {
     status: ResolvedPreviewFileStatus;
   } | null>(null);
   const [activeView, setActiveView] = useState<ActiveView>("queue");
-  const [actor, setActor] = useState<SafeActor | null>(null);
-  const [canInviteUsers, setCanInviteUsers] = useState(false);
   const [archiveFilters, setArchiveFilters] =
     useState<ArchiveFilterState>(defaultArchiveFilters);
   const [archive, setArchive] = useState<InvoiceArchiveResult | null>(null);
@@ -1349,7 +1345,6 @@ export function IntoWorkbench() {
   const availableViews: ActiveView[] = state.supplierLearningEnabled
     ? ["queue", "archive", "supplier-learning"]
     : ["queue", "archive"];
-  if (actor || canInviteUsers) availableViews.push("users");
   const visibleActiveView =
     activeView === "supplier-learning" && !state.supplierLearningEnabled
       ? "queue"
@@ -2255,25 +2250,6 @@ export function IntoWorkbench() {
     return () => window.clearTimeout(timeoutId);
     // Run once on mount; refreshAll updates the state this effect would otherwise depend on.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    const timeoutId = window.setTimeout(() => {
-      fetch("/api/access/session")
-        .then((response) => response.json())
-        .then((body: {
-          user?: SafeActor | null;
-          capabilities?: { canInviteUsers?: boolean };
-        }) => {
-          setActor(body.user ?? null);
-          setCanInviteUsers(body.capabilities?.canInviteUsers === true);
-        })
-        .catch(() => {
-          setActor(null);
-          setCanInviteUsers(false);
-        });
-    }, 0);
-    return () => window.clearTimeout(timeoutId);
   }, []);
 
   useEffect(() => {
@@ -3794,7 +3770,7 @@ export function IntoWorkbench() {
             </div>
             <div className="flex justify-end">
               <span className="mr-3 self-center text-sm text-stone-600">
-                {actor ? `Signed in as ${actor.displayName}` : "Shared access"}
+                Shared access
               </span>
               <ActionButton
                 variant="ghost"
@@ -3803,7 +3779,7 @@ export function IntoWorkbench() {
                 disabled={busy === "lock-into"}
                 disabledReason="INTO is being locked."
               >
-                {actor ? "Logout" : "Lock INTO"}
+                Lock INTO
               </ActionButton>
             </div>
           </div>
@@ -4185,14 +4161,10 @@ export function IntoWorkbench() {
                 ? "Processing queue"
                 : view === "archive"
                   ? "Invoice archive"
-                  : view === "users"
-                    ? "Users"
-                    : "Supplier learning"}
+                  : "Supplier learning"}
             </ActionButton>
           ))}
         </div>
-
-        {visibleActiveView === "users" ? <IntoUsersPanel bootstrapOnly={!actor} /> : null}
 
         {visibleActiveView === "archive" ? (
           <section className="rounded-lg border border-stone-300 bg-white p-4">
